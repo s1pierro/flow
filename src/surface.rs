@@ -24,7 +24,8 @@
 //! L'application appelle `frame` (disposition, barres, gestes) avant de dessiner le
 //! contenu des fenêtres, puis `dessus` (aperçu du partage, menu), qui passe au-dessus de
 //! tout. Les changements (fenêtre partagée, fermée, vue changée) se lisent avec
-//! `changements`, et la disposition s'écrit et se relit en texte (`ecrire`, `lire`).
+//! `changements`, et la disposition s'écrit et se relit en texte (`ecrire_avec`,
+//! `lire_avec`, qui nomment les vues comme l'application le veut).
 
 use crate::draw::Rect;
 use crate::ui::{id, sub_id, Id, Sense};
@@ -193,21 +194,21 @@ impl Noeud {
         }
     }
 
-    fn ecrire(&self, s: &mut String) {
+    fn ecrire(&self, s: &mut String, nom: &dyn Fn(u32) -> String) {
         match self {
-            Noeud::Fenetre { id, vue } => s.push_str(&format!("F{id}:{vue}")),
+            Noeud::Fenetre { id, vue } => s.push_str(&format!("F{id}:{}", nom(*vue))),
             Noeud::Partage { sens, ratio, a, b } => {
                 s.push(if *sens == Sens::Colonnes { 'C' } else { 'L' });
                 s.push_str(&format!("{ratio:.4}("));
-                a.ecrire(s);
+                a.ecrire(s, nom);
                 s.push(',');
-                b.ecrire(s);
+                b.ecrire(s, nom);
                 s.push(')');
             }
         }
     }
 
-    fn lire(s: &mut &str) -> Option<Noeud> {
+    fn lire(s: &mut &str, vue_de: &dyn Fn(&str) -> Option<u32>) -> Option<Noeud> {
         let c = s.chars().next()?;
         *s = &s[c.len_utf8()..];
         let nombre = |s: &mut &str| -> Option<f64> {
@@ -220,15 +221,18 @@ impl Noeud {
             'F' => {
                 let id = nombre(s)? as FenetreId;
                 *s = s.strip_prefix(':')?;
-                let vue = nombre(s)? as u32;
+                // La vue : un numéro ou une clé (lettres, chiffres, - et _)
+                let n = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')).unwrap_or(s.len());
+                let vue = vue_de(&s[..n])?;
+                *s = &s[n..];
                 Some(Noeud::Fenetre { id, vue })
             }
             'C' | 'L' => {
                 let ratio = (nombre(s)? as f32).clamp(MIN, MAX);
                 *s = s.strip_prefix('(')?;
-                let a = Noeud::lire(s)?;
+                let a = Noeud::lire(s, vue_de)?;
                 *s = s.strip_prefix(',')?;
-                let b = Noeud::lire(s)?;
+                let b = Noeud::lire(s, vue_de)?;
                 *s = s.strip_prefix(')')?;
                 Some(Noeud::Partage { sens: if c == 'C' { Sens::Colonnes } else { Sens::Lignes }, ratio, a: Box::new(a), b: Box::new(b) })
             }
@@ -364,15 +368,26 @@ impl Surface {
 
     /// La disposition en texte, par exemple `C0.3000(F2:0,L0.5000(F3:1,F1:0))`.
     pub fn ecrire(&self) -> String {
+        self.ecrire_avec(&|v| v.to_string())
+    }
+
+    /// La disposition en texte, chaque vue écrite par `nom` (une clé, par exemple :
+    /// `C0.3000(F2:cube,F1:aide)`).
+    pub fn ecrire_avec(&self, nom: &dyn Fn(u32) -> String) -> String {
         let mut s = String::new();
-        self.racine.ecrire(&mut s);
+        self.racine.ecrire(&mut s, nom);
         s
     }
 
     /// Relit `ecrire` ; rien si le texte ne se tient pas.
     pub fn lire(texte: &str) -> Option<Surface> {
+        Surface::lire_avec(texte, &|t| t.parse().ok())
+    }
+
+    /// Relit `ecrire_avec` : `vue_de` retrouve la vue d'après ce qui a été écrit.
+    pub fn lire_avec(texte: &str, vue_de: &dyn Fn(&str) -> Option<u32>) -> Option<Surface> {
         let mut s = texte.trim();
-        let racine = Noeud::lire(&mut s)?;
+        let racine = Noeud::lire(&mut s, vue_de)?;
         s.is_empty().then(|| Surface::de(racine))
     }
 
@@ -673,6 +688,12 @@ mod tests {
         let r = Surface::lire(&t).unwrap();
         assert_eq!(r.racine, s.racine);
         assert!(Surface::lire("C0.3(F1:0").is_none());
+        // Avec des noms de vues
+        let noms = ["cube", "liste"];
+        let t = s.ecrire_avec(&|v| noms[v as usize].to_string());
+        assert_eq!(t, "C0.3000(F2:cube,L0.5000(F3:liste,F1:cube))");
+        let r = Surface::lire_avec(&t, &|n| noms.iter().position(|x| *x == n).map(|i| i as u32)).unwrap();
+        assert_eq!(r.racine, s.racine);
         assert!(Surface::lire("n'importe quoi").is_none());
     }
 

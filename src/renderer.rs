@@ -1,7 +1,7 @@
 //! Tout OpenGL est ici : la 3D dans chaque vue de l'espace de travail, puis
 //! l'interface par-dessus, sur tout l'écran.
 
-use crate::demo::Scene;
+use crate::contexte::Scene;
 use crate::draw::{DrawList, Rect, Vertex};
 use crate::gles::GlApi;
 use crate::text::{Text, ATLAS};

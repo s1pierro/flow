@@ -1,10 +1,22 @@
 # Flow
 
-Application Android en Rust, née d'une copie de
-[Rustine](https://github.com/s1pierro/Rustine) 0.8 : interface tactile et 3D en
-OpenGL ES, fenêtres, clavier, audio, explorateur de fichiers.
+Une *application d'exploitation* pour Android, en Rust : l'écran se partage en
+fenêtres, et chaque fenêtre montre un **contexte**, une sous-application, pour
+composer son espace de travail à son goût. Née d'une copie de
+[Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
-Package `fr.s1pierro.flow`, réglages dans `Flow/` à la racine du stockage.
+Contextes : Cube (3D), Couleurs, Aide, Paramètres, Radio (et mixeur), Fichiers,
+Disque. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
+Fichiers parcourent chacune leur dossier. Viendront l'édition de texte et de SVG.
+
+Package `fr.s1pierro.flow`. Dans `Flow/` à la racine du stockage :
+
+- `interface.txt` : l'apparence et le clavier ;
+- `espace.txt` : les fenêtres, leur contexte et leur état, retrouvés au lancement
+  suivant.
+
+Les deux se modifient à la main. Pour écrire un nouveau contexte, voir
+[`docs/contextes.md`](docs/contextes.md).
 
 ## Construire
 

@@ -3,7 +3,8 @@
 //!
 //!   cargo run --example apercu -- <dossier>
 
-use flow::demo::App;
+use flow::app::App;
+use flow::contextes::indice;
 use flow::draw::{DrawList, Rect};
 use flow::gles::{load_gl, Egl};
 use flow::renderer::Renderer;
@@ -53,8 +54,8 @@ fn main() {
             use flow::surface::Sens;
             app.surface.partager(1, Sens::Colonnes, 0.6);
             let liste = app.surface.partager(1, Sens::Lignes, 0.55).unwrap();
-            app.surface.changer_vue(liste, flow::demo::VUE_COULEURS);
-            app.surface.changer_vue(1, flow::demo::VUE_AIDE);
+            app.surface.changer_vue(liste, indice("couleurs").unwrap());
+            app.surface.changer_vue(1, indice("aide").unwrap());
         }
 
         if let Some(d) = s.disque {
@@ -62,8 +63,8 @@ fn main() {
             use flow::surface::Sens;
             app.racine_en(Some(d.into()));
             let f = app.surface.partager(1, Sens::Colonnes, 0.62).unwrap();
-            app.surface.changer_vue(1, flow::demo::VUE_DISQUE);
-            app.surface.changer_vue(f, flow::demo::VUE_FICHIERS);
+            app.surface.changer_vue(1, indice("disque").unwrap());
+            app.surface.changer_vue(f, indice("fichiers").unwrap());
         }
 
         let mut scene = None;

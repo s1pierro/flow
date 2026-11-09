@@ -3,15 +3,20 @@
 //! - `gles`, `renderer`, `android` : ce qui touche à OpenGL ES et à Android ;
 //! - `draw`, `text`, `ui`, `widgets`, `shell` : l'interface, sans aucun appel
 //!   OpenGL, donc testable sur n'importe quelle machine ;
-//! - `demo` : l'application de démonstration.
+//! - `contexte`, `contextes` : les sous-applications que montrent les fenêtres ;
+//! - `espace` : l'espace de travail enregistré dans un fichier texte ;
+//! - `app` : l'application, qui réunit tout.
 
 pub mod acces;
+pub mod app;
 pub mod android;
 pub mod audio;
 pub mod clavier;
-pub mod demo;
+pub mod contexte;
+pub mod contextes;
 pub mod disque;
 pub mod draw;
+pub mod espace;
 pub mod explorateur;
 pub mod gles;
 pub mod math;

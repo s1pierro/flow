@@ -5,7 +5,7 @@
 
 #![allow(non_camel_case_types)]
 
-use crate::demo::App;
+use crate::app::App;
 use crate::draw::{DrawList, Rect};
 use crate::gles::{load_gl, Egl};
 use crate::reglages::{Fichier, NOM};
@@ -173,6 +173,10 @@ fn render_loop() -> Result<(), String> {
     let mut last = Instant::now();
     let mut again = false; // la dernière image demande à être suivie d'une autre
     let mut fichier: Option<Fichier> = None;
+    // L'espace de travail, à côté des réglages ; enregistré au plus toutes les quelques
+    // secondes pendant une animation
+    let mut espace: Option<crate::espace::Fichier> = None;
+    let mut sauve = Instant::now();
     // L'heure et la batterie de la barre : relues à chaque minute, et l'écran redessiné
     let (vm, activite) = {
         let s = SHARED.lock().unwrap();
@@ -210,6 +214,7 @@ fn render_loop() -> Result<(), String> {
         };
         if fichier.as_ref().map(|f| &f.chemin) != chemin.as_ref() {
             // Le nouveau fichier part des réglages actuels s'il n'existe pas encore
+            espace = chemin.as_ref().and_then(|c| c.parent()).map(|d| crate::espace::Fichier::new(d.join(crate::espace::NOM)));
             fichier = chemin.map(Fichier::new);
             relire = true;
         }
@@ -220,6 +225,12 @@ fn render_loop() -> Result<(), String> {
                 egl.detach();
             }
             if window.is_null() {
+                // L'application passe en arrière-plan : l'espace est enregistré tel quel
+                if let (Some((a, _)), Some(f)) = (app.as_ref(), espace.as_mut()) {
+                    if let Err(e) = f.suivre(&a.espace()) {
+                        log(&format!("espace non enregistré : {e}"));
+                    }
+                }
                 SHARED.lock().unwrap().released = true;
                 WAKE.notify_all();
                 continue;
@@ -248,7 +259,16 @@ fn render_loop() -> Result<(), String> {
             if let Some(r) = fichier.as_mut().and_then(|f| f.relire()) {
                 app.appliquer(r);
             }
-            app.fichier_reglages = fichier.as_ref().map(|f| f.chemin.display().to_string());
+            app.commun.fichier_reglages = fichier.as_ref().map(|f| f.chemin.display().to_string());
+            app.commun.fichier_espace = espace.as_ref().map(|f| f.chemin.display().to_string());
+            // L'espace de travail, s'il a changé sur le disque (au premier lancement, ou
+            // modifié à la main) ; sinon les fenêtres relisent ce qui a pu changer
+            if let Some(f) = espace.as_mut() {
+                if let Some(t) = f.relire() {
+                    app.ouvrir_espace(&t);
+                    f.connaitre(app.espace());
+                }
+            }
             app.racine_en(racine.clone());
             // L'historique des radios vit à côté des réglages de l'interface
             if let Some(d) = fichier.as_ref().and_then(|f| f.chemin.parent()) {
@@ -273,6 +293,15 @@ fn render_loop() -> Result<(), String> {
             if let Some(Err(e)) = fichier.as_mut().map(|f| f.suivre(&app.reglages())) {
                 log(&format!("réglages non enregistrés : {e}"));
                 fichier = None;
+            }
+            // L'espace aussi, mais au plus toutes les 5 s tant qu'une fenêtre s'anime
+            // (un cube qui tourne change sa caméra à chaque image)
+            if !app.animating() || sauve.elapsed() > Duration::from_secs(5) {
+                sauve = Instant::now();
+                if let Some(Err(e)) = espace.as_mut().map(|f| f.suivre(&app.espace())) {
+                    log(&format!("espace non enregistré : {e}"));
+                    espace = None;
+                }
             }
         }
         render.draw(w, h, &scene, &dl, &mut text);
