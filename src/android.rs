@@ -295,7 +295,7 @@ fn render_loop() -> Result<(), String> {
                 fichier = None;
             }
             // L'espace aussi, mais au plus toutes les 5 s tant qu'une fenêtre s'anime
-            // (un cube qui tourne change sa caméra à chaque image)
+            // (une animation peut changer l'état à chaque image)
             if !app.animating() || sauve.elapsed() > Duration::from_secs(5) {
                 sauve = Instant::now();
                 if let Some(Err(e)) = espace.as_mut().map(|f| f.suivre(&app.espace())) {
@@ -304,7 +304,7 @@ fn render_loop() -> Result<(), String> {
                 }
             }
         }
-        render.draw(w, h, &scene, &dl, &mut text);
+        render.draw(w, h, scene.fond, &dl, &mut text);
         egl.swap();
         // Après une rotation, la nouvelle taille n'est connue qu'ici ; et un appui change
         // l'état après le dessin du widget, qu'il faut redessiner à jour.

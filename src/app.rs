@@ -1,35 +1,43 @@
 //! L'application : l'espace de travail partagé en fenêtres, chacune portant une
-//! instance de contexte (`contexte`, `contextes`), un panneau de chaque côté, et en bas
-//! de l'écran la barre de l'application : ses pastilles aplaties (le logo, les
-//! panneaux), l'heure et la batterie. Le bas de l'écran est réservé aux gestes du
-//! système, mais les appuis y restent disponibles.
+//! instance de contexte (`contexte`, `contextes`), le panneau latéral (paramètres de
+//! l'application, aide, à propos), et en bas de l'écran la barre de l'application :
+//! ses pastilles aplaties (le logo, les paramètres, l'aide), l'heure et la batterie.
+//! Le bas de l'écran est réservé aux gestes du système, mais les appuis y restent
+//! disponibles.
 //!
 //! L'espace (disposition, contexte et état de chaque fenêtre) s'écrit en texte avec
 //! `espace` et se relit avec `ouvrir_espace` ; c'est le fichier `espace.txt`.
 
-use crate::contexte::{Atelier, Commun, Contexte, Etat, Scene, COULEURS};
+use crate::clavier::Edition;
+use crate::contexte::{Commun, Contexte, Etat};
 use crate::contextes::{self, GENRES};
-use crate::draw::Rect;
+use crate::draw::{Color, Rect};
 use crate::espace::Espace;
+use crate::parametres;
 use crate::reglages::Reglages;
 use crate::shell::{Layout, Shell, Side};
 use crate::surface::{Changement, FenetreId, Placee, Surface};
 use crate::ui::{id, sub_id, Id};
-use crate::widgets::{Cx, Icon, Theme};
+use crate::widgets::{Cx, Icon};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub use crate::contexte::Vue3d;
-
-const OBJECTS: Id = id("objets");
-const DISPLAY: Id = id("affichage");
+const PARAMETRES: Id = id("parametres");
 const HELP: Id = id("aide");
 const BARRE: Id = id("barre-application");
 const LOGO: Id = id("logo");
 
-#[derive(Clone, Copy, PartialEq)]
+/// Ce que le moteur de rendu doit savoir de l'image : l'espace de travail, et le
+/// fond de l'écran.
+#[derive(Clone, Copy, Debug)]
+pub struct Scene {
+    pub workspace: Rect,
+    pub fond: Color,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum EndContent {
-    Display,
+    Parametres,
     Help,
     APropos,
 }
@@ -47,7 +55,9 @@ pub struct App {
     pub heure: Option<(u8, u8)>,
     pub batterie: Option<(u8, bool)>,
     end_content: EndContent,
-    display_tab: usize,
+    /// L'onglet ouvert du panneau des paramètres, et son champ d'essai du clavier.
+    onglet_parametres: usize,
+    essai: Edition,
 }
 
 impl App {
@@ -59,8 +69,9 @@ impl App {
             fenetres: HashMap::new(),
             heure: None,
             batterie: None,
-            end_content: EndContent::Display,
-            display_tab: 0,
+            end_content: EndContent::Parametres,
+            onglet_parametres: 0,
+            essai: Edition::default(),
         }
     }
 
@@ -92,12 +103,9 @@ impl App {
         self.commun.clavier.reglages = r.clavier;
     }
 
-    /// L'espace de travail en texte : la disposition, ce qui est commun, et l'état de
-    /// chaque fenêtre.
+    /// L'espace de travail en texte : la disposition et l'état de chaque fenêtre.
     pub fn espace(&self) -> String {
         let fenetres = self.surface.ecrire_avec(&|v| contextes::genre(v).cle.to_string());
-        let mut commun = Etat::default();
-        self.commun.atelier.ecrire(&mut commun);
         let sections = self
             .surface
             .disposer(Rect::default())
@@ -110,14 +118,13 @@ impl App {
                 (f, e)
             })
             .collect();
-        Espace { fenetres: Some(fenetres), commun, sections }.ecrire()
+        Espace { fenetres: Some(fenetres), commun: Etat::default(), sections }.ecrire()
     }
 
     /// Rouvre un espace de travail écrit par `espace`. Une disposition illisible garde
     /// les fenêtres actuelles ; un contexte inconnu devient le contexte de repli.
     pub fn ouvrir_espace(&mut self, texte: &str) {
         let e = Espace::lire(texte);
-        self.commun.atelier = Atelier::lire(&e.commun);
         let repli = contextes::indice(contextes::REPLI).unwrap_or(0);
         let Some(s) = e.fenetres.as_deref().and_then(|t| Surface::lire_avec(t, &|n| Some(contextes::indice(n).unwrap_or(repli)))) else { return };
         self.surface = s;
@@ -141,10 +148,17 @@ impl App {
         self.commun.historique = crate::radio::Historique::ouvrir(chemin);
     }
 
-    /// Les frappes du clavier vont à l'instance qui possède le champ ciblé.
+    /// Les frappes du clavier vont au champ ciblé : celui d'essai du panneau des
+    /// paramètres, ou celui de l'instance qui le possède.
     fn frappes(&mut self, cx: &mut Cx, zone: Rect, dt: f32) {
         for frappe in self.commun.clavier.saisir(cx, zone, dt) {
             let Some(cible) = self.commun.clavier.cible else { continue };
+            if cible == parametres::ESSAI {
+                if self.essai.appliquer(frappe) {
+                    self.commun.clavier.fermer();
+                }
+                continue;
+            }
             for (f, i) in self.fenetres.iter_mut() {
                 if i.frappe(*f, cible, frappe, &mut self.commun) {
                     break;
@@ -219,7 +233,6 @@ impl App {
         self.surface.dessus(cx, &vues);
         self.barre(cx, barre);
 
-        self.start_panel(cx, &l);
         self.end_panel(cx, &l);
         self.handles(cx, &l, screen);
         // Flottant, le clavier déclare ses touches en dernier : elles passent devant tout
@@ -227,13 +240,11 @@ impl App {
             self.frappes(cx, zone_clavier, dt);
         }
         self.commun.clavier.dessiner(cx);
-        let mut scene = self.scene(l.workspace, &placees);
-        scene.fond = cx.couleurs().fond;
-        scene
+        Scene { workspace: l.workspace, fond: cx.couleurs().fond }
     }
 
-    /// La barre de l'application : pastilles aplaties à gauche (le logo, puis les
-    /// panneaux), l'heure et la batterie à droite.
+    /// La barre de l'application : pastilles aplaties à gauche (le logo, les
+    /// paramètres, l'aide), l'heure et la batterie à droite.
     fn barre(&mut self, cx: &mut Cx, r: Rect) {
         if r.h < 1.0 {
             return;
@@ -247,13 +258,10 @@ impl App {
         if cx.pastille_plate(LOGO, case(0.0), Icon::Rustine, end && content == EndContent::APropos) {
             self.toggle_end(EndContent::APropos);
         }
-        if cx.pastille_plate(OBJECTS, case(1.0), Icon::List, self.shell.start.open) {
-            self.shell.start.toggle();
+        if cx.pastille_plate(PARAMETRES, case(1.0), Icon::Sliders, end && content == EndContent::Parametres) {
+            self.toggle_end(EndContent::Parametres);
         }
-        if cx.pastille_plate(DISPLAY, case(2.0), Icon::Sliders, end && content == EndContent::Display) {
-            self.toggle_end(EndContent::Display);
-        }
-        if cx.pastille_plate(HELP, case(3.0), Icon::Help, end && content == EndContent::Help) {
+        if cx.pastille_plate(HELP, case(2.0), Icon::Help, end && content == EndContent::Help) {
             self.toggle_end(EndContent::Help);
         }
         // À droite : la batterie, puis l'heure tout au bord
@@ -303,28 +311,6 @@ impl App {
         (Rect::new(r.x + 12.0 * d, r.y + 6.0 * d, r.w - h - 30.0 * d, h), Rect::new(r.x, r.y + head, r.w, r.h - head), clicked)
     }
 
-    fn start_panel(&mut self, cx: &mut Cx, l: &Layout) {
-        if self.shell.start.anim == 0.0 {
-            return;
-        }
-        let r = l.start;
-        self.panel_frame(cx, id("panneau-debut"), r, Side::Start, l.landscape);
-        let (tabs, body, close) = self.panel_header(cx, id("fermer-debut"), r);
-        if close {
-            self.shell.start.open = false;
-        }
-        cx.tabs(id("onglets-debut"), tabs.x, tabs.y, &["Couleurs"], 0);
-        let scroll = id("liste-couleurs");
-        let c = &mut self.commun;
-        let mut b = cx.body(scroll, body, &c.scrolls);
-        for (i, (name, color)) in COULEURS.iter().enumerate() {
-            if cx.row(&mut b, sub_id(scroll, i), name, Some(*color), i == c.atelier.couleur) {
-                c.atelier.couleur = i;
-            }
-        }
-        cx.body_end(b, &mut c.scrolls);
-    }
-
     fn end_panel(&mut self, cx: &mut Cx, l: &Layout) {
         if self.shell.end.anim == 0.0 {
             return;
@@ -337,29 +323,11 @@ impl App {
         }
         let c = &mut self.commun;
         match self.end_content {
-            EndContent::Display => {
-                self.display_tab = cx.tabs(id("onglets-affichage"), tabs.x, tabs.y, &["Vue", "Cube"], self.display_tab);
-                let scroll = sub_id(id("corps-affichage"), self.display_tab);
-                let a = &mut c.atelier;
+            EndContent::Parametres => {
+                self.onglet_parametres = cx.tabs(id("onglets-parametres"), tabs.x, tabs.y, &parametres::ONGLETS, self.onglet_parametres);
+                let scroll = sub_id(id("corps-parametres"), self.onglet_parametres);
                 let mut b = cx.body(scroll, body, &c.scrolls);
-                if self.display_tab == 0 {
-                    cx.section(&mut b, "CAMÉRA");
-                    let shown = format!("{:.0}°", a.champ);
-                    cx.slider(&mut b, id("champ"), "Champ de vision", &shown, &mut a.champ, 25.0, 90.0);
-                    if cx.button(&mut b, id("recadrer-panneau"), "Recadrer") {
-                        a.recadrage = a.recadrage.wrapping_add(1);
-                    }
-                    cx.section(&mut b, "ROTATION");
-                    cx.toggle(&mut b, id("rotation-panneau"), "Rotation automatique", &mut a.rotation);
-                    let shown = format!("{:.0}°/s", a.vitesse);
-                    cx.slider(&mut b, id("vitesse"), "Vitesse", &shown, &mut a.vitesse, 5.0, 180.0);
-                } else {
-                    cx.section(&mut b, "FORME");
-                    let shown = format!("{:.2}", a.taille);
-                    cx.slider(&mut b, id("taille"), "Taille", &shown, &mut a.taille, 0.4, 2.0);
-                    cx.section(&mut b, "APPARENCE");
-                    cx.toggle(&mut b, id("faces"), "Faces colorées", &mut a.faces);
-                }
+                parametres::panneau(cx, &mut b, scroll, self.onglet_parametres, c, &mut self.essai);
                 cx.body_end(b, &mut c.scrolls);
             }
             EndContent::APropos => {
@@ -371,23 +339,16 @@ impl App {
                 cx.paragraph(&mut b, "Réutilisable à des fins non commerciales, selon la licence PolyForm Noncommercial 1.0.0.");
                 cx.section(&mut b, "BARRE");
                 cx.paragraph(&mut b, "Le centre du bas de l'écran est réservé aux gestes du système, mais les appuis y restent libres : la barre de l'application y range ses pastilles.");
-                if c.fichier_reglages.is_some() || c.fichier_espace.is_some() {
-                    cx.section(&mut b, "FICHIERS");
-                    for f in [&c.fichier_reglages, &c.fichier_espace].into_iter().flatten() {
-                        cx.paragraph(&mut b, f);
-                    }
-                }
                 cx.body_end(b, &mut c.scrolls);
             }
             EndContent::Help => {
                 cx.tabs(id("onglets-aide"), tabs.x, tabs.y, &["Aide"], 0);
                 let mut b = cx.body(id("corps-aide"), body, &c.scrolls);
-                cx.section(&mut b, "GESTES");
-                cx.paragraph(&mut b, "Un doigt sur une vue 3D la fait tourner.");
-                cx.paragraph(&mut b, "Deux doigts zooment et déplacent la vue.");
-                cx.section(&mut b, "PANNEAUX");
-                cx.paragraph(&mut b, "Les pastilles de la barre du bas déploient les panneaux. L'espace de travail s'adapte à la place restante.");
-                cx.paragraph(&mut b, "Glissez la frontière d'un panneau pour le redimensionner ; un double appui rétablit sa taille.");
+                cx.section(&mut b, "FENÊTRES");
+                cx.paragraph(&mut b, "Glissez la pastille + d'une fenêtre pour la partager ; touchez son titre pour choisir son contexte ou la fermer.");
+                cx.section(&mut b, "PANNEAU");
+                cx.paragraph(&mut b, "Les pastilles de la barre du bas ouvrent ce panneau : à propos, paramètres de l'application, aide. L'espace de travail s'adapte à la place restante.");
+                cx.paragraph(&mut b, "Glissez la frontière du panneau pour le redimensionner ; un double appui rétablit sa taille.");
                 cx.body_end(b, &mut c.scrolls);
             }
         }
@@ -417,13 +378,6 @@ impl App {
             };
             cx.dl.rrect(grip, thick / 2.0, color);
         }
-    }
-
-    fn scene(&self, w: Rect, placees: &[Placee]) -> Scene {
-        let vues = placees.iter().filter_map(|p| self.fenetres.get(&p.id)?.vue3d(p, &self.commun)).collect();
-        let a = &self.commun.atelier;
-        let [r, g, b, _] = COULEURS[a.couleur.min(COULEURS.len() - 1)].1;
-        Scene { workspace: w, vues, fond: Theme::default().couleurs().fond, color: [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], tint: if a.faces { 0.25 } else { 0.0 } }
     }
 }
 
@@ -468,23 +422,15 @@ mod tests {
             self.ui.event(Event::Up { id: 0 }, 0.05);
             self.frames(1);
         }
-        fn glisser(&mut self, x: f32, y: f32) {
-            self.ui.event(Event::Down { id: 0, x, y }, 0.0);
-            self.ui.event(Event::Move { id: 0, x: x + 100., y }, 0.1);
-            self.ui.event(Event::Move { id: 0, x: x + 200., y }, 0.1);
-            self.frames(1);
-            self.ui.event(Event::Up { id: 0 }, 0.2);
-            self.frames(1);
-        }
     }
 
     fn vue(cle: &str) -> u32 {
         contextes::indice(cle).unwrap()
     }
 
-    // Centre de la n-ième pastille des panneaux, dans la barre du bas (après le logo).
+    // Centre de la n-ième pastille de la barre du bas : 0 le logo, 1 les paramètres, 2 l'aide.
     fn pastille(n: f32) -> (f32, f32) {
-        (72.0 * (n + 1.5), 1200.0 - 36.0)
+        (72.0 * (n + 0.5), 1200.0 - 36.0)
     }
 
     #[test]
@@ -492,23 +438,20 @@ mod tests {
         let mut r = Rig::new();
         r.app.commun.theme.commande = 60.0;
         r.frames(1);
-        // Les pastilles font 60 dp : la barre est plus haute, la première pastille des
-        // panneaux plus loin
-        let (x, y) = (90.0 * 1.5, 1200.0 - 45.0);
-        r.tap(x, y);
-        assert!(r.app.shell.start.open);
+        // Les pastilles font 60 dp : la barre est plus haute, celle des paramètres plus loin
+        r.tap(90.0 * 1.5, 1200.0 - 45.0);
+        assert!(r.app.shell.end.open && r.app.end_content == EndContent::Parametres);
     }
 
     #[test]
-    fn une_pastille_deploie_son_panneau_et_l_espace_s_adapte() {
+    fn la_pastille_des_parametres_deploie_le_panneau_et_l_espace_s_adapte() {
         let mut r = Rig::new();
         let (x, y) = pastille(1.0);
         r.tap(x, y);
-        assert!(r.app.shell.end.open);
+        assert!(r.app.shell.end.open && r.app.end_content == EndContent::Parametres);
         let s = r.frames(60);
         assert_eq!(s.workspace.w, 1920.0 - 576.0);
         assert!(!r.app.animating());
-        let (x, y) = pastille(1.0);
         r.tap(x, y); // nouvel appui : referme
         assert!(!r.app.shell.end.open);
         assert_eq!(r.frames(60).workspace, Rect::new(0., 0., 1920., 1200. - 72.));
@@ -526,25 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn toucher_la_liste_change_la_couleur_sans_tourner_la_vue() {
-        let mut r = Rig::new();
-        let (x, y) = pastille(0.0);
-        r.tap(x, y);
-        let avant = r.frames(60).vues[0].mvp;
-        r.tap(200.0, 1.5 * (60.0 + 8.0 + 48.0 * 3.5));
-        assert_eq!(r.app.commun.atelier.couleur, 3);
-        assert_eq!(r.frames(1).vues[0].mvp, avant);
-    }
-
-    #[test]
-    fn glisser_sur_l_espace_de_travail_tourne_la_vue() {
-        let mut r = Rig::new();
-        let avant = r.frames(1).vues[0].mvp;
-        r.glisser(900., 600.);
-        assert_ne!(r.frames(1).vues[0].mvp, avant);
-    }
-
-    #[test]
     fn la_poignee_redimensionne_dans_l_application() {
         let mut r = Rig::new();
         r.app.surface.partager(1, crate::surface::Sens::Colonnes, 0.5);
@@ -557,59 +481,53 @@ mod tests {
             r.frames(1);
         }
         r.ui.event(Event::Up { id: 0 }, 0.2);
-        let s = r.frames(2);
-        assert!((s.vues[0].rect.w - 1260.).abs() <= 1.0, "{:?}", s.vues[0].rect);
+        r.frames(2);
+        let w = r.app.surface.placees()[0].cadre.w;
+        assert!((w - 1260.).abs() <= 1.0, "{w}");
     }
 
     #[test]
     fn chaque_fenetre_a_sa_propre_instance() {
         let mut r = Rig::new();
-        let nouvelle = r.app.surface.partager(1, crate::surface::Sens::Colonnes, 0.5).unwrap();
-        let s = r.frames(1);
-        assert_eq!(s.vues.len(), 2);
-        assert_eq!(s.vues[0].rect.w, 960.0);
-        // Un geste dans la fenêtre de droite (la n°1) ne tourne qu'elle
-        let (a, b) = (s.vues[0].mvp, s.vues[1].mvp);
-        r.glisser(1400., 600.);
-        let s = r.frames(1);
-        assert_eq!(s.vues[0].mvp, a);
-        assert_ne!(s.vues[1].mvp, b);
-        // Une fenêtre passée en Couleurs n'a plus de 3D, et change d'instance
-        r.app.surface.changer_vue(nouvelle, vue("couleurs"));
-        assert_eq!(r.frames(1).vues.len(), 1);
-        assert_eq!(r.app.fenetres[&nouvelle].cle(), "couleurs");
-        // Fermée, elle n'en a plus
-        r.app.surface.fermer(nouvelle);
+        r.app.ouvrir_espace("fenetres = C0.5000(F2:fichiers,F1:fichiers)\n[fenetre 2]\ndossier = /tmp\n[fenetre 1]\ndossier = /\n");
         r.frames(1);
-        assert!(!r.app.fenetres.contains_key(&nouvelle));
+        let t = r.app.espace();
+        assert!(t.contains("[fenetre 2]\ndossier = /tmp\n") && t.contains("[fenetre 1]\ndossier = /\n"), "{t}");
+        // Une fenêtre qui change de contexte change d'instance
+        r.app.surface.changer_vue(2, vue("aide"));
+        r.frames(1);
+        assert_eq!(r.app.fenetres[&2].cle(), "aide");
+        assert_eq!(r.app.fenetres[&1].cle(), "fichiers");
+        // Fermée, elle n'en a plus
+        r.app.surface.fermer(2);
+        r.frames(1);
+        assert!(!r.app.fenetres.contains_key(&2));
     }
 
     #[test]
     fn l_espace_de_travail_se_retrouve() {
-        let texte = "fenetres = C0.4000(F3:fichiers,L0.5000(F2:fichiers,F1:cube))\n\
-                     [commun]\ncube_couleur = rose\n\
+        let texte = "fenetres = C0.4000(F3:fichiers,L0.5000(F2:radio,F1:disque))\n\
                      [fenetre 3]\ndossier = /tmp\ncaches = oui\n\
-                     [fenetre 2]\ndossier = /\n\
-                     [fenetre 1]\ncamera = 1.000 0.200 9.000 0.000 1.000 0.000\n";
+                     [fenetre 2]\nadresse = https://exemple.fr/flux\n\
+                     [fenetre 1]\ncentre = Musique/Albums\n";
         let mut r = Rig::new();
         r.app.ouvrir_espace(texte);
-        assert_eq!(r.app.commun.atelier.couleur, 10);
         assert_eq!(r.app.surface.nombre(), 3);
         r.frames(1);
-        // Les deux explorateurs gardent chacun leur dossier
         let t = r.app.espace();
         assert!(t.contains("[fenetre 3]\ndossier = /tmp\ncaches = oui\n"), "{t}");
-        assert!(t.contains("[fenetre 2]\ndossier = /\ncaches = non\n"), "{t}");
-        assert!(t.contains("camera = 1.000 0.200 9.000 0.000 1.000 0.000"), "{t}");
+        assert!(t.contains("[fenetre 2]\nadresse = https://exemple.fr/flux\n"), "{t}");
+        assert!(t.contains("[fenetre 1]\ncentre = Musique/Albums\n"), "{t}");
         // Une autre application qui relit ce texte écrit la même chose
         let mut autre = Rig::new();
         autre.app.ouvrir_espace(&t);
         autre.frames(1);
         assert_eq!(autre.app.espace(), t);
-        // Un contexte inconnu devient le repli, une disposition illisible ne change rien
-        autre.app.ouvrir_espace("fenetres = F1:inconnu\n");
+        // Un contexte inconnu (le cube d'une version précédente) devient le repli, une
+        // disposition illisible ne change rien
+        autre.app.ouvrir_espace("fenetres = F1:cube\n");
         assert_eq!(autre.app.surface.ecrire_avec(&|v| contextes::genre(v).cle.into()), format!("F1:{}", contextes::REPLI));
-        autre.app.ouvrir_espace("fenetres = C0.5(F1:cube\n");
+        autre.app.ouvrir_espace("fenetres = C0.5(F1:aide\n");
         assert_eq!(autre.app.surface.nombre(), 1);
     }
 

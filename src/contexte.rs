@@ -1,9 +1,10 @@
 //! Les contextes : les sous-applications que montrent les fenêtres de la surface.
 //!
 //! Chaque fenêtre porte une **instance** de contexte, avec son propre état (son
-//! document, son dossier, sa caméra…) : deux fenêtres du même contexte travaillent
+//! document, son dossier…) : deux fenêtres du même contexte travaillent
 //! chacune sur le leur. Ce qui doit être partagé entre toutes (l'apparence, le
-//! clavier, l'analyse du stockage, l'historique des radios…) est dans `Commun`.
+//! clavier, l'analyse du stockage, l'historique des radios…) est dans `Commun`, et
+//! se règle dans le panneau des paramètres, pas dans un contexte.
 //!
 //! Un contexte se déclare par un `Genre` (sa clé, son nom, son icône et sa fonction
 //! d'ouverture) dans la liste `contextes::GENRES`, et son instance implémente le trait
@@ -14,8 +15,6 @@
 
 use crate::clavier::{Clavier, Frappe};
 use crate::disque::Analyse;
-use crate::draw::{Color, Rect};
-use crate::math::Mat4;
 use crate::radio::Historique;
 use crate::surface::{FenetreId, Placee};
 use crate::ui::{Gesture, Id};
@@ -63,13 +62,9 @@ pub trait Contexte {
         false
     }
 
-    /// Un geste (orbite, déplacement, zoom) commencé dans la fenêtre.
+    /// Un geste (glissement d'un doigt, déplacement et zoom à deux doigts) commencé
+    /// dans la fenêtre.
     fn geste(&mut self, _g: &Gesture, _p: &Placee, _c: &Commun) {}
-
-    /// La vue 3D à dessiner sous l'interface, dans le contenu de la fenêtre.
-    fn vue3d(&self, _p: &Placee, _c: &Commun) -> Option<Vue3d> {
-        None
-    }
 
     /// Une frappe du clavier virtuel pour le champ `cible`. Renvoie vrai si le champ
     /// est à cette instance (la frappe ne va alors à personne d'autre).
@@ -81,90 +76,9 @@ pub trait Contexte {
     fn retour(&mut self, _c: &Commun) {}
 }
 
-/// Une vue 3D : son rectangle à l'écran et sa matrice.
-#[derive(Clone, Copy)]
-pub struct Vue3d {
-    pub rect: Rect,
-    pub mvp: Mat4,
-}
-
-/// Ce que le moteur de rendu doit dessiner : un cube dans chaque vue 3D.
-#[derive(Clone)]
-pub struct Scene {
-    pub workspace: Rect,
-    pub vues: Vec<Vue3d>,
-    /// Le fond de l'écran, que la 3D laisse voir.
-    pub fond: Color,
-    pub color: [f32; 3],
-    pub tint: f32,
-}
-
-/// Les couleurs du cube, communes à la vue Couleurs et au panneau de gauche.
-pub const COULEURS: [(&str, Color); 14] = [
-    ("Indigo", [0x4A, 0x45, 0xE0, 255]),
-    ("Bleu", [0x3B, 0x82, 0xF6, 255]),
-    ("Ciel", [0x38, 0xBD, 0xF8, 255]),
-    ("Turquoise", [0x14, 0xB8, 0xA6, 255]),
-    ("Vert", [0x22, 0xC5, 0x5E, 255]),
-    ("Olive", [0x84, 0xA9, 0x1C, 255]),
-    ("Jaune", [0xEA, 0xB3, 0x08, 255]),
-    ("Orange", [0xF9, 0x73, 0x16, 255]),
-    ("Rouille", [0xB9, 0x4A, 0x18, 255]),
-    ("Rouge", [0xEF, 0x44, 0x44, 255]),
-    ("Rose", [0xEC, 0x48, 0x99, 255]),
-    ("Violet", [0xA8, 0x55, 0xF7, 255]),
-    ("Ardoise", [0x64, 0x74, 0x8B, 255]),
-    ("Sable", [0xC8, 0xB0, 0x8A, 255]),
-];
-
-/// Les réglages de la 3D, communs à toutes les fenêtres Cube.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Atelier {
-    pub couleur: usize,
-    pub rotation: bool,
-    /// Degrés par seconde.
-    pub vitesse: f32,
-    /// Champ de vision, en degrés.
-    pub champ: f32,
-    pub taille: f32,
-    pub faces: bool,
-    /// Augmente pour demander à toutes les caméras de revenir à leur position de départ.
-    pub recadrage: u32,
-}
-
-impl Default for Atelier {
-    fn default() -> Atelier {
-        Atelier { couleur: 0, rotation: false, vitesse: 30.0, champ: 45.0, taille: 1.0, faces: true, recadrage: 0 }
-    }
-}
-
-impl Atelier {
-    pub fn ecrire(&self, e: &mut Etat) {
-        e.mettre("cube_couleur", COULEURS[self.couleur.min(COULEURS.len() - 1)].0.to_lowercase());
-        e.mettre_oui("cube_rotation", self.rotation);
-        e.mettre("cube_vitesse", format!("{:.0}", self.vitesse));
-        e.mettre("cube_champ", format!("{:.0}", self.champ));
-        e.mettre("cube_taille", format!("{:.2}", self.taille));
-        e.mettre_oui("cube_faces", self.faces);
-    }
-
-    pub fn lire(e: &Etat) -> Atelier {
-        let d = Atelier::default();
-        Atelier {
-            couleur: e.texte("cube_couleur").and_then(|v| COULEURS.iter().position(|c| c.0.eq_ignore_ascii_case(v))).unwrap_or(d.couleur),
-            rotation: e.oui("cube_rotation").unwrap_or(d.rotation),
-            vitesse: e.nombre("cube_vitesse").map_or(d.vitesse, |v| v.clamp(5.0, 180.0)),
-            champ: e.nombre("cube_champ").map_or(d.champ, |v| v.clamp(25.0, 90.0)),
-            taille: e.nombre("cube_taille").map_or(d.taille, |v| v.clamp(0.4, 2.0)),
-            faces: e.oui("cube_faces").unwrap_or(d.faces),
-            recadrage: 0,
-        }
-    }
-}
-
 /// Ce que partagent toutes les fenêtres.
 pub struct Commun {
-    /// L'apparence de l'interface, réglée dans la vue Paramètres.
+    /// L'apparence de l'interface, réglée dans le panneau des paramètres.
     pub theme: Theme,
     /// Le clavier virtuel : un seul, pour le champ qui a le focus.
     pub clavier: Clavier,
@@ -179,7 +93,6 @@ pub struct Commun {
     /// Où sont enregistrés les réglages et l'espace de travail, pour l'indiquer.
     pub fichier_reglages: Option<String>,
     pub fichier_espace: Option<String>,
-    pub atelier: Atelier,
 }
 
 impl Default for Commun {
@@ -193,7 +106,6 @@ impl Default for Commun {
             historique: Historique::default(),
             fichier_reglages: None,
             fichier_espace: None,
-            atelier: Atelier::default(),
         }
     }
 }
@@ -274,14 +186,5 @@ mod tests {
         assert_eq!(e.oui("caches"), Some(true));
         assert_eq!(e.nombres("camera"), vec![0.5, 1.0, -2.0]);
         assert_eq!(e.nombre("absente"), None);
-    }
-
-    #[test]
-    fn l_atelier_se_relit() {
-        let a = Atelier { couleur: 4, rotation: true, vitesse: 60.0, champ: 70.0, taille: 1.5, faces: false, recadrage: 0 };
-        let mut e = Etat::default();
-        a.ecrire(&mut e);
-        assert_eq!(Atelier::lire(&e), a);
-        assert_eq!(Atelier::lire(&Etat::default()), Atelier::default());
     }
 }

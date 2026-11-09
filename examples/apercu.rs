@@ -17,7 +17,6 @@ struct Shot {
     w: i32,
     h: i32,
     dp: f32,
-    start: bool,
     end: bool,
     help: bool,
     fenetres: bool,
@@ -28,12 +27,12 @@ struct Shot {
 fn main() {
     let dir = std::env::args().nth(1).expect("dossier de sortie");
     let shots = [
-        Shot { name: "tablette-ferme", w: 1920, h: 1200, dp: 1.5, start: false, end: false, help: false, fenetres: false, disque: None },
-        Shot { name: "tablette-deux", w: 1920, h: 1200, dp: 1.5, start: true, end: true, help: false, fenetres: false, disque: None },
-        Shot { name: "tablette-portrait", w: 1200, h: 1920, dp: 1.5, start: true, end: true, help: true, fenetres: false, disque: None },
-        Shot { name: "tablette-fenetres", w: 1920, h: 1200, dp: 1.5, start: false, end: false, help: false, fenetres: true, disque: None },
-        Shot { name: "disque", w: 1920, h: 1200, dp: 1.5, start: false, end: false, help: false, fenetres: false, disque: Some(env!("CARGO_MANIFEST_DIR")) },
-        Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, start: false, end: true, help: false, fenetres: false, disque: None },
+        Shot { name: "tablette-ferme", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, disque: None },
+        Shot { name: "tablette-parametres", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, disque: None },
+        Shot { name: "tablette-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: true, fenetres: false, disque: None },
+        Shot { name: "tablette-fenetres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: true, disque: None },
+        Shot { name: "disque", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, disque: Some(env!("CARGO_MANIFEST_DIR")) },
+        Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, disque: None },
     ];
     let mut egl = Egl::new(true).expect("EGL");
     egl.attach_pbuffer(2400, 2400).expect("pbuffer");
@@ -47,14 +46,15 @@ fn main() {
         let mut app = App::new(s.dp);
         let mut ui = Ui::new(s.dp);
         let mut dl = DrawList::default();
-        app.shell.start.open = s.start;
+        // L'explorateur part du dossier du projet
+        app.racine_en(Some(env!("CARGO_MANIFEST_DIR").into()));
         app.shell.end.open = s.end;
         if s.fenetres {
-            // Trois fenêtres : un cube à gauche, une liste et l'aide à droite
+            // Trois fenêtres : l'explorateur à gauche, la radio et l'aide à droite
             use flow::surface::Sens;
             app.surface.partager(1, Sens::Colonnes, 0.6);
             let liste = app.surface.partager(1, Sens::Lignes, 0.55).unwrap();
-            app.surface.changer_vue(liste, indice("couleurs").unwrap());
+            app.surface.changer_vue(liste, indice("radio").unwrap());
             app.surface.changer_vue(1, indice("aide").unwrap());
         }
 
@@ -72,7 +72,7 @@ fn main() {
             if i == 30 && s.help {
                 // Vraie séquence tactile : appui sur la pastille d'aide, dans la barre du bas.
                 let c = 48.0 * s.dp;
-                ui.event(Event::Down { id: 0, x: 3.5 * c, y: h - c / 2.0 }, 0.0);
+                ui.event(Event::Down { id: 0, x: 2.5 * c, y: h - c / 2.0 }, 0.0);
                 ui.event(Event::Up { id: 0 }, 0.05);
             }
             dl.clear();
@@ -84,7 +84,7 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
-        render.draw(w, h, &scene.unwrap(), &dl, &mut text);
+        render.draw(w, h, scene.unwrap().fond, &dl, &mut text);
 
         let gl = render.gl();
         let mut px = vec![0u8; (s.w * s.h * 4) as usize];

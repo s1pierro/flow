@@ -38,8 +38,8 @@ impl Contexte for Aide {
         if let Some(f) = &c.fichier_espace {
             cx.paragraph(&mut b, &format!("L'espace de travail est enregistré dans {f}, un fichier texte."));
         }
-        cx.section(&mut b, "GESTES");
-        cx.paragraph(&mut b, "Un doigt sur une vue 3D la fait tourner ; deux doigts zooment et déplacent.");
+        cx.section(&mut b, "PARAMÈTRES");
+        cx.paragraph(&mut b, "Les réglages de l'application (apparence, clavier) sont dans le panneau des paramètres, ouvert par la pastille aux curseurs de la barre du bas.");
         cx.body_end(b, &mut c.scrolls);
         "Aide".to_string()
     }

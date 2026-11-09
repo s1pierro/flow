@@ -5,8 +5,8 @@ fenêtres, et chaque fenêtre montre un **contexte**, une sous-application, pour
 composer son espace de travail à son goût. Née d'une copie de
 [Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
-Contextes : Cube (3D), Couleurs, Aide, Paramètres, Radio (et mixeur), Fichiers,
-Disque. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
+Contextes : Fichiers, Disque, Radio (et mixeur), Aide. Les paramètres de
+l'application (apparence, clavier) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier. Viendront l'édition de texte et de SVG.
 
 Package `fr.s1pierro.flow`. Dans `Flow/` à la racine du stockage :

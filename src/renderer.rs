@@ -1,8 +1,6 @@
-//! Tout OpenGL est ici : la 3D dans chaque vue de l'espace de travail, puis
-//! l'interface par-dessus, sur tout l'écran.
+//! Tout OpenGL est ici : l'interface, sur tout l'écran.
 
-use crate::contexte::Scene;
-use crate::draw::{DrawList, Rect, Vertex};
+use crate::draw::{Color, DrawList, Rect, Vertex};
 use crate::gles::GlApi;
 use crate::text::{Text, ATLAS};
 use std::ffi::{c_char, c_void, CString};
@@ -15,10 +13,8 @@ const ARRAY_BUFFER: u32 = 0x8892;
 const TEXTURE_2D: u32 = 0x0DE1;
 const RED: u32 = 0x1903;
 const BLEND: u32 = 0x0BE2;
-const DEPTH_TEST: u32 = 0x0B71;
 const SCISSOR: u32 = 0x0C11;
 const COLOR_BIT: u32 = 0x4000;
-const DEPTH_BIT: u32 = 0x0100;
 
 const UI_VS: &str = "#version 300 es
 precision highp float;
@@ -65,58 +61,6 @@ void main() {
   o_color = vec4(v_color.rgb * a, a);
 }";
 
-const CUBE_VS: &str = "#version 300 es
-precision highp float;
-layout(location=0) in vec3 a_pos;
-layout(location=1) in vec3 a_normal;
-layout(location=2) in vec3 a_tint;
-layout(location=3) in vec2 a_uv;
-uniform mat4 u_mvp;
-out vec3 v_normal; out vec3 v_tint; out vec2 v_uv;
-void main() {
-  v_normal = a_normal; v_tint = a_tint; v_uv = a_uv;
-  gl_Position = u_mvp * vec4(a_pos, 1.0);
-}";
-
-const CUBE_FS: &str = "#version 300 es
-precision highp float;
-in vec3 v_normal; in vec3 v_tint; in vec2 v_uv;
-uniform vec3 u_color;
-uniform float u_mix;
-out vec4 o_color;
-void main() {
-  vec3 base = mix(u_color, v_tint, u_mix);
-  vec3 n = normalize(v_normal);
-  float light = 0.55 + 0.45 * max(dot(n, normalize(vec3(0.4, 0.8, 0.5))), 0.0);
-  vec2 e = min(v_uv, 1.0 - v_uv);
-  float edge = smoothstep(0.0, 0.035, min(e.x, e.y));
-  o_color = vec4(base * light * mix(0.72, 1.0, edge), 1.0);
-}";
-
-fn cube_mesh() -> Vec<f32> {
-    // Normale, axes de la face, teinte.
-    let faces: [([f32; 3], [f32; 3], [f32; 3], [f32; 3]); 6] = [
-        ([0., 0., 1.], [1., 0., 0.], [0., 1., 0.], [0.95, 0.35, 0.35]),
-        ([0., 0., -1.], [-1., 0., 0.], [0., 1., 0.], [0.25, 0.75, 0.55]),
-        ([1., 0., 0.], [0., 0., -1.], [0., 1., 0.], [0.3, 0.5, 0.95]),
-        ([-1., 0., 0.], [0., 0., 1.], [0., 1., 0.], [0.95, 0.75, 0.25]),
-        ([0., 1., 0.], [1., 0., 0.], [0., 0., -1.], [0.9, 0.9, 0.95]),
-        ([0., -1., 0.], [1., 0., 0.], [0., 0., 1.], [0.6, 0.45, 0.85]),
-    ];
-    let mut v = Vec::with_capacity(36 * 11);
-    for (n, u, w, tint) in faces {
-        for (a, b) in [(0., 0.), (1., 0.), (0., 1.), (0., 1.), (1., 0.), (1., 1.)] {
-            for i in 0..3 {
-                v.push(n[i] + (2.0 * a - 1.0) * u[i] + (2.0 * b - 1.0) * w[i]);
-            }
-            v.extend_from_slice(&n);
-            v.extend_from_slice(&tint);
-            v.extend_from_slice(&[a, b]);
-        }
-    }
-    v
-}
-
 pub struct Renderer {
     gl: GlApi,
     ui_program: u32,
@@ -124,11 +68,6 @@ pub struct Renderer {
     ui_vao: u32,
     ui_vbo: u32,
     atlas: u32,
-    cube_program: u32,
-    u_mvp: i32,
-    u_color: i32,
-    u_mix: i32,
-    cube_vao: u32,
 }
 
 fn cstr(s: &str) -> CString {
@@ -171,10 +110,8 @@ impl Renderer {
     pub fn new(gl: GlApi) -> Result<Renderer, String> {
         unsafe {
             let ui_program = program(&gl, UI_VS, UI_FS)?;
-            let cube_program = program(&gl, CUBE_VS, CUBE_FS)?;
             let loc = |p: u32, n: &str| (gl.glGetUniformLocation)(p, cstr(n).as_ptr());
             let u_size = loc(ui_program, "u_size");
-            let (u_mvp, u_color, u_mix) = (loc(cube_program, "u_mvp"), loc(cube_program, "u_color"), loc(cube_program, "u_mix"));
 
             let (mut ui_vao, mut ui_vbo) = (0, 0);
             (gl.glGenVertexArrays)(1, &mut ui_vao);
@@ -203,20 +140,9 @@ impl Renderer {
                 (gl.glTexParameteri)(TEXTURE_2D, k, v);
             }
 
-            let mesh = cube_mesh();
-            let (mut cube_vao, mut cube_vbo) = (0, 0);
-            (gl.glGenVertexArrays)(1, &mut cube_vao);
-            (gl.glGenBuffers)(1, &mut cube_vbo);
-            (gl.glBindVertexArray)(cube_vao);
-            (gl.glBindBuffer)(ARRAY_BUFFER, cube_vbo);
-            (gl.glBufferData)(ARRAY_BUFFER, (mesh.len() * 4) as isize, mesh.as_ptr() as *const c_void, 0x88E4);
-            for (i, n, off) in [(0u32, 3, 0usize), (1, 3, 12), (2, 3, 24), (3, 2, 36)] {
-                (gl.glEnableVertexAttribArray)(i);
-                (gl.glVertexAttribPointer)(i, n, FLOAT, 0, 44, off as *const c_void);
-            }
             (gl.glBindVertexArray)(0);
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, cube_program, u_mvp, u_color, u_mix, cube_vao })
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas })
         }
     }
 
@@ -229,40 +155,17 @@ impl Renderer {
         (r.x.round() as i32, (h - r.bottom()).round() as i32, r.w.round().max(0.0) as i32, r.h.round().max(0.0) as i32)
     }
 
-    pub fn draw(&self, w: f32, h: f32, scene: &Scene, dl: &DrawList, text: &mut Text) {
+    /// Efface l'écran avec la couleur `fond`, puis dessine l'interface.
+    pub fn draw(&self, w: f32, h: f32, fond: Color, dl: &DrawList, text: &mut Text) {
         let gl = &self.gl;
         unsafe {
             (gl.glDisable)(SCISSOR);
             (gl.glViewport)(0, 0, w as i32, h as i32);
-            let f = |i: usize| scene.fond[i] as f32 / 255.0;
+            let f = |i: usize| fond[i] as f32 / 255.0;
             (gl.glClearColor)(f(0), f(1), f(2), 1.0);
-            (gl.glClear)(COLOR_BIT | DEPTH_BIT);
-
-            // 3D, chaque vue limitée à sa fenêtre
-            (gl.glEnable)(DEPTH_TEST);
-            (gl.glDisable)(BLEND);
-            (gl.glEnable)(SCISSOR);
-            (gl.glUseProgram)(self.cube_program);
-            (gl.glUniform3f)(self.u_color, scene.color[0], scene.color[1], scene.color[2]);
-            (gl.glUniform1f)(self.u_mix, scene.tint);
-            (gl.glBindVertexArray)(self.cube_vao);
-            for v in &scene.vues {
-                let (x, y, vw, vh) = Self::gl_rect(v.rect, h);
-                if vw <= 0 || vh <= 0 {
-                    continue;
-                }
-                (gl.glScissor)(x, y, vw, vh);
-                (gl.glViewport)(x, y, vw, vh);
-                // Chaque vue a sa propre profondeur
-                (gl.glClear)(DEPTH_BIT);
-                (gl.glUniformMatrix4fv)(self.u_mvp, 1, 0, v.mvp.as_ptr());
-                (gl.glDrawArrays)(TRIANGLES, 0, 36);
-            }
+            (gl.glClear)(COLOR_BIT);
 
             // Interface, sur tout l'écran
-            (gl.glDisable)(DEPTH_TEST);
-            (gl.glDisable)(SCISSOR);
-            (gl.glViewport)(0, 0, w as i32, h as i32);
             (gl.glEnable)(BLEND);
             (gl.glBlendFunc)(1, 0x0303); // couleurs prémultipliées
             (gl.glUseProgram)(self.ui_program);

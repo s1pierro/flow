@@ -1,10 +1,14 @@
 # Intégrer un contexte dans Flow
 
 Flow est une *application d'exploitation* : l'écran se partage en fenêtres, et chaque
-fenêtre montre un **contexte**, une sous-application (Cube, Fichiers, Radio…).
+fenêtre montre un **contexte**, une sous-application (Fichiers, Disque, Radio…).
 L'utilisateur compose son espace de travail en partageant les fenêtres et en
 choisissant le contexte de chacune. Ce guide explique comment ajouter un contexte,
 par exemple un éditeur de texte ou de SVG.
+
+Les paramètres de l'application (apparence, clavier) ne sont pas un contexte : ils
+vivent dans le panneau latéral (`src/parametres.rs`), ouvert par une pastille de la
+barre du bas.
 
 ## Les principes
 
@@ -12,8 +16,8 @@ par exemple un éditeur de texte ou de SVG.
   avec son propre état. Deux fenêtres Texte éditent chacune leur document, en même
   temps. Rien n'empêche un contexte de travailler sur plusieurs documents.
 - **Ce qui est partagé va dans `Commun`.** L'apparence, le clavier virtuel,
-  l'analyse du stockage, l'historique des radios et les réglages de la 3D sont
-  communs à toutes les fenêtres. Une instance ne garde pas de référence vers
+  l'analyse du stockage et l'historique des radios sont communs à toutes les
+  fenêtres. Une instance ne garde pas de référence vers
   `Commun` : il lui est passé à chaque appel.
 - **Tout se retrouve au lancement suivant.** La disposition des fenêtres, le
   contexte de chacune et son état sont enregistrés dans un fichier texte,
@@ -28,13 +32,14 @@ par exemple un éditeur de texte ou de SVG.
 | `src/contextes/mod.rs` | La liste `GENRES`, et des outils de liste partagés (`ligne_fichier`, `Puce`) |
 | `src/contextes/<nom>.rs` | Un contexte |
 | `src/espace.rs` | Le format de `espace.txt`, sa lecture et son écriture |
-| `src/app.rs` | L'application : fenêtres, instances, panneaux, barre |
+| `src/parametres.rs` | Le panneau des paramètres de l'application |
+| `src/app.rs` | L'application : fenêtres, instances, panneau latéral, barre |
 
 Les contextes existants servent d'exemples, du plus simple au plus complet :
-`aide.rs` (rien à retenir), `couleurs.rs` (agit sur `Commun`), `parametres.rs`
-(un champ de texte), `cube.rs` (3D, gestes, animation, état enregistré),
-`fichiers.rs` (un dossier par fenêtre, relu au retour), `disque.rs` (état enregistré
-par noms, résolu plus tard).
+`aide.rs` (rien à retenir), `radio.rs` (un champ de texte et le clavier, une
+animation), `fichiers.rs` (un dossier par fenêtre, relu au retour), `disque.rs`
+(une ressource partagée dans `Commun`, un état enregistré par noms et résolu plus
+tard).
 
 ## Ajouter un contexte, pas à pas
 
@@ -116,8 +121,7 @@ une version par défaut qui ne fait rien.
 | `ecrire(e)` | enregistrement | Écrit dans `e` de quoi rouvrir l'instance |
 | `avancer(dt, c)` | avant le dessin | Fait avancer les animations |
 | `anime(c)` | après chaque image | Vrai pour obtenir une image de plus sans événement (sinon Flow ne redessine pas) |
-| `geste(g, p, c)` | geste commencé dans la fenêtre | Orbite, déplacement, zoom à deux doigts |
-| `vue3d(p, c)` | chaque image | Une vue 3D à dessiner sous l'interface de la fenêtre |
+| `geste(g, p, c)` | geste commencé dans la fenêtre | Glissement d'un doigt, déplacement et zoom à deux doigts (pour un plan de travail, un dessin) |
 | `frappe(f, cible, frappe, c)` | frappe du clavier virtuel | Renvoie vrai si `cible` est un champ de cette instance |
 | `retour(c)` | retour dans l'application | Relit ce qui a pu changer sur le disque |
 
@@ -171,10 +175,7 @@ arrière-plan.
 ## Le fichier `espace.txt`
 
 ```text
-fenetres = C0.4000(F3:fichiers,L0.5000(F2:texte,F1:cube))
-
-[commun]
-cube_couleur = indigo
+fenetres = C0.4000(F3:fichiers,L0.5000(F2:texte,F1:radio))
 
 [fenetre 3]
 dossier = /storage/emulated/0/Download
@@ -186,7 +187,7 @@ document = /storage/emulated/0/Notes/idees.txt
 
 - `fenetres` : `F<numéro>:<clé>` pour une fenêtre ; `C<part>(…,…)` pour deux
   fenêtres côte à côte, `L<part>(…,…)` pour l'une sur l'autre.
-- `[commun]` : ce qui est partagé (aujourd'hui, les réglages de la 3D).
+- `[commun]` : ce qui est partagé et doit être retrouvé (vide pour l'instant).
 - `[fenetre N]` : l'état de la fenêtre N, tel que son contexte l'écrit.
 
 Une clé de contexte inconnue ouvre le contexte de repli (`contextes::REPLI`, l'Aide).
@@ -197,8 +198,9 @@ Une disposition illisible laisse les fenêtres comme elles sont. Le fichier se m
 
 Ajouter un champ à `Commun` quand plusieurs fenêtres, ou plusieurs contextes, doivent
 voir la même chose (une ressource coûteuse comme l'analyse du stockage, un réglage
-global). S'il doit être retrouvé au lancement suivant, l'écrire dans la section
-`[commun]` (voir `Atelier::ecrire` et `App::espace`).
+global). Un réglage de l'application va dans le panneau des paramètres et le fichier
+des réglages (`reglages.rs`) ; un état partagé à retrouver au lancement suivant va
+dans la section `[commun]` (voir `App::espace` et `App::ouvrir_espace`).
 
 ## À venir
 

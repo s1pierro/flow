@@ -5,11 +5,8 @@
 //! `docs/contextes.md`.
 
 pub mod aide;
-pub mod couleurs;
-pub mod cube;
 pub mod disque;
 pub mod fichiers;
-pub mod parametres;
 pub mod radio;
 
 use crate::contexte::Genre;
@@ -20,15 +17,7 @@ use crate::widgets::{Body, Cx, Icon};
 /// Les contextes, dans l'ordre du menu des fenêtres. Le premier est celui de la
 /// première fenêtre ; leur place ne compte pas pour l'enregistrement (c'est la clé qui
 /// est retenue), on peut donc les réordonner.
-pub const GENRES: &[Genre] = &[
-    cube::GENRE,
-    couleurs::GENRE,
-    aide::GENRE,
-    parametres::GENRE,
-    radio::GENRE,
-    fichiers::GENRE,
-    disque::GENRE,
-];
+pub const GENRES: &[Genre] = &[fichiers::GENRE, disque::GENRE, radio::GENRE, aide::GENRE];
 
 /// Le contexte d'une fenêtre dont la clé est inconnue (fichier d'une autre version).
 pub const REPLI: &str = aide::CLE;
