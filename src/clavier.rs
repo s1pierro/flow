@@ -9,6 +9,8 @@
 //! - Effacer se répète tant qu'on le tient ; glisser sur la barre d'espace déplace le
 //!   curseur.
 //! - Une bulle montre la touche sous le doigt (réglable).
+//! - En haut, sur les lettres : « Coller » écrit le texte du presse-papier d'Android ;
+//!   sur les symboles : la disposition (un appui passe à la suivante).
 //!
 //! Le clavier occupe le bas de l'écran quand un champ a le focus : l'application lui
 //! retire sa hauteur avant de disposer le reste. Flottant (réglage), il ne retire rien :
@@ -108,6 +110,11 @@ struct Tenue {
 const FOND: Id = id("clavier/fond");
 const TOUCHE: Id = id("clavier/touche");
 const DISPOSITION: Id = id("clavier/disposition");
+const COLLER: Id = id("clavier/coller");
+/// L'étiquette du bouton qui colle le presse-papier.
+const ETIQUETTE_COLLER: &str = "Coller";
+/// Au plus autant de caractères collés d'un coup.
+const COLLE_MAX: usize = 10_000;
 const BAISSER: Id = id("clavier/baisser");
 const DEPLACER: Id = id("clavier/deplacer");
 
@@ -208,6 +215,19 @@ impl Clavier {
 
     fn barre(&self, cx: &Cx) -> f32 {
         (self.reglages.touche * 0.72 * cx.dp).round()
+    }
+
+    /// Le bouton à gauche de la barre du haut : « Coller » sur les lettres, la
+    /// disposition sur les symboles.
+    fn gauche(&self, cx: &mut Cx) -> Rect {
+        let (d, r, bh) = (cx.dp, self.rect, self.barre(cx));
+        let texte = if self.symboles { self.reglages.disposition.nom() } else { ETIQUETTE_COLLER };
+        let mut w = cx.measure(texte, 13.0) + 24.0 * d;
+        if !self.symboles {
+            // L'icône du presse-papier, devant le mot
+            w += bh * 0.5 + 6.0 * d;
+        }
+        Rect::new(r.x + 6.0 * d, r.y, w, bh)
     }
 
     /// La hauteur du clavier ouvert, en pixels (0 s'il est fermé).
@@ -320,8 +340,9 @@ impl Clavier {
         }
         let d = cx.dp;
         cx.ui.region_add(FOND, r, Sense::Sink);
-        // La barre du haut : la disposition (un appui passe à la suivante), baisser ; le
-        // clavier flottant se déplace en la tirant
+        // La barre du haut : « Coller » sur les lettres, la disposition sur les symboles
+        // (un appui passe à la suivante), baisser ; le clavier flottant se déplace en la
+        // tirant
         let bh = self.barre(cx);
         if self.reglages.flottant {
             match cx.ui.drag(DEPLACER, Rect::new(r.x, r.y, r.w, bh)) {
@@ -334,8 +355,14 @@ impl Clavier {
                 None => self.prise = None,
             }
         }
-        let disp = Rect::new(r.x + 6.0 * d, r.y, cx.measure(self.reglages.disposition.nom(), 13.0) + 24.0 * d, bh);
-        if cx.ui.click(DISPOSITION, disp, None) {
+        let gauche = self.gauche(cx);
+        if !self.symboles {
+            if cx.ui.click(COLLER, gauche, None) {
+                if let Some(t) = crate::acces::presse_papier() {
+                    out.extend(collees(&t));
+                }
+            }
+        } else if cx.ui.click(DISPOSITION, gauche, None) {
             let toutes = Disposition::TOUTES;
             let i = toutes.iter().position(|x| *x == self.reglages.disposition).unwrap_or(0);
             self.reglages.disposition = toutes[(i + 1) % toutes.len()];
@@ -445,7 +472,18 @@ impl Clavier {
             cx.dl.rrect(r, 0.0, col.fond);
             cx.dl.rrect(Rect::new(r.x, r.y, r.w, d.max(1.0)), 0.0, col.ligne);
         }
-        cx.text_at(r.x + 18.0 * d, r.y + bh / 2.0, self.reglages.disposition.nom(), 13.0, col.pale);
+        if self.symboles {
+            cx.text_at(r.x + 18.0 * d, r.y + bh / 2.0, self.reglages.disposition.nom(), 13.0, col.pale);
+        } else {
+            // « Coller » : l'icône du presse-papier et le mot, à l'accent ; fond à l'appui
+            let g = self.gauche(cx);
+            if cx.ui.pressed(COLLER) {
+                cx.dl.rrect(g.inset(4.0 * d), cx.theme.rayon(g.h - 8.0 * d), col.puce);
+            }
+            let ic = (bh * 0.5).round();
+            cx.icon(Rect::new(g.x + 12.0 * d, g.cy() - ic / 2.0, ic, ic), Icon::Coller, col.accent);
+            cx.text_at(g.x + 12.0 * d + ic + 6.0 * d, g.cy(), ETIQUETTE_COLLER, 13.0, col.accent);
+        }
         let b = Rect::new(r.right() - bh * 1.4, r.y, bh * 1.4, bh);
         cx.icon(Rect::new(b.cx() - bh * 0.3, b.cy() - bh * 0.3, bh * 0.6, bh * 0.6), Icon::Baisser, col.pale);
         let rayon = cx.theme.rayon(self.reglages.touche * d) * 0.35;
@@ -529,6 +567,23 @@ impl Clavier {
             }
         }
     }
+}
+
+/// Les frappes qui écrivent un texte collé, dans un champ d'une ligne : retours à la
+/// ligne et tabulations deviennent des espaces, les autres caractères de contrôle sont
+/// écartés, et le tout est borné à `COLLE_MAX` caractères.
+pub fn collees(texte: &str) -> Vec<Frappe> {
+    texte
+        .chars()
+        .filter_map(|c| match c {
+            '\r' => None,
+            '\n' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .take(COLLE_MAX)
+        .map(Frappe::Car)
+        .collect()
 }
 
 /// Un texte en cours d'édition, et son curseur (en caractères).
@@ -623,6 +678,15 @@ pub fn champ(cx: &mut Cx, b: &mut Body, cle: Id, vide: &str, ed: &mut Edition, c
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn le_texte_colle_tient_sur_une_ligne() {
+        let f = collees("a\r\nb\tc\u{7}é😀");
+        let t: String = f.iter().map(|f| if let Frappe::Car(c) = f { *c } else { '?' }).collect();
+        assert_eq!(t, "a b cé😀");
+        assert_eq!(collees(&"x".repeat(COLLE_MAX + 5)).len(), COLLE_MAX);
+        assert!(collees("").is_empty());
+    }
     use crate::draw::DrawList;
     use crate::text::Text;
     use crate::ui::{Event, Ui};

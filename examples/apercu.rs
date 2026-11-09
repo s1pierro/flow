@@ -20,6 +20,8 @@ struct Shot {
     end: bool,
     help: bool,
     fenetres: bool,
+    /// Le clavier ouvert sur le champ d'essai des paramètres.
+    clavier: bool,
     /// Un dossier à analyser dans une fenêtre Disque.
     disque: Option<&'static str>,
 }
@@ -27,12 +29,13 @@ struct Shot {
 fn main() {
     let dir = std::env::args().nth(1).expect("dossier de sortie");
     let shots = [
-        Shot { name: "tablette-ferme", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, disque: None },
-        Shot { name: "tablette-parametres", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, disque: None },
-        Shot { name: "tablette-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: true, fenetres: false, disque: None },
-        Shot { name: "tablette-fenetres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: true, disque: None },
-        Shot { name: "disque", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, disque: Some(env!("CARGO_MANIFEST_DIR")) },
-        Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, disque: None },
+        Shot { name: "tablette-ferme", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, disque: None },
+        Shot { name: "tablette-parametres", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, disque: None },
+        Shot { name: "tablette-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: true, fenetres: false, clavier: false, disque: None },
+        Shot { name: "tablette-fenetres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: true, clavier: false, disque: None },
+        Shot { name: "disque", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, disque: Some(env!("CARGO_MANIFEST_DIR")) },
+        Shot { name: "clavier", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: true, disque: None },
+        Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, clavier: false, disque: None },
     ];
     let mut egl = Egl::new(true).expect("EGL");
     egl.attach_pbuffer(2400, 2400).expect("pbuffer");
@@ -56,6 +59,10 @@ fn main() {
             let liste = app.surface.partager(1, Sens::Lignes, 0.55).unwrap();
             app.surface.changer_vue(liste, indice("radio").unwrap());
             app.surface.changer_vue(1, indice("aide").unwrap());
+        }
+
+        if s.clavier {
+            app.commun.clavier.ouvrir(flow::parametres::ESSAI);
         }
 
         if let Some(d) = s.disque {

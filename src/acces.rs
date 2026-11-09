@@ -32,6 +32,9 @@ const CALL_VOID_METHOD_A: usize = 63;
 const GET_STATIC_METHOD_ID: usize = 113;
 const CALL_STATIC_OBJECT_METHOD_A: usize = 116;
 const CALL_STATIC_BOOLEAN_METHOD_A: usize = 119;
+const GET_STRING_LENGTH: usize = 164;
+const GET_STRING_CHARS: usize = 165;
+const RELEASE_STRING_CHARS: usize = 166;
 const NEW_STRING_UTF: usize = 167;
 const GET_STRING_UTF_CHARS: usize = 169;
 const RELEASE_STRING_UTF_CHARS: usize = 170;
@@ -102,6 +105,26 @@ impl Jni {
             return None;
         }
         let s = CStr::from_ptr(p).to_string_lossy().into_owned();
+        rel(self.env, o, p);
+        Some(s)
+    }
+
+    /// Un texte Java lu en UTF-16 : contrairement à `lire_texte` (UTF-8 modifié), les
+    /// caractères hors du plan de base (émojis) passent intacts.
+    unsafe fn lire_texte16(&self, o: Obj) -> Option<String> {
+        if o.is_null() {
+            return None;
+        }
+        let len: unsafe extern "C" fn(*mut c_void, Obj) -> i32 = self.f(GET_STRING_LENGTH);
+        let get: unsafe extern "C" fn(*mut c_void, Obj, *mut u8) -> *const u16 = self.f(GET_STRING_CHARS);
+        let rel: unsafe extern "C" fn(*mut c_void, Obj, *const u16) = self.f(RELEASE_STRING_CHARS);
+        let n = len(self.env, o).max(0) as usize;
+        let p = get(self.env, o, std::ptr::null_mut());
+        if p.is_null() {
+            self.exception();
+            return None;
+        }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
         rel(self.env, o, p);
         Some(s)
     }
@@ -359,6 +382,50 @@ pub fn service(etat: i32, titre: &str, texte: &str) {
         if !deja {
             detacher(vm);
         }
+    }
+}
+
+/// Le texte du presse-papier d'Android (son premier élément, converti en texte), ou
+/// rien s'il est vide, illisible, ou hors d'Android. Android 10 et plus ne le donnent
+/// qu'à l'application au premier plan : c'est le cas quand on touche le clavier.
+pub fn presse_papier() -> Option<String> {
+    let contexte = CONTEXTE.load(std::sync::atomic::Ordering::Relaxed) as Obj;
+    if contexte.is_null() {
+        return None;
+    }
+    unsafe {
+        let vm = vm();
+        let deja = deja_attache(vm);
+        let env = attacher(vm)?;
+        let j = Jni { env };
+        let push: unsafe extern "C" fn(*mut c_void, i32) -> i32 = j.f(PUSH_LOCAL_FRAME);
+        if push(env, 16) != 0 {
+            j.exception();
+            return None;
+        }
+        let texte = (|| {
+            let kc = j.classe("android/content/Context")?;
+            let service = j.methode(kc, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", false)?;
+            let presse = j.objet(contexte, service, &[j.texte("clipboard")? as Val])?;
+            let km = j.classe("android/content/ClipboardManager")?;
+            let clip = j.objet(presse, j.methode(km, "getPrimaryClip", "()Landroid/content/ClipData;", false)?, &[])?;
+            let kd = j.classe("android/content/ClipData")?;
+            if j.entier(clip, j.methode(kd, "getItemCount", "()I", false)?, &[])? < 1 {
+                return None;
+            }
+            let element = j.objet(clip, j.methode(kd, "getItemAt", "(I)Landroid/content/ClipData$Item;", false)?, &[0])?;
+            let ke = j.classe("android/content/ClipData$Item")?;
+            let suite = j.objet(element, j.methode(ke, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;", false)?, &[contexte as Val])?;
+            let ko = j.classe("java/lang/Object")?;
+            let chaine = j.objet(suite, j.methode(ko, "toString", "()Ljava/lang/String;", false)?, &[])?;
+            j.lire_texte16(chaine)
+        })();
+        let pop: unsafe extern "C" fn(*mut c_void, Obj) -> Obj = j.f(POP_LOCAL_FRAME);
+        pop(env, std::ptr::null_mut());
+        if !deja {
+            detacher(vm);
+        }
+        texte.filter(|t| !t.is_empty())
     }
 }
 

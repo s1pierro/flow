@@ -107,6 +107,8 @@ pub enum Icon {
     Effacer,
     Entree,
     Baisser,
+    /// Le presse-papier : une planchette et sa pince.
+    Coller,
     /// La rustine de l'application : bord orange denté, centre noir.
     Rustine,
     /// Une batterie remplie à `niveau` (0 à 100) ; en charge, un éclair.
@@ -368,6 +370,17 @@ impl Cx<'_> {
             Icon::Dossier => {
                 self.dl.rrect(Rect::new(cx - 10.0 * u, cy - 8.5 * u, 9.0 * u, 5.0 * u), 1.5 * u, color);
                 self.dl.rrect(Rect::new(cx - 10.0 * u, cy - 5.5 * u, 20.0 * u, 14.0 * u), 2.0 * u, color);
+            }
+            Icon::Coller => {
+                let e = 1.8 * u;
+                // La planchette, ouverte en haut sous la pince
+                for (a, b) in [((-3.0, -7.5), (-7.5, -7.5)), ((-7.5, -7.5), (-7.5, 10.0)), ((-7.5, 10.0), (7.5, 10.0)), ((7.5, 10.0), (7.5, -7.5)), ((7.5, -7.5), (3.0, -7.5))] {
+                    self.dl.line(p(a.0, a.1), p(b.0, b.1), e, color);
+                }
+                // La pince, et deux lignes de texte
+                self.dl.rrect(Rect::new(cx - 4.0 * u, cy - 10.5 * u, 8.0 * u, 5.0 * u), 1.5 * u, color);
+                self.dl.line(p(-3.5, 0.0), p(3.5, 0.0), e, color);
+                self.dl.line(p(-3.5, 4.5), p(2.0, 4.5), e, color);
             }
             Icon::Fichier | Icon::Note | Icon::Photo | Icon::Film => {
                 let e = 1.8 * u;
