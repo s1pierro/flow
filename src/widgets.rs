@@ -131,6 +131,9 @@ pub enum Icon {
     /// Encre : un crayon et son trait ; la gomme.
     Encre,
     Gomme,
+    /// Annuler, rétablir : une flèche en demi-tour.
+    Annuler,
+    Retablir,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -385,6 +388,16 @@ impl Cx<'_> {
                 self.dl.line(p(-3.0, 3.0), p(6.0, -6.0), 9.0 * u, color);
                 self.dl.line(p(-7.0, 7.0), p(-4.0, 4.0), 9.0 * u, [color[0], color[1], color[2], color[3] / 2]);
                 self.dl.line(p(-9.0, 10.5), p(9.0, 10.5), 1.8 * u, color);
+            }
+            Icon::Annuler | Icon::Retablir => {
+                // Un demi-cercle par le haut ; la pointe en bas, à gauche pour annuler
+                let e = 1.8 * u;
+                let pi = std::f32::consts::PI;
+                self.dl.secteur(p(0.0, 2.0), 7.0 * u - e / 2.0, 7.0 * u + e / 2.0, pi, 2.0 * pi, 0.0, color);
+                let s = if icon == Icon::Annuler { -1.0 } else { 1.0 };
+                self.dl.line(p(7.0 * s, 6.0), p(3.0 * s, 1.5), e, color);
+                self.dl.line(p(7.0 * s, 6.0), p(10.5 * s, 1.5), e, color);
+                self.dl.line(p(7.0 * s, 2.0), p(7.0 * s, 6.0), e, color);
             }
             Icon::Coller => {
                 let e = 1.8 * u;

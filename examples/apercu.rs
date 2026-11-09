@@ -92,8 +92,10 @@ fn main() {
             let d = std::env::temp_dir().join("flow-apercu");
             let _ = std::fs::remove_dir_all(&d);
             app.racine_en(Some(d));
-            app.ouvrir_espace("fenetres = F1:encre\n[fenetre 1]\ntaille = 2\ncouleur = 5\n");
+            app.ouvrir_espace("fenetres = F1:encre\n[fenetre 1]\ntaille = 2\ncouleur = #2563eb\n");
             app.onglet_parametres = 2;
+            // Le portrait en thème sombre : la barre doit y rester lisible
+            app.commun.theme.sombre = s.gestes == 2;
         }
 
         let mut scene = None;

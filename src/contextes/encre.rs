@@ -6,8 +6,9 @@
 //! - **Deux doigts** naviguent : pincer zoome autour du centre des doigts, les glisser
 //!   déplace la feuille. Les deux doigts se posent ensemble : un second doigt arrivé
 //!   pendant un tracé est ignoré.
-//! - **La barre du bas** choisit l'épaisseur, la couleur, la gomme ; le zoom affiché
-//!   y ramène la vue à 100 %.
+//! - **La barre du bas** choisit l'épaisseur, la couleur, la gomme ; elle annule et
+//!   rétablit (l'historique dure le temps de la session) ; le zoom affiché y ramène la
+//!   vue à 100 %.
 //!
 //! Le dessin est un document SVG (`Documents/Encre/dessin-N.svg` pour un nouveau),
 //! enregistré à chaque trait terminé. Chaque trait y est un `<path>` fait de segments
@@ -31,8 +32,9 @@ const ENCRE: Id = id("encre");
 /// Les épaisseurs proposées, en unités du dessin (dp à 100 %).
 pub const TAILLES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
 /// Les encres proposées : sur la feuille, toujours claire, quel que soit le thème.
-pub const COULEURS: [Color; 7] = [
+pub const COULEURS: [Color; 8] = [
     [0x1E, 0x1E, 0x25, 255],
+    [0xFF, 0xFF, 0xFF, 255],
     [0x6B, 0x72, 0x80, 255],
     [0xDC, 0x26, 0x26, 255],
     [0xEA, 0x8A, 0x0C, 255],
@@ -52,6 +54,18 @@ pub struct Trait {
     /// Les points, en unités du dessin.
     pub points: Vec<(f32, f32)>,
 }
+
+/// Une modification du dessin, pour annuler et rétablir.
+#[derive(Clone, Debug, PartialEq)]
+enum Action {
+    /// Un trait ajouté (au bout de la liste).
+    Ajout(Trait),
+    /// Des traits gommés, dans l'ordre : chacun à sa place au moment où il est parti.
+    Effacement(Vec<(usize, Trait)>),
+}
+
+/// Le nombre d'actions qu'on peut annuler.
+const HISTORIQUE: usize = 500;
 
 /// La vue : le point du dessin au coin haut gauche de la feuille, et le zoom.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,9 +87,14 @@ pub struct Encre {
     couleur: usize,
     gomme: bool,
     vue: Vue,
-    /// Un trait en cours (le dernier de `traits`), ou la gomme qui a effacé.
+    /// Un trait en cours (le dernier de `traits`), ou ce que la gomme en cours a effacé.
     trace: bool,
-    efface: bool,
+    gommes: Vec<(usize, Trait)>,
+    /// L'historique : ce qu'on peut annuler, puis rétablir.
+    annuler: Vec<Action>,
+    refaire: Vec<Action>,
+    /// Le dernier SVG lu ou écrit : un fichier inchangé n'est pas relu (l'historique reste).
+    connu: String,
     /// L'échelle du pincement à l'événement précédent.
     pincement: f32,
     /// La feuille et le dp à l'image précédente, pour passer de l'écran au dessin.
@@ -101,11 +120,15 @@ fn lire(e: &Etat) -> Encre {
         lecture_seule: false,
         message: None,
         taille: (e.nombre("taille").unwrap_or(1.0) as usize).min(TAILLES.len() - 1),
-        couleur: (e.nombre("couleur").unwrap_or(0.0) as usize).min(COULEURS.len() - 1),
+        // La couleur par son code (#rrggbb) ; un indice venu de la 0.8 donne le noir
+        couleur: e.texte("couleur").and_then(couleur_svg).and_then(|c| COULEURS.iter().position(|k| *k == c)).unwrap_or(0),
         gomme: e.oui("gomme").unwrap_or(false),
         vue,
         trace: false,
-        efface: false,
+        gommes: Vec::new(),
+        annuler: Vec::new(),
+        refaire: Vec::new(),
+        connu: String::new(),
         pincement: 1.0,
         zone: Rect::new(0.0, 0.0, 1.0, 1.0),
         dp: 1.0,
@@ -252,8 +275,13 @@ impl Encre {
         self.charge = true;
         let Some(c) = &self.chemin else { return };
         match std::fs::read_to_string(c) {
+            Ok(t) if t == self.connu => {}
             Ok(t) => {
                 let (traits, tout) = depuis_svg(&t);
+                // Un autre dessin : l'historique ne s'y applique plus
+                self.annuler.clear();
+                self.refaire.clear();
+                self.connu = t;
                 self.traits = traits;
                 self.lecture_seule = !tout;
                 self.message = (!tout).then(|| "Ce SVG ne vient pas d'Encre : lecture seule, seuls ses tracés simples sont montrés.".to_string());
@@ -283,15 +311,71 @@ impl Encre {
             self.message = Some("Pas de stockage : le dessin n'est pas enregistré.".into());
             return;
         };
-        self.message = super::texte::ecrire_fichier(&ch, &vers_svg(&self.traits)).err();
+        let svg = vers_svg(&self.traits);
+        self.message = super::texte::ecrire_fichier(&ch, &svg).err();
+        self.connu = svg;
+    }
+
+    fn noter(&mut self, a: Action) {
+        self.annuler.push(a);
+        if self.annuler.len() > HISTORIQUE {
+            self.annuler.remove(0);
+        }
+        self.refaire.clear();
+    }
+
+    /// Défait la dernière action (ou rétablit la dernière annulée). Vrai si le dessin a changé.
+    fn defaire(&mut self, retablir: bool) -> bool {
+        let (de, vers) = if retablir { (&mut self.refaire, &mut self.annuler) } else { (&mut self.annuler, &mut self.refaire) };
+        let Some(a) = de.pop() else { return false };
+        match (&a, retablir) {
+            (Action::Ajout(_), false) => {
+                self.traits.pop();
+            }
+            (Action::Ajout(t), true) => self.traits.push(t.clone()),
+            (Action::Effacement(v), false) => {
+                for (i, t) in v.iter().rev() {
+                    self.traits.insert((*i).min(self.traits.len()), t.clone());
+                }
+            }
+            (Action::Effacement(v), true) => {
+                for (i, _) in v {
+                    if *i < self.traits.len() {
+                        self.traits.remove(*i);
+                    }
+                }
+            }
+        }
+        vers.push(a);
+        true
+    }
+
+    /// Termine un trait ou un coup de gomme : il entre dans l'historique.
+    fn conclure(&mut self) -> bool {
+        if std::mem::take(&mut self.trace) {
+            if let Some(t) = self.traits.last().cloned() {
+                self.noter(Action::Ajout(t));
+            }
+            return true;
+        }
+        let g = std::mem::take(&mut self.gommes);
+        let change = !g.is_empty();
+        if change {
+            self.noter(Action::Effacement(g));
+        }
+        change
     }
 
     fn gommer(&mut self, x: f32, y: f32) {
         let p = self.vers_dessin(x, y);
         let r = GOMME / self.vue.zoom;
-        let avant = self.traits.len();
-        self.traits.retain(|t| !t.touche(p, r));
-        self.efface |= self.traits.len() != avant;
+        // De la fin vers le début : chaque place notée reste juste au moment du retrait
+        for i in (0..self.traits.len()).rev() {
+            if self.traits[i].touche(p, r) {
+                let t = self.traits.remove(i);
+                self.gommes.push((i, t));
+            }
+        }
     }
 
     /// Un événement de la feuille. Renvoie vrai si le dessin est à enregistrer.
@@ -301,17 +385,18 @@ impl Encre {
             // Un contact sans glissement, bref ou tenu, pose un point (ou gomme)
             Geste::Tap { x, y, .. } | Geste::Appui { x, y, .. } | Geste::AppuiLong { x, y, .. } if modifiable => {
                 if self.gomme {
-                    self.efface = false;
+                    self.gommes.clear();
                     self.gommer(x, y);
-                    return self.efface;
+                } else {
+                    let p = self.vers_dessin(x, y);
+                    self.traits.push(Trait { couleur: COULEURS[self.couleur], largeur: TAILLES[self.taille], points: vec![p] });
+                    self.trace = true;
                 }
-                let p = self.vers_dessin(x, y);
-                self.traits.push(Trait { couleur: COULEURS[self.couleur], largeur: TAILLES[self.taille], points: vec![p] });
-                true
+                self.conclure()
             }
             Geste::SaisieDebut { x, y, .. } if modifiable => {
                 if self.gomme {
-                    self.efface = false;
+                    self.gommes.clear();
                     self.gommer(x, y);
                 } else {
                     let p = self.vers_dessin(x, y);
@@ -334,12 +419,16 @@ impl Encre {
                 }
                 false
             }
-            Geste::SaisieFin { .. } => std::mem::take(&mut self.trace) || std::mem::take(&mut self.efface),
+            Geste::SaisieFin { .. } => self.conclure(),
             Geste::SaisieAnnulee { .. } => {
+                // Cinq doigts : le trait en cours disparaît, les traits gommés reviennent
                 if std::mem::take(&mut self.trace) {
                     self.traits.pop();
                 }
-                std::mem::take(&mut self.efface)
+                for (i, t) in std::mem::take(&mut self.gommes).into_iter().rev() {
+                    self.traits.insert(i.min(self.traits.len()), t);
+                }
+                false
             }
             Geste::PincementDebut { .. } => {
                 self.pincement = 1.0;
@@ -406,14 +495,19 @@ impl Encre {
     }
 
     /// La barre du bas : les épaisseurs, les couleurs, la gomme, le zoom.
-    fn barre(&mut self, cx: &mut Cx, r: Rect, base: Id) {
+    /// Renvoie vrai si le dessin a changé (annuler, rétablir).
+    fn barre(&mut self, cx: &mut Cx, r: Rect, base: Id) -> bool {
         let (d, col) = (cx.dp, cx.couleurs());
         cx.dl.rrect(r, 0.0, col.surface);
         cx.dl.rrect(Rect::new(r.x, r.y, r.w, d.max(1.0)), 0.0, col.ligne);
         cx.clip(Some(r));
-        let h = r.h;
+        // Étroite, la barre resserre ses cases (le zoom et les outils restent touchables)
+        let largeur = r.h * (TAILLES.len() as f32 + COULEURS.len() as f32 * 0.8 + 4.6) + 4.0 * cx.ecart() + cx.measure("1200 %", 13.0) + 2.0 * cx.pad();
+        let h = r.h * (r.w / largeur).clamp(0.6, 1.0);
         let mut x = r.x + cx.ecart();
-        let case = |x: f32| Rect::new(x, r.y, h, h);
+        let mut change = false;
+        let contour = [col.pale[0], col.pale[1], col.pale[2], 140];
+        let case = |x: f32| Rect::new(x, r.y + (r.h - h) / 2.0, h, h);
         let choisi = |cx: &mut Cx, c: Rect, oui: bool| {
             if oui {
                 cx.dl.rrect(c.inset(4.0 * d), cx.theme.rayon(c.h - 8.0 * d), col.puce);
@@ -426,7 +520,11 @@ impl Encre {
                 self.gomme = false;
             }
             choisi(cx, c, i == self.taille && !self.gomme);
-            let e = (t * 1.2).clamp(4.5, 22.0) * d;
+            // L'encre sur un rond de papier : visible quel que soit le thème
+            let fond = h * 0.3;
+            cx.dl.rrect(Rect::new(c.cx() - fond, c.cy() - fond, 2.0 * fond, 2.0 * fond), fond, PAPIER);
+            cx.dl.secteur([c.cx(), c.cy()], fond, fond + d, 0.0, std::f32::consts::TAU, 0.0, contour);
+            let e = (t * 1.2).clamp(3.0, 2.0 * fond / d - 4.0) * d;
             cx.dl.rrect(Rect::new(c.cx() - e / 2.0, c.cy() - e / 2.0, e, e), e / 2.0, if self.gomme { col.pale } else { COULEURS[self.couleur] });
             x += h;
         }
@@ -442,6 +540,8 @@ impl Encre {
                 cx.dl.secteur([c.cx(), c.cy()], rayon + 3.0 * d, rayon + 5.0 * d, 0.0, std::f32::consts::TAU, 0.0, col.texte);
             }
             cx.dl.rrect(Rect::new(c.cx() - rayon, c.cy() - rayon, 2.0 * rayon, 2.0 * rayon), rayon, *couleur);
+            // Un liseré : le noir sur fond sombre, le blanc sur fond clair
+            cx.dl.secteur([c.cx(), c.cy()], rayon - d, rayon, 0.0, std::f32::consts::TAU, 0.0, contour);
             x += h * 0.8;
         }
         x += h * 0.2 + cx.ecart();
@@ -453,6 +553,22 @@ impl Encre {
             cx.dl.rrect(c.inset(4.0 * d), cx.theme.rayon(c.h - 8.0 * d), col.accent);
         }
         cx.icon(c.inset(cx.pad() * 0.6), Icon::Gomme, if self.gomme { col.sur_accent } else { col.texte });
+        x += h + cx.ecart();
+        // Annuler, rétablir
+        let ecrit = !self.lecture_seule;
+        for (k, (icone, retablir)) in [(Icon::Annuler, false), (Icon::Retablir, true)].into_iter().enumerate() {
+            let c = case(x);
+            let possible = ecrit && !if retablir { &self.refaire } else { &self.annuler }.is_empty();
+            if cx.ui.click(sub_id(base, 32 + k), c, None) && possible {
+                change |= self.defaire(retablir);
+            }
+            if possible && cx.ui.pressed(sub_id(base, 32 + k)) {
+                cx.dl.rrect(c.inset(4.0 * d), cx.theme.rayon(c.h - 8.0 * d), col.puce);
+            }
+            cx.icon(c.inset(cx.pad() * 0.6), icone, if possible { col.texte } else { contour });
+            x += h;
+        }
+        let x = x - h;
         // Le zoom, à droite : le toucher ramène à 100 %
         let texte = format!("{:.0} %", self.vue.zoom * 100.0);
         let w = cx.measure(&texte, 13.0) + 2.0 * cx.pad();
@@ -465,6 +581,7 @@ impl Encre {
         }
         cx.centered(zr, &texte, 13.0, col.pale);
         cx.clip(None);
+        change
     }
 }
 
@@ -526,7 +643,9 @@ impl Contexte for Encre {
             cx.centered(b, m, 13.0, col.pale);
             cx.clip(None);
         }
-        self.barre(cx, Rect::new(r.x, r.bottom() - hb, r.w, hb), base);
+        if self.barre(cx, Rect::new(r.x, r.bottom() - hb, r.w, hb), base) {
+            self.enregistrer(c);
+        }
         let nom = self.chemin.as_ref().and_then(|c| c.file_name()).map_or("nouveau dessin".into(), |n| n.to_string_lossy().into_owned());
         let n = self.traits.len();
         format!("{nom} · {n} trait{}{}", if n > 1 { "s" } else { "" }, if self.lecture_seule { " · lecture seule" } else { "" })
@@ -536,7 +655,7 @@ impl Contexte for Encre {
 impl Encre {
     fn outils(&self, e: &mut Etat) {
         e.mettre("taille", self.taille);
-        e.mettre("couleur", self.couleur);
+        e.mettre("couleur", hex(COULEURS[self.couleur]));
         e.mettre_oui("gomme", self.gomme);
     }
 }
@@ -585,6 +704,46 @@ mod tests {
         assert!(!e.recevoir(Geste::Tap { x: 200.0, y: 500.0, intensite: 0.0, precision: 0.0 }));
         assert!(e.recevoir(Geste::Tap { x: 200.0, y: 110.0, intensite: 0.0, precision: 0.0 }));
         assert!(e.traits.is_empty());
+    }
+
+    #[test]
+    fn annuler_et_retablir() {
+        let mut e = encre();
+        let point = |x: f32| Geste::Tap { x, y: 150.0, intensite: 0.0, precision: 0.0 };
+        for x in [150.0, 250.0, 350.0] {
+            assert!(e.recevoir(point(x)));
+        }
+        let trois = e.traits.clone();
+        // Gommer celui du milieu, puis annuler : il revient à sa place
+        e.gomme = true;
+        assert!(e.recevoir(point(250.0)));
+        assert_eq!(e.traits.len(), 2);
+        assert!(e.defaire(false));
+        assert_eq!(e.traits, trois);
+        assert!(e.defaire(true));
+        assert_eq!(e.traits.len(), 2);
+        // Annuler deux fois : le gommage, puis le dernier point
+        e.defaire(false);
+        e.defaire(false);
+        assert_eq!(e.traits[..], trois[..2]);
+        // Une nouvelle action efface ce qu'on pouvait rétablir
+        e.gomme = false;
+        e.recevoir(point(500.0));
+        assert!(!e.defaire(true));
+        while e.defaire(false) {}
+        assert!(e.traits.is_empty());
+    }
+
+    #[test]
+    fn cinq_doigts_rendent_ce_que_la_gomme_a_pris() {
+        let mut e = encre();
+        e.recevoir(Geste::Tap { x: 150.0, y: 150.0, intensite: 0.0, precision: 0.0 });
+        e.gomme = true;
+        e.recevoir(Geste::SaisieDebut { x: 150.0, y: 150.0, doigt: (0.0, 0.0) });
+        assert!(e.traits.is_empty());
+        assert!(!e.recevoir(Geste::SaisieAnnulee { x: 0.0, y: 0.0 }));
+        assert_eq!(e.traits.len(), 1);
+        assert_eq!(e.annuler.len(), 1);
     }
 
     #[test]
