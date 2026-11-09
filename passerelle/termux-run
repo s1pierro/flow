@@ -1,0 +1,146 @@
+#!/bin/bash
+# termux-run — lance une commande avec les outils et l'environnement de Termux,
+# depuis Debian (proot-distro).
+#
+# Pourquoi ça marche : Debian tourne sous proot, à l'intérieur du processus Termux.
+# Les binaires de Termux (liés à la libc d'Android) peuvent donc s'y exécuter,
+# à condition que leurs dossiers soient visibles. Ils voient le même système de
+# fichiers que Debian : le dossier courant reste valable tel quel.
+#
+# Usage :
+#   termux-run --check            diagnostic : qu'est-ce qui est accessible ?
+#   termux-run ./build.sh         lance le build Termux dans le dossier courant
+#   termux-run cargo --version    n'importe quelle commande Termux
+#
+# Variables optionnelles :
+#   TERMUX_PREFIX  (défaut /data/data/com.termux/files/usr)
+#   TERMUX_HOME    (défaut /data/data/com.termux/files/home)
+
+set -uo pipefail
+
+TERMUX_PREFIX="${TERMUX_PREFIX:-/data/data/com.termux/files/usr}"
+TERMUX_HOME="${TERMUX_HOME:-/data/data/com.termux/files/home}"
+T_BASH="$TERMUX_PREFIX/bin/bash"
+
+red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
+green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
+gray()  { printf '\033[0;37m%s\033[0m\n' "$*"; }
+
+# Dossier personnel vu par les outils Termux (cargo, clé de signature…).
+# Si le home Termux n'est pas visible, on garde celui de Debian.
+pick_home() {
+  if [ -d "$TERMUX_HOME" ]; then echo "$TERMUX_HOME"; else echo "$HOME"; fi
+}
+
+# Bibliothèque qui corrige les shebangs (#!/usr/bin/env…) pour les scripts Termux.
+pick_preload() {
+  local f
+  for f in "$TERMUX_PREFIX/lib/libtermux-exec-ld-preload.so" "$TERMUX_PREFIX/lib/libtermux-exec.so"; do
+    [ -f "$f" ] && { echo "$f"; return; }
+  done
+}
+
+# Lance "$@" avec un environnement Termux propre (aucune variable Debian ne fuit).
+run_termux() {
+  local home preload
+  home="$(pick_home)"
+  preload="$(pick_preload)"
+  env -i \
+    HOME="$home" \
+    PREFIX="$TERMUX_PREFIX" \
+    PATH="$TERMUX_PREFIX/bin" \
+    TMPDIR="$TERMUX_PREFIX/tmp" \
+    LANG="${LANG:-en_US.UTF-8}" \
+    TERM="${TERM:-xterm-256color}" \
+    COLORTERM="${COLORTERM:-}" \
+    ANDROID_ROOT=/system \
+    ANDROID_DATA=/data \
+    ${preload:+LD_PRELOAD="$preload"} \
+    "$T_BASH" -c 'exec "$@"' termux-run "$@"
+}
+
+check() {
+  local ok=1 home
+  echo "Passerelle Debian → Termux : diagnostic"
+  echo
+
+  # 1. Les dossiers indispensables
+  if [ -x "$T_BASH" ]; then
+    green "✓ Outils Termux visibles ($TERMUX_PREFIX)"
+  else
+    red "✗ Outils Termux invisibles depuis Debian ($TERMUX_PREFIX)"
+    gray "  Relance Debian en partageant ce dossier :"
+    gray "  proot-distro login debian --bind /data/data/com.termux/files"
+    return 1
+  fi
+  if [ -e /system/bin/linker64 ] || [ -e /system/bin/linker ]; then
+    green "✓ Chargeur Android visible (/system)"
+  else
+    red "✗ /system invisible : les binaires Termux ne peuvent pas démarrer"
+    return 1
+  fi
+  home="$(pick_home)"
+  if [ "$home" = "$TERMUX_HOME" ]; then
+    green "✓ Dossier personnel Termux visible ($TERMUX_HOME)"
+  else
+    red "~ Dossier personnel Termux invisible : utilisation de $HOME"
+    gray "  (cargo et la clé de signature ne seront pas partagés avec Termux)"
+    gray "  Pour le partager : proot-distro login debian --bind /data/data/com.termux/files"
+    ok=0
+  fi
+
+  # 2. Un binaire Termux démarre-t-il vraiment ?
+  local out
+  if out="$(run_termux echo ok 2>&1)" && [ "$out" = ok ]; then
+    green "✓ Un binaire Termux s'exécute depuis Debian"
+  else
+    red "✗ Les binaires Termux ne démarrent pas depuis Debian :"
+    gray "  $out"
+    return 1
+  fi
+
+  # 3. Les outils de la chaîne APK
+  echo
+  echo "Outils de build :"
+  local tool ver
+  for tool in cargo rustc aapt2 aapt zipalign apksigner keytool zip unzip curl; do
+    if run_termux sh -c "command -v $tool" >/dev/null 2>&1; then
+      case "$tool" in
+        cargo|rustc) ver="$(run_termux "$tool" --version 2>&1 | head -n1)" ;;
+        apksigner)   ver="$(run_termux apksigner --version 2>&1 | head -n1)" ;;
+        *)           ver="présent" ;;
+      esac
+      green "  ✓ $tool : $ver"
+    else
+      case "$tool" in
+        aapt|aapt2) gray "  · $tool : absent (un des deux suffit)" ;;
+        *)          red "  ✗ $tool : absent"; ok=0 ;;
+      esac
+    fi
+  done
+
+  if ! run_termux sh -c 'command -v aapt2 || command -v aapt' >/dev/null 2>&1; then
+    red "  ✗ ni aapt2 ni aapt : l'empaquetage est impossible"
+    ok=0
+  fi
+
+  echo
+  if [ "$ok" = 1 ]; then
+    green "Tout est prêt : « termux-run ./build.sh » compile depuis Debian."
+  else
+    red "Passerelle utilisable, avec les réserves ci-dessus."
+  fi
+}
+
+case "${1:-}" in
+  ""|-h|--help)
+    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  --check)
+    check
+    ;;
+  *)
+    [ -x "$T_BASH" ] || { red "Outils Termux invisibles ($TERMUX_PREFIX). Lance : termux-run --check"; exit 127; }
+    run_termux "$@"
+    ;;
+esac
