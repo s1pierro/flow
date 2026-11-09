@@ -6,8 +6,9 @@ composer son espace de travail à son goût. Née d'une copie de
 [Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
 Contextes : Fichiers, Texte (éditeur, qui prend aussi la place de l'explorateur
-quand on y touche un fichier texte), Disque, Radio (et mixeur), Gestes (un terrain
-d'essai des gestes), Aide. Les paramètres de l'application (apparence, clavier,
+quand on y touche un fichier texte), Disque, Radio (et mixeur), Encre (dessin à
+main levée enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts),
+Aide. Les paramètres de l'application (apparence, clavier,
 gestes) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document. Viendra l'édition de SVG.

@@ -1,7 +1,8 @@
 //! Le contexte Fichiers : un explorateur. Chaque fenêtre a son dossier ouvert et son
 //! choix d'afficher les fichiers cachés. Un dossier s'ouvre au toucher, un fichier
 //! audio se lit dans la piste « Fichier » du mixeur, un fichier texte s'ouvre dans
-//! l'éditeur, qui prend la place de l'explorateur dans la fenêtre.
+//! l'éditeur, un SVG dans Encre : l'un ou l'autre prend la place de l'explorateur
+//! dans la fenêtre.
 
 use super::{hachage, ligne_fichier, Puce, TEINTES};
 use crate::contexte::{Commun, Contexte, Demande, Etat, Genre};
@@ -154,6 +155,11 @@ impl Contexte for Fichiers {
                         let mut etat = Etat::default();
                         etat.mettre("document", chemin.display());
                         c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::texte::CLE, etat });
+                    }
+                    Nature::Image if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("svg")) => {
+                        let mut etat = Etat::default();
+                        etat.mettre("document", chemin.display());
+                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::encre::CLE, etat });
                     }
                     _ => {}
                 }

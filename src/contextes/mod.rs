@@ -6,8 +6,8 @@
 
 pub mod aide;
 pub mod disque;
+pub mod encre;
 pub mod fichiers;
-pub mod gestes;
 pub mod radio;
 pub mod texte;
 
@@ -19,13 +19,15 @@ use crate::widgets::{Body, Cx, Icon};
 /// Les contextes, dans l'ordre du menu des fenêtres. Le premier est celui de la
 /// première fenêtre ; leur place ne compte pas pour l'enregistrement (c'est la clé qui
 /// est retenue), on peut donc les réordonner.
-pub const GENRES: &[Genre] = &[fichiers::GENRE, texte::GENRE, disque::GENRE, radio::GENRE, gestes::GENRE, aide::GENRE];
+pub const GENRES: &[Genre] = &[fichiers::GENRE, texte::GENRE, disque::GENRE, radio::GENRE, encre::GENRE, aide::GENRE];
 
 /// Le contexte d'une fenêtre dont la clé est inconnue (fichier d'une autre version).
 pub const REPLI: &str = aide::CLE;
 
 /// La place d'un contexte dans `GENRES`, d'après sa clé.
 pub fn indice(cle: &str) -> Option<u32> {
+    // Le terrain d'essai des gestes (0.7) est devenu Encre
+    let cle = if cle == "gestes" { encre::CLE } else { cle };
     GENRES.iter().position(|g| g.cle == cle).map(|i| i as u32)
 }
 

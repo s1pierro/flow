@@ -26,7 +26,7 @@ struct Shot {
     texte: bool,
     /// Un dossier à analyser dans une fenêtre Disque.
     disque: Option<&'static str>,
-    /// Le terrain des gestes : 1, une saisie en cours (la barre et le curseur déporté) ;
+    /// Encre : 1, des traits et un tracé en cours (la barre et le curseur déporté) ;
     /// 2, un appui tenu (l'anneau de durée), avec l'onglet Gestes des paramètres.
     gestes: u8,
 }
@@ -42,8 +42,8 @@ fn main() {
         Shot { name: "clavier", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: true, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: true, disque: None, gestes: 0 },
         Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
-        Shot { name: "gestes-saisie", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
-        Shot { name: "gestes-appui", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
+        Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
+        Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
     ];
     let mut egl = Egl::new(true).expect("EGL");
     egl.attach_pbuffer(2400, 2400).expect("pbuffer");
@@ -88,7 +88,11 @@ fn main() {
         }
 
         if s.gestes > 0 {
-            app.ouvrir_espace("fenetres = F1:gestes\n");
+            // Le dessin s'enregistre : pas dans le projet
+            let d = std::env::temp_dir().join("flow-apercu");
+            let _ = std::fs::remove_dir_all(&d);
+            app.racine_en(Some(d));
+            app.ouvrir_espace("fenetres = F1:encre\n[fenetre 1]\ntaille = 2\ncouleur = 5\n");
             app.onglet_parametres = 2;
         }
 
@@ -97,14 +101,27 @@ fn main() {
             let t = i as f64 * 0.05;
             ui.horloge(t);
             match (s.gestes, i) {
-                (1, 20) => ui.event(Event::Down { id: 0, x: 420.0, y: 380.0 }, t),
+                // Trois traits en spirale, puis un tracé en cours
+                (1, 2..=16) => {
+                    let n = (i - 2) / 5;
+                    let k = ((i - 2) % 5) as f32;
+                    let (x0, y0) = (300.0 + 300.0 * n as f32, 300.0);
+                    let t0 = t - 0.01;
+                    match k as i32 {
+                        0 => ui.event(Event::Down { id: 0, x: x0, y: y0 }, t0),
+                        4 => ui.event(Event::Up { id: 0 }, t0),
+                        _ => {
+                            for q in 0..12 {
+                                let a = (k - 1.0) * 2.0 + q as f32 * 0.18;
+                                ui.event(Event::Move { id: 0, x: x0 + 120.0 + a.cos() * (40.0 + 12.0 * a), y: y0 + 200.0 + a.sin() * (40.0 + 12.0 * a) }, t0);
+                            }
+                        }
+                    }
+                }
+                (1, 20) => ui.event(Event::Down { id: 0, x: 420.0, y: 700.0 }, t),
                 (1, 21..=40) => {
                     let k = (i - 20) as f32;
-                    ui.event(Event::Move { id: 0, x: 420.0 + 14.0 * k, y: 380.0 + 9.0 * k - 0.3 * k * k }, t)
-                }
-                (1, 42) => {
-                    ui.event(Event::Down { id: 1, x: 900.0, y: 900.0 }, t);
-                    ui.event(Event::Up { id: 1 }, t + 0.1);
+                    ui.event(Event::Move { id: 0, x: 420.0 + 24.0 * k, y: 700.0 + 9.0 * k - 0.5 * k * k }, t)
                 }
                 (2, 30) => ui.event(Event::Down { id: 0, x: 300.0, y: 500.0 }, t),
                 _ => {}

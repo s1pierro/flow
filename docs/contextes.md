@@ -40,8 +40,8 @@ Les contextes existants servent d'exemples, du plus simple au plus complet :
 animation), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
 d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
 par noms et résolu plus tard), `texte.rs` (un contexte à document : lecture,
-enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`), `gestes.rs`
-(une zone à gestes élaborés, une animation).
+enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`), `encre.rs`
+(une zone à gestes élaborés, un document SVG enregistré à chaque trait).
 
 `texte.rs` est la référence pour un contexte qui édite des fichiers (le futur SVG).
 
@@ -198,8 +198,9 @@ l'écran, en pixels.
 
 Flow dessine lui-même le retour visuel (l'anneau de durée, la barre et le curseur,
 le trait du pincement) : le contexte n'a qu'à réagir. La distance et les durées se
-règlent dans l'onglet Gestes des paramètres (`Commun::gestes`). Le contexte Gestes
-(`contextes/gestes.rs`) sert de terrain d'essai et d'exemple.
+règlent dans l'onglet Gestes des paramètres (`Commun::gestes`). Le contexte Encre
+(`contextes/encre.rs`) sert d'exemple : un doigt trace (saisie, tap), deux doigts
+naviguent (pincement : zoom autour du centre des doigts et déplacement).
 
 ## Ouvrir un contexte depuis un autre
 
@@ -281,4 +282,4 @@ dans la section `[commun]` (voir `App::espace` et `App::ouvrir_espace`).
 
 ## À venir
 
-- Un contexte **SVG**, sur le modèle de `texte.rs`.
+- Un contexte **SVG** complet (formes, sélection), à partir d'`encre.rs`.

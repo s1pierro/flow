@@ -86,7 +86,7 @@ fn nom_unique() -> String {
 }
 
 /// Écrit à côté puis renomme : un fichier n'est jamais à moitié écrit.
-fn ecrire_fichier(chemin: &Path, texte: &str) -> Result<(), String> {
+pub(super) fn ecrire_fichier(chemin: &Path, texte: &str) -> Result<(), String> {
     if let Some(d) = chemin.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }

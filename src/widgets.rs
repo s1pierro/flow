@@ -128,8 +128,9 @@ pub enum Icon {
     Haut,
     /// L'occupation du disque : un anneau en trois secteurs.
     Anneau,
-    /// Les gestes : un doigt, sa barre et le curseur déporté au bout.
-    Toucher,
+    /// Encre : un crayon et son trait ; la gomme.
+    Encre,
+    Gomme,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -373,14 +374,17 @@ impl Cx<'_> {
                 self.dl.rrect(Rect::new(cx - 10.0 * u, cy - 8.5 * u, 9.0 * u, 5.0 * u), 1.5 * u, color);
                 self.dl.rrect(Rect::new(cx - 10.0 * u, cy - 5.5 * u, 20.0 * u, 14.0 * u), 2.0 * u, color);
             }
-            Icon::Toucher => {
-                let e = 1.8 * u;
-                let tau = std::f32::consts::TAU;
-                // Le curseur, en haut à gauche ; la barre ; le doigt, en bas à droite
-                self.dl.secteur(p(-4.5, -4.5), 3.0 * u, 3.0 * u + e, 0.0, tau, 0.0, color);
-                self.dl.rrect(Rect::new(cx - 5.5 * u, cy - 5.5 * u, 2.0 * u, 2.0 * u), 1.0 * u, color);
-                self.dl.line(p(-2.0, -2.0), p(3.0, 3.0), e, color);
-                self.dl.rrect(Rect::new(cx + 1.5 * u, cy + 1.5 * u, 8.0 * u, 8.0 * u), 4.0 * u, color);
+            Icon::Encre => {
+                // Le crayon en biais, sa pointe, et le trait qu'il laisse
+                self.dl.line(p(-4.0, 4.0), p(7.0, -7.0), 5.0 * u, color);
+                self.dl.line(p(-8.0, 8.0), p(-5.0, 5.0), 2.0 * u, color);
+                self.dl.line(p(-9.0, 10.5), p(9.0, 10.5), 1.8 * u, color);
+            }
+            Icon::Gomme => {
+                // La gomme en biais : son corps, et le bout qui efface, plus pâle
+                self.dl.line(p(-3.0, 3.0), p(6.0, -6.0), 9.0 * u, color);
+                self.dl.line(p(-7.0, 7.0), p(-4.0, 4.0), 9.0 * u, [color[0], color[1], color[2], color[3] / 2]);
+                self.dl.line(p(-9.0, 10.5), p(9.0, 10.5), 1.8 * u, color);
             }
             Icon::Coller => {
                 let e = 1.8 * u;
