@@ -158,9 +158,9 @@ impl Ui {
                         }
                         Sense::Scroll => Owner::Scroll(r.id),
                         Sense::Gestes => {
-                            let (reg, d) = (self.reglages_gestes, self.dist());
+                            let reg = self.reglages_gestes;
                             let m = self.moteurs.entry(r.id).or_default();
-                            m.poser(id, x, y, t, &reg, d);
+                            m.poser(id, x, y, t, &reg);
                             Owner::Gestes(r.id)
                         }
                         Sense::Sink => Owner::Nobody,
@@ -184,9 +184,11 @@ impl Ui {
         self.recueillir();
     }
 
-    /// La distance de saisie, en pixels.
-    fn dist(&self) -> f32 {
-        self.reglages_gestes.dist * self.dp
+    /// La longueur de la barre du curseur déporté (0 sans lui) et le glissement qui
+    /// engage la saisie, en pixels.
+    fn dist(&self) -> (f32, f32) {
+        let barre = self.reglages_gestes.dist.max(0.0) * self.dp;
+        (barre, if barre > 0.0 { barre } else { crate::gestes::SEUIL * self.dp })
     }
 
     /// Range les événements des moteurs, pour les zones qui les liront.
@@ -246,9 +248,9 @@ impl Ui {
             },
             Owner::Scroll(s) if slid => *self.scrolls.entry(s).or_insert(0.0) += y - oy,
             Owner::Gestes(g) => {
-                let (reg, d) = (self.reglages_gestes, self.dist());
+                let (reg, (barre, seuil)) = (self.reglages_gestes, self.dist());
                 if let Some(m) = self.moteurs.get_mut(&g) {
-                    m.bouger(id, x, y, t, &reg, d);
+                    m.bouger(id, x, y, t, &reg, barre, seuil);
                 }
             }
             _ => {}

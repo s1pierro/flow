@@ -28,7 +28,8 @@ use crate::widgets::Cx;
 /// Les réglages des gestes, communs à toute l'application.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReglagesGestes {
-    /// La distance qui engage la saisie, et la longueur de la barre, en dp.
+    /// La distance qui engage la saisie, et la longueur de la barre, en dp. À 0, pas de
+    /// curseur déporté : la saisie part après `SEUIL` dp et le curseur reste sous le doigt.
     pub dist: f32,
     /// La durée qui sépare le tap de l'appui, puis l'appui de l'appui long, en s.
     pub appui: f32,
@@ -43,10 +44,14 @@ impl Default for ReglagesGestes {
     }
 }
 
+/// Sans curseur déporté, le glissement qui engage la saisie (ou annule un appui), en dp.
+pub const SEUIL: f32 = 10.0;
+
 impl ReglagesGestes {
-    /// Ramène les réglages dans leurs bornes (l'appui long après l'appui).
+    /// Ramène les réglages dans leurs bornes (l'appui long après l'appui). Une distance
+    /// sous 12 dp désactive le curseur déporté.
     pub fn borner(mut self) -> ReglagesGestes {
-        self.dist = self.dist.clamp(24.0, 160.0);
+        self.dist = if self.dist < 12.0 { 0.0 } else { self.dist.clamp(24.0, 160.0) };
         self.appui = self.appui.clamp(0.15, 1.5);
         self.appui_long = self.appui_long.clamp(self.appui + 0.2, 4.0);
         self
@@ -192,8 +197,7 @@ impl Moteur {
         matches!(self.etat, Etat::Tap | Etat::Appui)
     }
 
-    /// `d` : la distance de saisie, en pixels.
-    pub fn poser(&mut self, id: i32, x: f32, y: f32, t: f64, r: &ReglagesGestes, d: f32) {
+    pub fn poser(&mut self, id: i32, x: f32, y: f32, t: f64, r: &ReglagesGestes) {
         self.poses += 1;
         self.temps(t, r);
         if self.poses >= 5 {
@@ -219,10 +223,11 @@ impl Moteur {
             }
             _ => {}
         }
-        let _ = d;
     }
 
-    pub fn bouger(&mut self, id: i32, x: f32, y: f32, t: f64, r: &ReglagesGestes, d: f32) {
+    /// `barre` : la longueur de la barre du curseur déporté (0 : pas de curseur
+    /// déporté) ; `seuil` : le glissement qui engage la saisie ; en pixels.
+    pub fn bouger(&mut self, id: i32, x: f32, y: f32, t: f64, r: &ReglagesGestes, barre: f32, seuil: f32) {
         self.temps(t, r);
         let Some(i) = self.doigts.iter().position(|f| f.0 == id) else { return };
         self.doigts[i].1 = (x, y);
@@ -230,12 +235,12 @@ impl Moteur {
         match self.etat {
             Etat::Tap | Etat::Appui | Etat::AppuiLong => {
                 self.ecart = self.ecart.max(dist(p, self.depart));
-                if self.ecart < d {
+                if self.ecart < seuil {
                     return;
                 }
                 if self.etat == Etat::Tap {
                     // Le curseur apparaît au départ du doigt, au bout de la barre
-                    self.curseur = au_bout(p, self.depart, d);
+                    self.curseur = au_bout(p, self.depart, barre);
                     self.saisie_depart = self.curseur;
                     self.passer(Etat::Saisie);
                     self.sortie.push(Geste::SaisieDebut { x: self.curseur.0, y: self.curseur.1, doigt: p });
@@ -246,7 +251,7 @@ impl Moteur {
             }
             Etat::Saisie if i == 0 => {
                 // La barre rigide : le curseur reste à `d` du doigt, dans sa direction
-                self.curseur = au_bout(p, self.curseur, d);
+                self.curseur = au_bout(p, self.curseur, barre);
                 self.sortie.push(Geste::SaisieDeplace { x: self.curseur.0, y: self.curseur.1, doigt: p });
             }
             Etat::Pincement if self.doigts.len() == 2 => {
@@ -345,6 +350,9 @@ pub fn dessiner_retour(cx: &mut Cx, r: &ReglagesGestes, apercus: &[Apercu]) {
                 }
                 cx.dl.rrect(Rect::new(x - 5.0 * d, y - 5.0 * d, 10.0 * d, 10.0 * d), 5.0 * d, voile(teinte, 200));
             }
+            Etat::Saisie if r.dist <= 0.0 => {
+                cx.dl.rrect(Rect::new(x - 12.0 * d, y - 12.0 * d, 24.0 * d, 24.0 * d), 12.0 * d, voile(col.accent, 90));
+            }
             Etat::Saisie => {
                 let c = a.curseur.unwrap_or(a.doigt);
                 cx.dl.rrect(Rect::new(x - 12.0 * d, y - 12.0 * d, 24.0 * d, 24.0 * d), 12.0 * d, voile(col.accent, 60));
@@ -382,18 +390,18 @@ mod tests {
     #[test]
     fn tap_appui_et_appui_long_selon_la_duree() {
         let mut m = Moteur::default();
-        m.poser(1, 10.0, 10.0, 0.0, &R, D);
-        m.bouger(1, 13.0, 14.0, 0.1, &R, D);
+        m.poser(1, 10.0, 10.0, 0.0, &R);
+        m.bouger(1, 13.0, 14.0, 0.1, &R, D, D);
         m.lever(1, 0.25, &R);
         assert_eq!(m.prendre(), vec![Geste::Etat(Etat::Tap), Geste::Tap { x: 13.0, y: 14.0, intensite: 0.5, precision: 5.0 }, Geste::Etat(Etat::Repos)]);
 
-        m.poser(1, 0.0, 0.0, 1.0, &R, D);
+        m.poser(1, 0.0, 0.0, 1.0, &R);
         m.temps(1.6, &R);
         assert_eq!(m.etat, Etat::Appui);
         m.lever(1, 2.0, &R);
         assert_eq!(sans_etats(m.prendre()), vec![Geste::Appui { x: 0.0, y: 0.0, intensite: 0.5, precision: 0.0 }]);
 
-        m.poser(1, 0.0, 0.0, 3.0, &R, D);
+        m.poser(1, 0.0, 0.0, 3.0, &R);
         m.temps(4.6, &R);
         assert_eq!(m.etat, Etat::AppuiLong);
         m.lever(1, 5.0, &R);
@@ -404,15 +412,15 @@ mod tests {
     #[test]
     fn la_saisie_deporte_le_curseur_au_bout_de_la_barre() {
         let mut m = Moteur::default();
-        m.poser(1, 100.0, 100.0, 0.0, &R, D);
-        m.bouger(1, 130.0, 100.0, 0.05, &R, D);
+        m.poser(1, 100.0, 100.0, 0.0, &R);
+        m.bouger(1, 130.0, 100.0, 0.05, &R, D, D);
         assert_eq!(m.etat, Etat::Tap, "pas encore à la distance");
-        m.bouger(1, 160.0, 100.0, 0.1, &R, D);
+        m.bouger(1, 160.0, 100.0, 0.1, &R, D, D);
         assert_eq!(m.etat, Etat::Saisie);
         // Le curseur est au départ du doigt
         assert_eq!(sans_etats(m.prendre()), vec![Geste::SaisieDebut { x: 100.0, y: 100.0, doigt: (160.0, 100.0) }]);
         // Le doigt monte : le curseur suit, toujours à 60 px
-        m.bouger(1, 160.0, 40.0, 0.2, &R, D);
+        m.bouger(1, 160.0, 40.0, 0.2, &R, D, D);
         let a = m.apercu().unwrap();
         let c = a.curseur.unwrap();
         assert!((dist(c, (160.0, 40.0)) - 60.0).abs() < 1e-3);
@@ -423,11 +431,21 @@ mod tests {
     }
 
     #[test]
+    fn sans_barre_le_curseur_reste_sous_le_doigt() {
+        let mut m = Moteur::default();
+        m.poser(1, 100.0, 100.0, 0.0, &R);
+        m.bouger(1, 112.0, 100.0, 0.05, &R, 0.0, 10.0);
+        assert_eq!(sans_etats(m.prendre()), vec![Geste::SaisieDebut { x: 112.0, y: 100.0, doigt: (112.0, 100.0) }]);
+        m.bouger(1, 200.0, 150.0, 0.1, &R, 0.0, 10.0);
+        assert_eq!(m.apercu().unwrap().curseur, Some((200.0, 150.0)));
+    }
+
+    #[test]
     fn un_appui_qui_bouge_est_annule() {
         let mut m = Moteur::default();
-        m.poser(1, 0.0, 0.0, 0.0, &R, D);
+        m.poser(1, 0.0, 0.0, 0.0, &R);
         m.temps(0.7, &R);
-        m.bouger(1, 80.0, 0.0, 0.8, &R, D);
+        m.bouger(1, 80.0, 0.0, 0.8, &R, D, D);
         assert_eq!(sans_etats(m.prendre()), vec![Geste::Annule { x: 80.0, y: 0.0 }]);
         // Le doigt resté posé ne fait plus rien
         m.lever(1, 1.0, &R);
@@ -437,17 +455,17 @@ mod tests {
     #[test]
     fn deux_doigts_pincent() {
         let mut m = Moteur::default();
-        m.poser(1, 100.0, 100.0, 0.0, &R, D);
-        m.poser(2, 200.0, 100.0, 0.05, &R, D);
+        m.poser(1, 100.0, 100.0, 0.0, &R);
+        m.poser(2, 200.0, 100.0, 0.05, &R);
         assert_eq!(m.etat, Etat::Pincement);
-        m.bouger(2, 300.0, 100.0, 0.1, &R, D);
+        m.bouger(2, 300.0, 100.0, 0.1, &R, D, D);
         let g = sans_etats(m.prendre());
         assert_eq!(g[0], Geste::PincementDebut { centre: (150.0, 100.0) });
         assert_eq!(g[1], Geste::Pincement { echelle: 2.0, centre: (200.0, 100.0), deplacement: (50.0, 0.0) });
         m.lever(1, 0.5, &R);
         assert!(matches!(sans_etats(m.prendre())[..], [Geste::PincementFin { echelle, .. }] if echelle == 2.0));
         // Le second doigt, encore posé, n'entame pas de geste
-        m.bouger(2, 0.0, 0.0, 0.6, &R, D);
+        m.bouger(2, 0.0, 0.0, 0.6, &R, D, D);
         m.lever(2, 0.7, &R);
         assert!(m.prendre().is_empty());
     }
@@ -455,11 +473,11 @@ mod tests {
     #[test]
     fn cinq_doigts_annulent() {
         let mut m = Moteur::default();
-        m.poser(1, 0.0, 0.0, 0.0, &R, D);
-        m.bouger(1, 100.0, 0.0, 0.1, &R, D);
+        m.poser(1, 0.0, 0.0, 0.0, &R);
+        m.bouger(1, 100.0, 0.0, 0.1, &R, D, D);
         m.prendre();
         for i in 2..=5 {
-            m.poser(i, 0.0, 0.0, 0.2, &R, D);
+            m.poser(i, 0.0, 0.0, 0.2, &R);
         }
         assert_eq!(m.prendre(), vec![Geste::SaisieAnnulee { x: 40.0, y: 0.0 }, Geste::Etat(Etat::Repos)]);
     }
@@ -467,7 +485,8 @@ mod tests {
     #[test]
     fn les_reglages_restent_dans_leurs_bornes() {
         let r = ReglagesGestes { dist: 1.0, appui: 2.0, appui_long: 0.1, retour: false }.borner();
-        assert_eq!((r.dist, r.appui), (24.0, 1.5));
+        assert_eq!((r.dist, r.appui), (0.0, 1.5));
+        assert_eq!(ReglagesGestes { dist: 15.0, ..R }.borner().dist, 24.0);
         assert!(r.appui_long > r.appui);
     }
 }

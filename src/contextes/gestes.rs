@@ -317,6 +317,7 @@ impl Terrain {
             "Glisser : un curseur apparaît là où le doigt s'est posé, au bout d'une barre. Il déplace la pastille sans que le doigt la cache, ou trace un trait sur le vide.",
             "Deux doigts : pincez pour agrandir la pastille choisie, et la déplacer.",
             "Cinq doigts : annulent le geste en cours.",
+            "Le curseur déporté se désactive en mettant sa distance à zéro : la saisie part alors dès que le doigt glisse, et le curseur reste sous lui.",
             "Les durées et la longueur de la barre se règlent dans les paramètres, onglet Gestes.",
         ] {
             cx.paragraph(&mut b, s);

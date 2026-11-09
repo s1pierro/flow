@@ -90,10 +90,10 @@ fn clavier(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun, essai: &mut Ed
 
 fn gestes(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
     let g = &mut c.gestes;
-    cx.paragraph(b, "Les contextes qui le proposent distinguent le tap, l'appui et l'appui long par leur durée. Un doigt qui glisse fait apparaître un curseur déporté, au bout d'une barre : le doigt ne cache plus ce qu'il désigne. Deux doigts pincent. Le contexte Gestes permet de s'y essayer.");
+    cx.paragraph(b, "Les contextes qui le proposent distinguent le tap, l'appui et l'appui long par leur durée. Un doigt qui glisse fait apparaître un curseur déporté, au bout d'une barre : le doigt ne cache plus ce qu'il désigne. Tout à gauche, la distance désactive le curseur déporté : il reste sous le doigt. Deux doigts pincent. Le contexte Gestes permet de s'y essayer.");
     cx.section(b, "DISTANCE");
-    let shown = format!("{:.0} dp", g.dist);
-    cx.slider(b, sub_id(scroll, 40), "Glissement et barre", &shown, &mut g.dist, 24.0, 160.0);
+    let shown = if g.dist < 12.0 { "sans curseur déporté".to_string() } else { format!("{:.0} dp", g.dist.max(24.0)) };
+    cx.slider(b, sub_id(scroll, 40), "Curseur déporté", &shown, &mut g.dist, 0.0, 160.0);
     g.dist = g.dist.round();
     cx.section(b, "DURÉES");
     let shown = format!("{:.0} ms", g.appui * 1000.0);

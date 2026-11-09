@@ -190,7 +190,9 @@ Une zone passe par ces états (`Geste::Etat` annonce chaque changement) :
 Au lever, exactement un de `Tap`, `Appui`, `AppuiLong` arrive, selon la durée, avec
 son intensité (où il en était entre ses seuils) et sa précision (le plus grand écart
 du doigt, en pixels). En saisie, le curseur apparaît là où le doigt s'est posé et le
-suit au bout d'une barre rigide : le doigt ne cache pas ce qu'il désigne. Cinq doigts
+suit au bout d'une barre rigide : le doigt ne cache pas ce qu'il désigne. Avec une
+distance réglée à 0, il n'y a pas de barre : la saisie part dès 10 dp de glissement
+et le curseur reste sous le doigt. Cinq doigts
 annulent le geste (`SaisieAnnulee` pendant une saisie). Les coordonnées sont celles de
 l'écran, en pixels.
 

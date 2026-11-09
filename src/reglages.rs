@@ -125,7 +125,8 @@ impl Reglages {
         s += "# Place du clavier flottant : horizontale puis verticale, de 0 (gauche, haut) à 1 (droite, bas)\n";
         s += &format!("clavier_position = {:.3} {:.3}\n\n", c.position.0, c.position.1);
         let g = &self.gestes;
-        s += "# Gestes : distance qui fait glisser et longueur de la barre du curseur déporté, en dp (24 à 160 ; 60)\n";
+        s += "# Gestes : distance qui fait glisser et longueur de la barre du curseur déporté, en dp\n";
+        s += "# (24 à 160 ; 60). 0 : pas de curseur déporté, il reste sous le doigt\n";
         s += &format!("gestes_distance = {:.0}\n\n", g.dist);
         s += "# Gestes : durée qui sépare le tap de l'appui, en ms (150 à 1500 ; 500)\n";
         s += &format!("gestes_appui = {:.0}\n\n", g.appui * 1000.0);
