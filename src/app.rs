@@ -16,7 +16,7 @@ use crate::espace::Espace;
 use crate::parametres;
 use crate::reglages::Reglages;
 use crate::shell::{Layout, Shell, Side};
-use crate::surface::{Changement, FenetreId, Placee, Sens, Surface};
+use crate::surface::{Changement, FenetreId, Placee, Surface};
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 use std::collections::HashMap;
@@ -163,14 +163,15 @@ impl App {
                     }
                 }
                 let Some(vue) = contextes::indice(cle) else { return };
-                let Some(p) = self.surface.placees().iter().find(|p| p.id == depuis).copied() else { return };
-                // À côté de la fenêtre qui demande, ou dessous si elle est en hauteur
-                let sens = if p.cadre.w >= p.cadre.h { Sens::Colonnes } else { Sens::Lignes };
-                let Some(n) = self.surface.partager_apres(depuis, sens, 0.5) else { return };
-                // L'instance est prête avant que le partage ne soit suivi : elle ne sera pas
-                // remplacée par une copie de la fenêtre partagée
-                self.fenetres.insert(n, (contextes::genre(vue).ouvrir)(&etat));
-                self.surface.changer_vue(n, vue);
+                if self.surface.vue(depuis).is_none() {
+                    return;
+                }
+                // Le nouveau contexte remplace celui de la fenêtre qui demande ; l'ancienne
+                // instance met à l'abri ce qu'elle n'a pas enregistré
+                if let Some(mut ancienne) = self.fenetres.insert(depuis, (contextes::genre(vue).ouvrir)(&etat)) {
+                    ancienne.mettre_a_l_abri(&self.commun);
+                }
+                self.surface.changer_vue(depuis, vue);
             }
         }
     }
@@ -583,23 +584,23 @@ mod tests {
     }
 
     #[test]
-    fn un_fichier_texte_s_ouvre_a_cote_une_seule_fois() {
+    fn un_fichier_texte_remplace_l_explorateur_une_seule_fois() {
         let mut r = Rig::new();
+        r.app.surface.partager(1, crate::surface::Sens::Colonnes, 0.5);
         r.frames(1);
         let mut etat = Etat::default();
         etat.mettre("document", "/tmp/a.txt");
-        let demande = Demande::Ouvrir { depuis: 1, cle: "texte", etat };
-        r.app.commun.demandes.push(demande.clone());
+        r.app.commun.demandes.push(Demande::Ouvrir { depuis: 1, cle: "texte", etat: etat.clone() });
         r.frames(2);
-        let p = r.app.surface.placees().to_vec();
-        assert_eq!(p.len(), 2);
-        // L'explorateur garde la gauche, l'éditeur prend la droite, avec le document
-        assert_eq!((p[0].id, p[0].vue, p[1].vue), (1, vue("fichiers"), vue("texte")));
-        assert!(r.app.espace().contains(&format!("[fenetre {}]\ndocument = /tmp/a.txt\n", p[1].id)));
-        // Le même document ne s'ouvre pas une seconde fois
-        r.app.commun.demandes.push(demande);
-        r.frames(2);
+        // La fenêtre de l'explorateur devient l'éditeur, sur le document ; rien d'autre ne bouge
         assert_eq!(r.app.surface.nombre(), 2);
+        assert_eq!(r.app.surface.vue(1), Some(vue("texte")));
+        assert_eq!(r.app.fenetres[&1].cle(), "texte");
+        assert!(r.app.espace().contains("[fenetre 1]\ndocument = /tmp/a.txt\n"));
+        // Depuis l'autre explorateur, le même document ne s'ouvre pas une seconde fois
+        r.app.commun.demandes.push(Demande::Ouvrir { depuis: 2, cle: "texte", etat });
+        r.frames(2);
+        assert_eq!(r.app.surface.vue(2), Some(vue("fichiers")));
     }
 
     #[test]

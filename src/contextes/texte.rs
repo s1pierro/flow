@@ -1,7 +1,8 @@
 //! Le contexte Texte : un éditeur de texte, un document par fenêtre.
 //!
 //! - Il s'ouvre vide depuis le menu des fenêtres, ou avec un fichier quand on touche
-//!   un fichier texte dans l'explorateur (`Demande::Ouvrir`).
+//!   un fichier texte dans l'explorateur : il prend alors sa place dans la fenêtre
+//!   (`Demande::Ouvrir`).
 //! - Le texte se coupe à la largeur de la fenêtre (au mot si possible), en chasse
 //!   fixe ; toucher le texte y place le curseur et ouvre le clavier ; Entrée passe à
 //!   la ligne, « Coller » garde les retours à la ligne.

@@ -1,7 +1,7 @@
 //! Le contexte Fichiers : un explorateur. Chaque fenêtre a son dossier ouvert et son
 //! choix d'afficher les fichiers cachés. Un dossier s'ouvre au toucher, un fichier
 //! audio se lit dans la piste « Fichier » du mixeur, un fichier texte s'ouvre dans
-//! l'éditeur, dans une fenêtre à côté.
+//! l'éditeur, qui prend la place de l'explorateur dans la fenêtre.
 
 use super::{hachage, ligne_fichier, Puce, TEINTES};
 use crate::contexte::{Commun, Contexte, Demande, Etat, Genre};

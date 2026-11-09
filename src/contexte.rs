@@ -90,9 +90,9 @@ pub trait Contexte {
 /// Ce qu'une instance demande à l'application, traité après le dessin.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Demande {
-    /// Ouvrir un contexte, avec cet état, dans une fenêtre née du partage de
-    /// `depuis` (par exemple l'éditeur de texte, depuis l'explorateur). Si une fenêtre
-    /// édite déjà ce document (`etat` : `document`), rien ne s'ouvre.
+    /// Ouvrir un contexte, avec cet état, à la place de celui de la fenêtre `depuis`
+    /// (par exemple l'éditeur de texte, depuis l'explorateur). Si une fenêtre édite
+    /// déjà ce document (`etat` : `document`), rien ne s'ouvre.
     Ouvrir { depuis: FenetreId, cle: &'static str, etat: Etat },
 }
 

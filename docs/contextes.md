@@ -165,10 +165,11 @@ etat.mettre("document", chemin.display());
 c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: texte::CLE, etat });
 ```
 
-Après le dessin, l'application partage la fenêtre `depuis` : la nouvelle fenêtre
-prend la moitié droite (ou basse, si la fenêtre est en hauteur) avec ce contexte,
-ouvert sur cet état. Si une fenêtre de ce contexte édite déjà le même `document`,
-rien ne s'ouvre. C'est ainsi que l'explorateur ouvre un fichier texte dans l'éditeur.
+Après le dessin, l'application remplace le contexte de la fenêtre `depuis` par
+celui-ci, ouvert sur cet état (l'ancienne instance passe d'abord par
+`mettre_a_l_abri`). Si une fenêtre de ce contexte édite déjà le même `document`,
+rien ne s'ouvre. C'est ainsi que l'explorateur ouvre un fichier texte : l'éditeur
+prend sa place dans la fenêtre.
 
 ## Les documents non enregistrés
 

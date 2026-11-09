@@ -5,8 +5,8 @@ fenêtres, et chaque fenêtre montre un **contexte**, une sous-application, pour
 composer son espace de travail à son goût. Née d'une copie de
 [Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
-Contextes : Fichiers, Texte (éditeur, ouvert aussi en touchant un fichier texte
-dans l'explorateur), Disque, Radio (et mixeur), Aide. Les paramètres de
+Contextes : Fichiers, Texte (éditeur, qui prend aussi la place de l'explorateur
+quand on y touche un fichier texte), Disque, Radio (et mixeur), Aide. Les paramètres de
 l'application (apparence, clavier) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document. Viendra l'édition de SVG.

@@ -22,7 +22,7 @@ struct Shot {
     fenetres: bool,
     /// Le clavier ouvert sur le champ d'essai des paramètres.
     clavier: bool,
-    /// L'explorateur et l'éditeur de texte, ouvert sur le README, clavier sorti.
+    /// L'explorateur à côté de l'éditeur de texte, ouvert sur le README, clavier sorti.
     texte: bool,
     /// Un dossier à analyser dans une fenêtre Disque.
     disque: Option<&'static str>,
