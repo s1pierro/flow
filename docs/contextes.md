@@ -6,7 +6,7 @@ L'utilisateur compose son espace de travail en partageant les fenêtres et en
 choisissant le contexte de chacune. Ce guide explique comment ajouter un contexte,
 par exemple un éditeur de texte ou de SVG.
 
-Les paramètres de l'application (apparence, clavier) ne sont pas un contexte : ils
+Les paramètres de l'application (apparence, clavier, gestes) ne sont pas un contexte : ils
 vivent dans le panneau latéral (`src/parametres.rs`), ouvert par une pastille de la
 barre du bas.
 
@@ -40,7 +40,8 @@ Les contextes existants servent d'exemples, du plus simple au plus complet :
 animation), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
 d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
 par noms et résolu plus tard), `texte.rs` (un contexte à document : lecture,
-enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`).
+enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`), `gestes.rs`
+(une zone à gestes élaborés, une animation).
 
 `texte.rs` est la référence pour un contexte qui édite des fichiers (le futur SVG).
 
@@ -124,7 +125,6 @@ une version par défaut qui ne fait rien.
 | `ecrire(e)` | enregistrement | Écrit dans `e` de quoi rouvrir l'instance |
 | `avancer(dt, c)` | avant le dessin | Fait avancer les animations |
 | `anime(c)` | après chaque image | Vrai pour obtenir une image de plus sans événement (sinon Flow ne redessine pas) |
-| `geste(g, p, c)` | geste commencé dans la fenêtre | Glissement d'un doigt, déplacement et zoom à deux doigts (pour un plan de travail, un dessin) |
 | `frappe(f, cible, frappe, c)` | frappe du clavier virtuel | Renvoie vrai si `cible` est un champ de cette instance |
 | `retour(c)` | retour dans l'application | Relit ce qui a pu changer sur le disque |
 | `mettre_a_l_abri(c)` | fenêtre fermée, autre contexte, arrière-plan | Écrit un brouillon de ce qui n'est pas enregistré (dans `c.dossier`) |
@@ -154,6 +154,50 @@ fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) ->
     true
 }
 ```
+
+## Les gestes élaborés
+
+Les widgets (`click`, `drag`, `body`) suffisent aux listes et aux réglages. Pour un
+terrain de travail (un dessin, un plan, un texte), Flow fournit des gestes inspirés de
+[tnt.js](https://github.com/s1pierro/tnt.js), dans `src/gestes.rs`. Un contexte déclare
+une zone et lit les événements reçus depuis l'image précédente :
+
+```rust
+for g in cx.ui.gestes(sub_id(base, 1), zone) {
+    match g {
+        Geste::Tap { x, y, .. } => { /* choisir */ }
+        Geste::Appui { x, y, intensite, .. } => { /* menu, variante */ }
+        Geste::AppuiLong { x, y, .. } => { /* action forte */ }
+        Geste::SaisieDebut { x, y, .. } => { /* le curseur déporté apparaît en (x, y) */ }
+        Geste::SaisieDeplace { x, y, .. } => { /* il suit le doigt, au bout de la barre */ }
+        Geste::SaisieFin { .. } => {}
+        Geste::Pincement { echelle, centre, deplacement } => { /* zoom, déplacement */ }
+        _ => {}
+    }
+}
+```
+
+Une zone passe par ces états (`Geste::Etat` annonce chaque changement) :
+
+| État | Entrée | Sortie |
+| --- | --- | --- |
+| `Tap` | un doigt se pose | levé avant la durée d'appui : `Tap` |
+| `Appui` | le doigt reste posé | levé : `Appui` ; bougé de la distance : `Annule` |
+| `AppuiLong` | le doigt reste encore | levé : `AppuiLong` ; bougé : `Annule` |
+| `Saisie` | le doigt bouge de la distance pendant `Tap` | levé : `SaisieFin` |
+| `Pincement` | un second doigt pendant `Tap` | un doigt levé : `PincementFin` |
+
+Au lever, exactement un de `Tap`, `Appui`, `AppuiLong` arrive, selon la durée, avec
+son intensité (où il en était entre ses seuils) et sa précision (le plus grand écart
+du doigt, en pixels). En saisie, le curseur apparaît là où le doigt s'est posé et le
+suit au bout d'une barre rigide : le doigt ne cache pas ce qu'il désigne. Cinq doigts
+annulent le geste (`SaisieAnnulee` pendant une saisie). Les coordonnées sont celles de
+l'écran, en pixels.
+
+Flow dessine lui-même le retour visuel (l'anneau de durée, la barre et le curseur,
+le trait du pincement) : le contexte n'a qu'à réagir. La distance et les durées se
+règlent dans l'onglet Gestes des paramètres (`Commun::gestes`). Le contexte Gestes
+(`contextes/gestes.rs`) sert de terrain d'essai et d'exemple.
 
 ## Ouvrir un contexte depuis un autre
 

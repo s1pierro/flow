@@ -17,7 +17,8 @@ use crate::clavier::{Clavier, Frappe};
 use crate::disque::Analyse;
 use crate::radio::Historique;
 use crate::surface::{FenetreId, Placee};
-use crate::ui::{Gesture, Id};
+use crate::gestes::ReglagesGestes;
+use crate::ui::Id;
 use crate::widgets::{Cx, Icon, Scrolls, Theme};
 use std::path::{Path, PathBuf};
 
@@ -62,10 +63,6 @@ pub trait Contexte {
         false
     }
 
-    /// Un geste (glissement d'un doigt, déplacement et zoom à deux doigts) commencé
-    /// dans la fenêtre.
-    fn geste(&mut self, _g: &Gesture, _p: &Placee, _c: &Commun) {}
-
     /// Une frappe du clavier virtuel pour le champ `cible`. Renvoie vrai si le champ
     /// est à cette instance (la frappe ne va alors à personne d'autre).
     fn frappe(&mut self, _f: FenetreId, _cible: Id, _frappe: Frappe, _c: &mut Commun) -> bool {
@@ -102,6 +99,8 @@ pub struct Commun {
     pub theme: Theme,
     /// Le clavier virtuel : un seul, pour le champ qui a le focus.
     pub clavier: Clavier,
+    /// Les réglages des gestes élaborés (`cx.ui.gestes`).
+    pub gestes: ReglagesGestes,
     /// Les positions de défilement, par identifiant de corps.
     pub scrolls: Scrolls,
     /// La racine du stockage partagé, donnée par Android.
@@ -124,6 +123,7 @@ impl Default for Commun {
         Commun {
             theme: Theme::default(),
             clavier: Clavier::default(),
+            gestes: ReglagesGestes::default(),
             scrolls: Scrolls::new(),
             racine: None,
             analyse: None,

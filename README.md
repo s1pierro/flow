@@ -6,14 +6,20 @@ composer son espace de travail à son goût. Née d'une copie de
 [Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
 Contextes : Fichiers, Texte (éditeur, qui prend aussi la place de l'explorateur
-quand on y touche un fichier texte), Disque, Radio (et mixeur), Aide. Les paramètres de
-l'application (apparence, clavier) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
+quand on y touche un fichier texte), Disque, Radio (et mixeur), Gestes (un terrain
+d'essai des gestes), Aide. Les paramètres de l'application (apparence, clavier,
+gestes) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document. Viendra l'édition de SVG.
 
+Les contextes peuvent recevoir des gestes élaborés, inspirés de
+[tnt.js](https://github.com/s1pierro/tnt.js) : tap, appui et appui long selon la
+durée, saisie avec un curseur déporté au bout d'une barre (le doigt ne cache plus ce
+qu'il désigne), pincement à deux doigts.
+
 Package `fr.s1pierro.flow`. Dans `Flow/` à la racine du stockage :
 
-- `interface.txt` : l'apparence et le clavier ;
+- `interface.txt` : l'apparence, le clavier et les gestes ;
 - `espace.txt` : les fenêtres, leur contexte et leur état, retrouvés au lancement
   suivant ;
 - `brouillons/` : les modifications non enregistrées des documents, mises à l'abri.

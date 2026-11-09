@@ -2,10 +2,12 @@
 //!
 //! Chaque doigt reste à ce qu'il a touché en premier, jusqu'à ce qu'il se lève.
 //! Les zones touchables sont celles déclarées à l'image précédente, dernière
-//! déclarée au-dessus. Un doigt qui ne touche aucune zone part vers l'espace de
-//! travail, où il devient un geste : un doigt tourne, deux doigts zooment et déplacent.
+//! déclarée au-dessus. Un doigt qui ne touche aucune zone n'appartient à personne.
+//! Une zone à gestes (`Ui::gestes`) reçoit des événements élaborés : tap, appui,
+//! appui long, saisie à curseur déporté, pincement (voir `gestes.rs`).
 
 use crate::draw::Rect;
+use crate::gestes::{Apercu, Geste, Moteur, ReglagesGestes};
 use std::collections::HashMap;
 
 pub type Id = u64;
@@ -41,6 +43,8 @@ pub enum Sense {
     /// Le doigt pilote directement la zone (curseur, poignée).
     Drag,
     Scroll,
+    /// Zone à gestes élaborés : ses doigts vont à son moteur.
+    Gestes,
     /// Absorbe le doigt sans rien faire : le fond d'un panneau.
     Sink,
 }
@@ -57,7 +61,7 @@ struct Region {
 enum Owner {
     Widget(Id),
     Scroll(Id),
-    Workspace,
+    Gestes(Id),
     Nobody,
 }
 
@@ -78,22 +82,6 @@ pub struct Drag {
     pub moved: bool,
 }
 
-/// Geste accumulé sur l'espace de travail depuis la dernière image.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Gesture {
-    pub orbit: (f32, f32),
-    pub pan: (f32, f32),
-    pub zoom: f32,
-    /// Où le geste a commencé (le premier doigt posé), pour savoir quelle vue il pilote.
-    pub at: Option<(f32, f32)>,
-}
-
-impl Default for Gesture {
-    fn default() -> Gesture {
-        Gesture { orbit: (0.0, 0.0), pan: (0.0, 0.0), zoom: 1.0, at: None }
-    }
-}
-
 const DOUBLE_TAP_S: f64 = 0.35;
 
 pub struct Ui {
@@ -109,7 +97,13 @@ pub struct Ui {
     last_tap: Option<(Id, f64)>,
     drags: HashMap<Id, Drag>,
     scrolls: HashMap<Id, f32>,
-    gesture: Gesture,
+    /// Un moteur par zone à gestes, et ses événements en attente d'être lus.
+    moteurs: HashMap<Id, Moteur>,
+    sorties: HashMap<Id, Vec<Geste>>,
+    /// Les réglages des gestes (la distance de saisie en dp, les durées).
+    pub reglages_gestes: ReglagesGestes,
+    /// L'instant le plus récent connu, en s.
+    maintenant: f64,
     /// Un événement vient d'être traité : voir `a_redessiner`.
     agite: bool,
 }
@@ -128,7 +122,10 @@ impl Ui {
             last_tap: None,
             drags: HashMap::new(),
             scrolls: HashMap::new(),
-            gesture: Gesture::default(),
+            moteurs: HashMap::new(),
+            sorties: HashMap::new(),
+            reglages_gestes: ReglagesGestes::default(),
+            maintenant: 0.0,
             agite: false,
         }
     }
@@ -148,10 +145,11 @@ impl Ui {
     /// `t` : instant de l'événement, en secondes.
     pub fn event(&mut self, ev: Event, t: f64) {
         self.agite = true;
+        self.maintenant = self.maintenant.max(t);
         match ev {
             Event::Down { id, x, y } => {
                 let owner = match self.hit(x, y) {
-                    None => Owner::Workspace,
+                    None => Owner::Nobody,
                     Some(r) => match r.sense {
                         Sense::Click { .. } => Owner::Widget(r.id),
                         Sense::Drag => {
@@ -159,24 +157,76 @@ impl Ui {
                             Owner::Widget(r.id)
                         }
                         Sense::Scroll => Owner::Scroll(r.id),
+                        Sense::Gestes => {
+                            let (reg, d) = (self.reglages_gestes, self.dist());
+                            let m = self.moteurs.entry(r.id).or_default();
+                            m.poser(id, x, y, t, &reg, d);
+                            Owner::Gestes(r.id)
+                        }
                         Sense::Sink => Owner::Nobody,
                     },
                 };
                 self.pointers.retain(|p| p.id != id);
                 self.pointers.push(Pointer { id, x, y, start: (x, y), owner, slid: false });
             }
-            Event::Move { id, x, y } => self.moved(id, x, y),
+            Event::Move { id, x, y } => self.moved(id, x, y, t),
             Event::Up { id } => {
                 if let Some(i) = self.pointers.iter().position(|p| p.id == id) {
                     let p = self.pointers.remove(i);
                     self.released(&p, t);
                 }
             }
-            Event::Cancel => self.pointers.clear(),
+            Event::Cancel => {
+                self.pointers.clear();
+                self.moteurs.values_mut().for_each(Moteur::annuler);
+            }
+        }
+        self.recueillir();
+    }
+
+    /// La distance de saisie, en pixels.
+    fn dist(&self) -> f32 {
+        self.reglages_gestes.dist * self.dp
+    }
+
+    /// Range les événements des moteurs, pour les zones qui les liront.
+    fn recueillir(&mut self) {
+        for (id, m) in self.moteurs.iter_mut() {
+            let g = m.prendre();
+            if !g.is_empty() {
+                self.sorties.entry(*id).or_default().extend(g);
+            }
         }
     }
 
-    fn moved(&mut self, id: i32, x: f32, y: f32) {
+    /// Le temps passe (à chaque image) : les zones à gestes passent du tap à l'appui,
+    /// puis à l'appui long, sans attendre un mouvement du doigt.
+    pub fn horloge(&mut self, t: f64) {
+        self.maintenant = self.maintenant.max(t);
+        let r = self.reglages_gestes;
+        for m in self.moteurs.values_mut() {
+            m.temps(self.maintenant, &r);
+        }
+        self.recueillir();
+    }
+
+    /// Zone à gestes élaborés : les événements reçus depuis l'image précédente.
+    pub fn gestes(&mut self, id: Id, rect: Rect) -> Vec<Geste> {
+        self.region_add(id, rect, Sense::Gestes);
+        self.sorties.remove(&id).unwrap_or_default()
+    }
+
+    /// L'état des gestes en cours, pour leur retour visuel.
+    pub fn gestes_actifs(&self) -> Vec<Apercu> {
+        self.moteurs.values().filter_map(Moteur::apercu).collect()
+    }
+
+    /// Vrai si un geste en cours change d'état avec le temps : il faut redessiner.
+    pub fn gestes_en_attente(&self) -> bool {
+        self.moteurs.values().any(Moteur::en_attente)
+    }
+
+    fn moved(&mut self, id: i32, x: f32, y: f32, t: f64) {
         let Some(i) = self.pointers.iter().position(|p| p.id == id) else { return };
         let (ox, oy) = (self.pointers[i].x, self.pointers[i].y);
         let (sx, sy) = self.pointers[i].start;
@@ -195,34 +245,25 @@ impl Ui {
                 _ => {}
             },
             Owner::Scroll(s) if slid => *self.scrolls.entry(s).or_insert(0.0) += y - oy,
-            Owner::Workspace => self.workspace_moved(i, ox, oy),
+            Owner::Gestes(g) => {
+                let (reg, d) = (self.reglages_gestes, self.dist());
+                if let Some(m) = self.moteurs.get_mut(&g) {
+                    m.bouger(id, x, y, t, &reg, d);
+                }
+            }
             _ => {}
         }
-    }
-
-    fn workspace_moved(&mut self, i: usize, ox: f32, oy: f32) {
-        let me = self.pointers[i];
-        let others: Vec<Pointer> = self.pointers.iter().filter(|p| p.owner == Owner::Workspace && p.id != me.id).copied().collect();
-        if self.gesture.at.is_none() && (me.slid || !others.is_empty()) {
-            self.gesture.at = Some(others.first().map_or(me.start, |o| o.start));
-        }
-        match others.first() {
-            None if me.slid => {
-                self.gesture.orbit.0 += me.x - ox;
-                self.gesture.orbit.1 += me.y - oy;
-            }
-            None => {}
-            Some(o) => {
-                let before = (ox - o.x).hypot(oy - o.y).max(1.0);
-                let after = (me.x - o.x).hypot(me.y - o.y).max(1.0);
-                self.gesture.zoom *= after / before;
-                self.gesture.pan.0 += (me.x - ox) / 2.0;
-                self.gesture.pan.1 += (me.y - oy) / 2.0;
-            }
-        }
+        let _ = ox;
     }
 
     fn released(&mut self, p: &Pointer, t: f64) {
+        if let Owner::Gestes(g) = p.owner {
+            let reg = self.reglages_gestes;
+            if let Some(m) = self.moteurs.get_mut(&g) {
+                m.lever(p.id, t, &reg);
+            }
+            return;
+        }
         let Owner::Widget(w) = p.owner else { return };
         if matches!(self.region(w).map(|r| r.sense), Some(Sense::Drag)) {
             self.drags.remove(&w);
@@ -294,10 +335,6 @@ impl Ui {
         self.scrolls.remove(&id).unwrap_or(0.0)
     }
 
-    pub fn take_gesture(&mut self) -> Gesture {
-        std::mem::take(&mut self.gesture)
-    }
-
     /// Fin d'image : les zones déclarées deviennent celles qui reçoivent les doigts.
     pub fn end_frame(&mut self) {
         std::mem::swap(&mut self.regions, &mut self.next);
@@ -306,6 +343,11 @@ impl Ui {
         self.clicks.clear();
         self.clic_pos.clear();
         self.double_taps.clear();
+        // Les événements qu'aucune zone n'a lus sont perdus ; les moteurs des zones
+        // disparues aussi, une fois au repos
+        self.sorties.clear();
+        let zones: Vec<Id> = self.regions.iter().filter(|r| r.sense == Sense::Gestes).map(|r| r.id).collect();
+        self.moteurs.retain(|id, m| zones.contains(id) || m.apercu().is_some());
     }
 }
 
@@ -387,27 +429,38 @@ mod tests {
     }
 
     #[test]
-    fn un_doigt_tourne_deux_doigts_zooment() {
-        let mut u = ui();
+    fn une_zone_a_gestes_recoit_tap_et_saisie() {
+        const ZONE: Id = id("zone");
+        let mut u = Ui::new(1.0);
+        u.region_add(ZONE, Rect::new(400., 400., 400., 400.), Sense::Gestes);
+        u.end_frame();
         down(&mut u, 0, 500., 500.);
-        u.event(Event::Move { id: 0, x: 530., y: 500. }, 0.1);
-        u.event(Event::Move { id: 0, x: 540., y: 510. }, 0.1);
-        let g = u.take_gesture();
-        assert_eq!(g.orbit, (40., 10.)); // le geste démarre avec le mouvement qui franchit le seuil
-        assert_eq!(g.at, Some((500., 500.)));
-        down(&mut u, 1, 640., 510.);
-        u.event(Event::Move { id: 1, x: 740., y: 510. }, 0.2);
-        let g = u.take_gesture();
-        assert_eq!(g.orbit, (0., 0.));
-        assert!((g.zoom - 2.0).abs() < 1e-5);
+        u.event(Event::Up { id: 0 }, 0.1);
+        let g = u.gestes(ZONE, Rect::new(400., 400., 400., 400.));
+        assert!(g.iter().any(|g| matches!(g, Geste::Tap { .. })), "{g:?}");
+        u.end_frame();
+        // Le temps fait passer à l'appui, sans mouvement
+        u.event(Event::Down { id: 0, x: 500., y: 500. }, 1.0);
+        assert!(u.gestes_en_attente());
+        u.horloge(1.6);
+        assert_eq!(u.gestes_actifs()[0].etat, crate::gestes::Etat::Appui);
+        u.event(Event::Up { id: 0 }, 1.7);
+        let g = u.gestes(ZONE, Rect::new(400., 400., 400., 400.));
+        assert!(g.iter().any(|g| matches!(g, Geste::Appui { .. })), "{g:?}");
+        u.end_frame();
+        // Glisser : le curseur déporté
+        u.event(Event::Down { id: 0, x: 500., y: 500. }, 2.0);
+        u.event(Event::Move { id: 0, x: 600., y: 500. }, 2.1);
+        assert_eq!(u.gestes_actifs()[0].curseur, Some((540., 500.)));
     }
 
     #[test]
-    fn le_fond_d_un_panneau_ne_touche_pas_la_3d() {
+    fn un_doigt_hors_de_toute_zone_ne_fait_rien() {
         let mut u = ui();
-        down(&mut u, 0, 250., 250.);
-        u.event(Event::Move { id: 0, x: 290., y: 290. }, 0.1);
-        assert_eq!(u.take_gesture(), Gesture::default());
+        down(&mut u, 0, 500., 500.);
+        u.event(Event::Move { id: 0, x: 600., y: 600. }, 0.1);
+        assert!(u.gestes_actifs().is_empty());
+        assert!(!u.pressed(BTN));
     }
 
     #[test]

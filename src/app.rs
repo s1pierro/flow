@@ -56,7 +56,7 @@ pub struct App {
     pub batterie: Option<(u8, bool)>,
     end_content: EndContent,
     /// L'onglet ouvert du panneau des paramètres, et son champ d'essai du clavier.
-    onglet_parametres: usize,
+    pub onglet_parametres: usize,
     essai: Edition,
 }
 
@@ -94,13 +94,14 @@ impl App {
 
     /// Les réglages de l'interface à enregistrer : l'apparence et le clavier.
     pub fn reglages(&self) -> Reglages {
-        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages }
+        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes }
     }
 
     /// Applique des réglages relus.
     pub fn appliquer(&mut self, r: Reglages) {
         self.commun.theme = r.theme;
         self.commun.clavier.reglages = r.clavier;
+        self.commun.gestes = r.gestes;
     }
 
     /// L'espace de travail en texte : la disposition et l'état de chaque fenêtre.
@@ -232,6 +233,7 @@ impl App {
 
     pub fn frame(&mut self, cx: &mut Cx, screen: Rect, dt: f32) -> Scene {
         cx.theme = self.commun.theme;
+        cx.ui.reglages_gestes = self.commun.gestes;
         // La barre de l'application, tout en bas
         let hb = cx.commande().min(screen.h / 4.0);
         let barre = Rect::new(screen.x, screen.bottom() - hb, screen.w, hb);
@@ -247,13 +249,6 @@ impl App {
         let vues = contextes::vues();
         let placees = self.surface.frame(cx, l.workspace, &vues);
         self.suivre_fenetres(&placees);
-        // Les gestes de l'espace de travail vont à la fenêtre où ils ont commencé
-        let g = cx.ui.take_gesture();
-        if let Some(p) = g.at.and_then(|(x, y)| self.surface.fenetre_en(x, y).copied()) {
-            if let Some(i) = self.fenetres.get_mut(&p.id) {
-                i.geste(&g, &p, &self.commun);
-            }
-        }
         for p in &placees {
             if let Some(i) = self.fenetres.get_mut(&p.id) {
                 i.avancer(dt, &self.commun);
@@ -281,6 +276,9 @@ impl App {
             self.frappes(cx, zone_clavier, dt);
         }
         self.commun.clavier.dessiner(cx);
+        // Le retour visuel des gestes, par-dessus tout
+        let apercus = cx.ui.gestes_actifs();
+        crate::gestes::dessiner_retour(cx, &self.commun.gestes, &apercus);
         Scene { workspace: l.workspace, fond: cx.couleurs().fond }
     }
 

@@ -26,19 +26,24 @@ struct Shot {
     texte: bool,
     /// Un dossier à analyser dans une fenêtre Disque.
     disque: Option<&'static str>,
+    /// Le terrain des gestes : 1, une saisie en cours (la barre et le curseur déporté) ;
+    /// 2, un appui tenu (l'anneau de durée), avec l'onglet Gestes des paramètres.
+    gestes: u8,
 }
 
 fn main() {
     let dir = std::env::args().nth(1).expect("dossier de sortie");
     let shots = [
-        Shot { name: "tablette-ferme", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None },
-        Shot { name: "tablette-parametres", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None },
-        Shot { name: "tablette-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: true, fenetres: false, clavier: false, texte: false, disque: None },
-        Shot { name: "tablette-fenetres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: true, clavier: false, texte: false, disque: None },
-        Shot { name: "disque", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: Some(env!("CARGO_MANIFEST_DIR")) },
-        Shot { name: "clavier", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: true, texte: false, disque: None },
-        Shot { name: "texte", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: true, disque: None },
-        Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None },
+        Shot { name: "tablette-ferme", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "tablette-parametres", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "tablette-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: true, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "tablette-fenetres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: true, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "disque", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: Some(env!("CARGO_MANIFEST_DIR")), gestes: 0 },
+        Shot { name: "clavier", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: true, texte: false, disque: None, gestes: 0 },
+        Shot { name: "texte", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: true, disque: None, gestes: 0 },
+        Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "gestes-saisie", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
+        Shot { name: "gestes-appui", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
     ];
     let mut egl = Egl::new(true).expect("EGL");
     egl.attach_pbuffer(2400, 2400).expect("pbuffer");
@@ -82,8 +87,28 @@ fn main() {
             app.surface.changer_vue(f, indice("fichiers").unwrap());
         }
 
+        if s.gestes > 0 {
+            app.ouvrir_espace("fenetres = F1:gestes\n");
+            app.onglet_parametres = 2;
+        }
+
         let mut scene = None;
         for i in 0..60 {
+            let t = i as f64 * 0.05;
+            ui.horloge(t);
+            match (s.gestes, i) {
+                (1, 20) => ui.event(Event::Down { id: 0, x: 420.0, y: 380.0 }, t),
+                (1, 21..=40) => {
+                    let k = (i - 20) as f32;
+                    ui.event(Event::Move { id: 0, x: 420.0 + 14.0 * k, y: 380.0 + 9.0 * k - 0.3 * k * k }, t)
+                }
+                (1, 42) => {
+                    ui.event(Event::Down { id: 1, x: 900.0, y: 900.0 }, t);
+                    ui.event(Event::Up { id: 1 }, t + 0.1);
+                }
+                (2, 30) => ui.event(Event::Down { id: 0, x: 300.0, y: 500.0 }, t),
+                _ => {}
+            }
             if i == 30 && s.help {
                 // Vraie séquence tactile : appui sur la pastille d'aide, dans la barre du bas.
                 let c = 48.0 * s.dp;

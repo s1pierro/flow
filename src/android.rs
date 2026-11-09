@@ -282,6 +282,7 @@ fn render_loop() -> Result<(), String> {
         for (e, t) in events {
             ui.event(e, t);
         }
+        ui.horloge(now());
         let dt = last.elapsed().as_secs_f32().min(0.05);
         last = Instant::now();
 
@@ -311,7 +312,7 @@ fn render_loop() -> Result<(), String> {
         egl.swap();
         // Après une rotation, la nouvelle taille n'est connue qu'ici ; et un appui change
         // l'état après le dessin du widget, qu'il faut redessiner à jour.
-        again = egl.size() != (w, h) || ui.a_redessiner();
+        again = egl.size() != (w, h) || ui.a_redessiner() || ui.gestes_en_attente();
     }
 }
 

@@ -5,21 +5,22 @@
 
 use crate::clavier::{self, Disposition, Edition};
 use crate::contexte::Commun;
+use crate::gestes::ReglagesGestes;
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Body, Cx, Theme, ACCENTS};
 
 /// Les onglets du panneau.
-pub const ONGLETS: [&str; 2] = ["Interface", "Clavier"];
+pub const ONGLETS: [&str; 3] = ["Interface", "Clavier", "Gestes"];
 
 /// Le champ d'essai du clavier.
 pub const ESSAI: Id = id("essai-clavier");
 
 /// Le contenu de l'onglet `onglet`, dans le corps `b` (identifiant `scroll`).
 pub fn panneau(cx: &mut Cx, b: &mut Body, scroll: Id, onglet: usize, c: &mut Commun, essai: &mut Edition) {
-    if onglet == 0 {
-        interface(cx, b, scroll, c);
-    } else {
-        clavier(cx, b, scroll, c, essai);
+    match onglet {
+        0 => interface(cx, b, scroll, c),
+        1 => clavier(cx, b, scroll, c, essai),
+        _ => gestes(cx, b, scroll, c),
     }
     cx.section(b, "FICHIERS");
     let ou = match &c.fichier_reglages {
@@ -85,4 +86,26 @@ fn clavier(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun, essai: &mut Ed
     cx.toggle(b, sub_id(scroll, 9), "Clavier flottant", &mut k.flottant);
     cx.section(b, "ESSAI");
     clavier::champ(cx, b, ESSAI, "Essayer le clavier…", essai, &mut c.clavier);
+}
+
+fn gestes(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
+    let g = &mut c.gestes;
+    cx.paragraph(b, "Les contextes qui le proposent distinguent le tap, l'appui et l'appui long par leur durée. Un doigt qui glisse fait apparaître un curseur déporté, au bout d'une barre : le doigt ne cache plus ce qu'il désigne. Deux doigts pincent. Le contexte Gestes permet de s'y essayer.");
+    cx.section(b, "DISTANCE");
+    let shown = format!("{:.0} dp", g.dist);
+    cx.slider(b, sub_id(scroll, 40), "Glissement et barre", &shown, &mut g.dist, 24.0, 160.0);
+    g.dist = g.dist.round();
+    cx.section(b, "DURÉES");
+    let shown = format!("{:.0} ms", g.appui * 1000.0);
+    cx.slider(b, sub_id(scroll, 41), "Appui", &shown, &mut g.appui, 0.15, 1.5);
+    g.appui = (g.appui * 20.0).round() / 20.0;
+    let shown = format!("{:.0} ms", g.appui_long * 1000.0);
+    cx.slider(b, sub_id(scroll, 42), "Appui long", &shown, &mut g.appui_long, 0.35, 4.0);
+    g.appui_long = (g.appui_long * 20.0).round() / 20.0;
+    cx.section(b, "AFFICHAGE");
+    cx.toggle(b, sub_id(scroll, 43), "Montrer le geste en cours", &mut g.retour);
+    if cx.button(b, sub_id(scroll, 44), "Rétablir les gestes") {
+        *g = ReglagesGestes::default();
+    }
+    *g = g.borner();
 }

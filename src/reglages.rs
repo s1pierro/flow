@@ -1,13 +1,14 @@
 //! Réglages de l'interface, dans un fichier texte qu'on peut ouvrir et modifier à la
 //! main : une valeur par ligne, `clé = valeur`, des commentaires après `#`.
 //!
-//! Seule l'interface y figure : l'apparence (`Theme`) et le clavier virtuel. Les
+//! Seule l'interface y figure : l'apparence (`Theme`), le clavier virtuel et les gestes. Les
 //! fenêtres et leur contenu sont dans le fichier de l'espace de travail (`espace`).
 //! Une clé inconnue, absente ou mal écrite garde sa valeur par défaut, et les nombres
 //! sont ramenés dans leurs bornes : un fichier abîmé ne casse rien. Le fichier est
 //! réécrit en entier, avec ses commentaires, quand un réglage change dans l'application.
 
 use crate::clavier::{Disposition, ReglagesClavier};
+use crate::gestes::ReglagesGestes;
 use crate::widgets::{Theme, ACCENTS};
 use std::path::PathBuf;
 
@@ -18,6 +19,7 @@ pub const NOM: &str = "interface.txt";
 pub struct Reglages {
     pub theme: Theme,
     pub clavier: ReglagesClavier,
+    pub gestes: ReglagesGestes,
 }
 
 /// Les paires `clé = valeur` d'un texte, sans les commentaires ni les lignes vides.
@@ -49,6 +51,7 @@ impl Reglages {
         let mut r = Reglages::default();
         let t = &mut r.theme;
         let c = &mut r.clavier;
+        let g = &mut r.gestes;
         for (k, v) in cles(texte) {
             match k.as_str() {
                 "commandes" => t.commande = nombre(&v).map_or(t.commande, |x| x.round().clamp(36.0, 64.0)),
@@ -70,9 +73,14 @@ impl Reglages {
                         c.position = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
                     }
                 }
+                "gestes_distance" => g.dist = nombre(&v).unwrap_or(g.dist),
+                "gestes_appui" => g.appui = nombre(&v).map_or(g.appui, |x| x / 1000.0),
+                "gestes_appui_long" => g.appui_long = nombre(&v).map_or(g.appui_long, |x| x / 1000.0),
+                "gestes_retour" => g.retour = oui(&v).unwrap_or(g.retour),
                 _ => {}
             }
         }
+        r.gestes = r.gestes.borner();
         r
     }
 
@@ -115,7 +123,16 @@ impl Reglages {
         s += "# Clavier flottant, par-dessus l'interface, qu'on déplace en tirant son bandeau : oui ou non\n";
         s += &format!("clavier_flottant = {}\n\n", if c.flottant { "oui" } else { "non" });
         s += "# Place du clavier flottant : horizontale puis verticale, de 0 (gauche, haut) à 1 (droite, bas)\n";
-        s += &format!("clavier_position = {:.3} {:.3}\n", c.position.0, c.position.1);
+        s += &format!("clavier_position = {:.3} {:.3}\n\n", c.position.0, c.position.1);
+        let g = &self.gestes;
+        s += "# Gestes : distance qui fait glisser et longueur de la barre du curseur déporté, en dp (24 à 160 ; 60)\n";
+        s += &format!("gestes_distance = {:.0}\n\n", g.dist);
+        s += "# Gestes : durée qui sépare le tap de l'appui, en ms (150 à 1500 ; 500)\n";
+        s += &format!("gestes_appui = {:.0}\n\n", g.appui * 1000.0);
+        s += "# Gestes : durée de l'appui long, en ms (au moins l'appui + 200, jusqu'à 4000 ; 1500)\n";
+        s += &format!("gestes_appui_long = {:.0}\n\n", g.appui_long * 1000.0);
+        s += "# Gestes : montrer le contact, la durée et le curseur déporté : oui ou non\n";
+        s += &format!("gestes_retour = {}\n", if g.retour { "oui" } else { "non" });
         s
     }
 }
@@ -173,9 +190,11 @@ mod tests {
         let r = Reglages {
             theme: Theme { commande: 56.0, ligne: 44.0, texte: 1.15, arrondi: 0.3, accent: 4, sombre: true, marge: 0.0, padding: 6.0 },
             clavier: ReglagesClavier { disposition: Disposition::Qwerty, touche: 58.0, appui_long: 0.5, apercu: false, flottant: true, position: (0.25, 0.5) },
+            gestes: ReglagesGestes { dist: 80.0, appui: 0.4, appui_long: 1.2, retour: false },
         };
         let lu = Reglages::lire(&r.ecrire());
         assert_eq!(lu.clavier, r.clavier);
+        assert_eq!(lu.gestes, r.gestes);
         let t = lu.theme;
         assert_eq!((t.commande, t.ligne, t.accent, t.sombre, t.marge, t.padding), (56.0, 44.0, 4, true, 0.0, 6.0));
         assert!((t.texte - 1.15).abs() < 1e-4 && (t.arrondi - 0.3).abs() < 1e-4);

@@ -18,6 +18,7 @@ pub mod disque;
 pub mod draw;
 pub mod espace;
 pub mod explorateur;
+pub mod gestes;
 pub mod gles;
 pub mod mixage;
 pub mod parametres;
