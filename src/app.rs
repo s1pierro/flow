@@ -9,18 +9,18 @@
 //! `espace` et se relit avec `ouvrir_espace` ; c'est le fichier `espace.txt`.
 
 use crate::clavier::Edition;
-use crate::contexte::{Commun, Contexte, Etat};
+use crate::contexte::{Commun, Contexte, Demande, Etat};
 use crate::contextes::{self, GENRES};
 use crate::draw::{Color, Rect};
 use crate::espace::Espace;
 use crate::parametres;
 use crate::reglages::Reglages;
 use crate::shell::{Layout, Shell, Side};
-use crate::surface::{Changement, FenetreId, Placee, Surface};
+use crate::surface::{Changement, FenetreId, Placee, Sens, Surface};
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const PARAMETRES: Id = id("parametres");
 const HELP: Id = id("aide");
@@ -128,6 +128,7 @@ impl App {
         let repli = contextes::indice(contextes::REPLI).unwrap_or(0);
         let Some(s) = e.fenetres.as_deref().and_then(|t| Surface::lire_avec(t, &|n| Some(contextes::indice(n).unwrap_or(repli)))) else { return };
         self.surface = s;
+        self.suspendre();
         self.fenetres.clear();
         for (f, vue, _) in self.surface.disposer(Rect::default()) {
             self.fenetres.insert(f, (contextes::genre(vue).ouvrir)(&e.section(f)));
@@ -140,6 +141,37 @@ impl App {
         self.commun.racine = racine;
         for i in self.fenetres.values_mut() {
             i.retour(&self.commun);
+        }
+    }
+
+    /// L'application passe en arrière-plan : chaque instance met à l'abri ce qui n'est
+    /// pas enregistré (à appeler avant d'enregistrer l'espace).
+    pub fn suspendre(&mut self) {
+        for i in self.fenetres.values_mut() {
+            i.mettre_a_l_abri(&self.commun);
+        }
+    }
+
+    /// Traite une demande d'instance.
+    fn traiter(&mut self, d: Demande) {
+        match d {
+            Demande::Ouvrir { depuis, cle, etat } => {
+                // Un document déjà ouvert ne s'ouvre pas deux fois
+                if let Some(doc) = etat.texte("document").map(Path::new) {
+                    if self.fenetres.values().any(|i| i.cle() == cle && i.document() == Some(doc)) {
+                        return;
+                    }
+                }
+                let Some(vue) = contextes::indice(cle) else { return };
+                let Some(p) = self.surface.placees().iter().find(|p| p.id == depuis).copied() else { return };
+                // À côté de la fenêtre qui demande, ou dessous si elle est en hauteur
+                let sens = if p.cadre.w >= p.cadre.h { Sens::Colonnes } else { Sens::Lignes };
+                let Some(n) = self.surface.partager_apres(depuis, sens, 0.5) else { return };
+                // L'instance est prête avant que le partage ne soit suivi : elle ne sera pas
+                // remplacée par une copie de la fenêtre partagée
+                self.fenetres.insert(n, (contextes::genre(vue).ouvrir)(&etat));
+                self.surface.changer_vue(n, vue);
+            }
         }
     }
 
@@ -173,13 +205,16 @@ impl App {
     fn suivre_fenetres(&mut self, placees: &[Placee]) {
         for c in self.surface.changements() {
             match c {
-                Changement::Partagee { de, nouvelle } => {
+                Changement::Partagee { de, nouvelle } if !self.fenetres.contains_key(&nouvelle) => {
                     if let Some(copie) = self.fenetres.get(&de).map(|i| i.dupliquer()) {
                         self.fenetres.insert(nouvelle, copie);
                     }
                 }
+                Changement::Partagee { .. } => {}
                 Changement::Fermee(f) => {
-                    self.fenetres.remove(&f);
+                    if let Some(mut i) = self.fenetres.remove(&f) {
+                        i.mettre_a_l_abri(&self.commun);
+                    }
                 }
                 Changement::Vue { .. } => {}
             }
@@ -187,7 +222,9 @@ impl App {
         for p in placees {
             let g = contextes::genre(p.vue);
             if self.fenetres.get(&p.id).is_none_or(|i| i.cle() != g.cle) {
-                self.fenetres.insert(p.id, (g.ouvrir)(&Etat::default()));
+                if let Some(mut ancienne) = self.fenetres.insert(p.id, (g.ouvrir)(&Etat::default())) {
+                    ancienne.mettre_a_l_abri(&self.commun);
+                }
             }
         }
     }
@@ -229,6 +266,9 @@ impl App {
             cx.clip(Some(e));
             cx.mono_at(e.x + 4.0 * d, e.cy(), &etat, 12.0, col.pale);
             cx.clip(None);
+        }
+        for d in std::mem::take(&mut self.commun.demandes) {
+            self.traiter(d);
         }
         self.surface.dessus(cx, &vues);
         self.barre(cx, barre);
@@ -540,6 +580,26 @@ mod tests {
         r.frames(1);
         let t = r.app.espace();
         assert!(t.contains("[fenetre 2]\ndossier = /tmp\n"), "{t}");
+    }
+
+    #[test]
+    fn un_fichier_texte_s_ouvre_a_cote_une_seule_fois() {
+        let mut r = Rig::new();
+        r.frames(1);
+        let mut etat = Etat::default();
+        etat.mettre("document", "/tmp/a.txt");
+        let demande = Demande::Ouvrir { depuis: 1, cle: "texte", etat };
+        r.app.commun.demandes.push(demande.clone());
+        r.frames(2);
+        let p = r.app.surface.placees().to_vec();
+        assert_eq!(p.len(), 2);
+        // L'explorateur garde la gauche, l'éditeur prend la droite, avec le document
+        assert_eq!((p[0].id, p[0].vue, p[1].vue), (1, vue("fichiers"), vue("texte")));
+        assert!(r.app.espace().contains(&format!("[fenetre {}]\ndocument = /tmp/a.txt\n", p[1].id)));
+        // Le même document ne s'ouvre pas une seconde fois
+        r.app.commun.demandes.push(demande);
+        r.frames(2);
+        assert_eq!(r.app.surface.nombre(), 2);
     }
 
     #[test]

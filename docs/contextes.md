@@ -37,9 +37,12 @@ barre du bas.
 
 Les contextes existants servent d'exemples, du plus simple au plus complet :
 `aide.rs` (rien à retenir), `radio.rs` (un champ de texte et le clavier, une
-animation), `fichiers.rs` (un dossier par fenêtre, relu au retour), `disque.rs`
-(une ressource partagée dans `Commun`, un état enregistré par noms et résolu plus
-tard).
+animation), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
+d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
+par noms et résolu plus tard), `texte.rs` (un contexte à document : lecture,
+enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`).
+
+`texte.rs` est la référence pour un contexte qui édite des fichiers (le futur SVG).
 
 ## Ajouter un contexte, pas à pas
 
@@ -124,6 +127,8 @@ une version par défaut qui ne fait rien.
 | `geste(g, p, c)` | geste commencé dans la fenêtre | Glissement d'un doigt, déplacement et zoom à deux doigts (pour un plan de travail, un dessin) |
 | `frappe(f, cible, frappe, c)` | frappe du clavier virtuel | Renvoie vrai si `cible` est un champ de cette instance |
 | `retour(c)` | retour dans l'application | Relit ce qui a pu changer sur le disque |
+| `mettre_a_l_abri(c)` | fenêtre fermée, autre contexte, arrière-plan | Écrit un brouillon de ce qui n'est pas enregistré (dans `c.dossier`) |
+| `document()` | demande d'ouverture | Le fichier édité : un même fichier ne s'ouvre pas deux fois |
 
 ### Les identifiants d'interface
 
@@ -149,6 +154,31 @@ fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) ->
     true
 }
 ```
+
+## Ouvrir un contexte depuis un autre
+
+Une instance peut demander l'ouverture d'un autre contexte, avec un état :
+
+```rust
+let mut etat = Etat::default();
+etat.mettre("document", chemin.display());
+c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: texte::CLE, etat });
+```
+
+Après le dessin, l'application partage la fenêtre `depuis` : la nouvelle fenêtre
+prend la moitié droite (ou basse, si la fenêtre est en hauteur) avec ce contexte,
+ouvert sur cet état. Si une fenêtre de ce contexte édite déjà le même `document`,
+rien ne s'ouvre. C'est ainsi que l'explorateur ouvre un fichier texte dans l'éditeur.
+
+## Les documents non enregistrés
+
+Un contexte à document ne doit rien perdre. Quand sa fenêtre se ferme, qu'elle
+change de contexte ou que l'application passe en arrière-plan, `mettre_a_l_abri`
+est appelé : l'instance écrit ce qui n'est pas enregistré dans un brouillon, dans
+`c.dossier` (`Flow/brouillons/`), et le retient dans son état (`ecrire`). Rouverte,
+elle relit le brouillon plutôt que le fichier. Une fois le document enregistré, le
+brouillon est effacé. Le brouillon d'une fenêtre fermée reste dans
+`Flow/brouillons/`, où on le retrouve avec l'explorateur.
 
 ## L'état enregistré
 
@@ -204,6 +234,4 @@ dans la section `[commun]` (voir `App::espace` et `App::ouvrir_espace`).
 
 ## À venir
 
-- Des contextes **Texte** et **SVG**, chacun éditant ses propres documents.
-- Un changement de contexte détruit aujourd'hui l'instance et son état : un contexte
-  à document devra proposer d'enregistrer avant.
+- Un contexte **SVG**, sur le modèle de `texte.rs`.

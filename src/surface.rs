@@ -304,19 +304,31 @@ impl Surface {
     /// Partage la fenêtre `f` : la nouvelle prend la première part (`ratio`), avec la même
     /// vue. Renvoie son identifiant.
     pub fn partager(&mut self, f: FenetreId, sens: Sens, ratio: f32) -> Option<FenetreId> {
+        self.partager_ou(f, sens, ratio, false)
+    }
+
+    /// Partage la fenêtre `f` : elle garde la première part (`ratio`) et la nouvelle,
+    /// avec la même vue, prend la seconde (à droite, ou en bas). Renvoie son identifiant.
+    pub fn partager_apres(&mut self, f: FenetreId, sens: Sens, ratio: f32) -> Option<FenetreId> {
+        self.partager_ou(f, sens, ratio, true)
+    }
+
+    fn partager_ou(&mut self, f: FenetreId, sens: Sens, ratio: f32, apres: bool) -> Option<FenetreId> {
         let nouvelle = self.suivant;
-        fn remplacer(n: &mut Noeud, f: FenetreId, sens: Sens, ratio: f32, nouvelle: FenetreId) -> bool {
+        fn remplacer(n: &mut Noeud, f: FenetreId, sens: Sens, ratio: f32, nouvelle: FenetreId, apres: bool) -> bool {
             match n {
                 Noeud::Fenetre { id, vue } if *id == f => {
                     let vue = *vue;
-                    *n = Noeud::Partage { sens, ratio: ratio.clamp(MIN, MAX), a: Box::new(Noeud::Fenetre { id: nouvelle, vue }), b: Box::new(Noeud::Fenetre { id: f, vue }) };
+                    let (nv, an) = (Box::new(Noeud::Fenetre { id: nouvelle, vue }), Box::new(Noeud::Fenetre { id: f, vue }));
+                    let (a, b) = if apres { (an, nv) } else { (nv, an) };
+                    *n = Noeud::Partage { sens, ratio: ratio.clamp(MIN, MAX), a, b };
                     true
                 }
                 Noeud::Fenetre { .. } => false,
-                Noeud::Partage { a, b, .. } => remplacer(a, f, sens, ratio, nouvelle) || remplacer(b, f, sens, ratio, nouvelle),
+                Noeud::Partage { a, b, .. } => remplacer(a, f, sens, ratio, nouvelle, apres) || remplacer(b, f, sens, ratio, nouvelle, apres),
             }
         }
-        if !remplacer(&mut self.racine, f, sens, ratio, nouvelle) {
+        if !remplacer(&mut self.racine, f, sens, ratio, nouvelle, apres) {
             return None;
         }
         self.suivant += 1;
@@ -659,6 +671,16 @@ mod tests {
         // La nouvelle prend la première part, avec la même vue
         assert_eq!(f[0], (n, 0, Rect::new(0., 0., 300., 800.)));
         assert_eq!(s.changements(), vec![Changement::Partagee { de: 1, nouvelle: 2 }, Changement::Partagee { de: 1, nouvelle: 3 }]);
+    }
+
+    #[test]
+    fn partager_apres_place_la_nouvelle_a_droite() {
+        let mut s = Surface::new(0);
+        let n = s.partager_apres(1, Sens::Colonnes, 0.4).unwrap();
+        let f = s.disposer(R);
+        assert_eq!(f[0], (1, 0, Rect::new(0., 0., 400., 800.)));
+        assert_eq!(f[1], (n, 0, Rect::new(400., 0., 600., 800.)));
+        assert_eq!(s.changements(), vec![Changement::Partagee { de: 1, nouvelle: n }]);
     }
 
     #[test]

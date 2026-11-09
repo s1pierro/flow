@@ -19,7 +19,7 @@ use crate::radio::Historique;
 use crate::surface::{FenetreId, Placee};
 use crate::ui::{Gesture, Id};
 use crate::widgets::{Cx, Icon, Scrolls, Theme};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Une sorte de contexte, telle qu'elle apparaît dans le menu des fenêtres.
 pub struct Genre {
@@ -74,6 +74,26 @@ pub trait Contexte {
 
     /// Retour dans l'application : ce qui est lu sur le disque a pu changer.
     fn retour(&mut self, _c: &Commun) {}
+
+    /// L'instance va disparaître (fenêtre fermée, autre contexte) ou l'application
+    /// passe en arrière-plan : mettre à l'abri ce qui n'est pas enregistré (un
+    /// brouillon dans `Commun::dossier`). `ecrire` est appelé ensuite.
+    fn mettre_a_l_abri(&mut self, _c: &Commun) {}
+
+    /// Le fichier que l'instance édite, s'il y en a un : un même fichier ne s'ouvre
+    /// pas deux fois.
+    fn document(&self) -> Option<&Path> {
+        None
+    }
+}
+
+/// Ce qu'une instance demande à l'application, traité après le dessin.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Demande {
+    /// Ouvrir un contexte, avec cet état, dans une fenêtre née du partage de
+    /// `depuis` (par exemple l'éditeur de texte, depuis l'explorateur). Si une fenêtre
+    /// édite déjà ce document (`etat` : `document`), rien ne s'ouvre.
+    Ouvrir { depuis: FenetreId, cle: &'static str, etat: Etat },
 }
 
 /// Ce que partagent toutes les fenêtres.
@@ -93,6 +113,10 @@ pub struct Commun {
     /// Où sont enregistrés les réglages et l'espace de travail, pour l'indiquer.
     pub fichier_reglages: Option<String>,
     pub fichier_espace: Option<String>,
+    /// Le dossier de Flow (réglages, espace, brouillons), s'il est connu.
+    pub dossier: Option<PathBuf>,
+    /// Les demandes des instances, traitées par l'application après le dessin.
+    pub demandes: Vec<Demande>,
 }
 
 impl Default for Commun {
@@ -106,6 +130,8 @@ impl Default for Commun {
             historique: Historique::default(),
             fichier_reglages: None,
             fichier_espace: None,
+            dossier: None,
+            demandes: Vec::new(),
         }
     }
 }

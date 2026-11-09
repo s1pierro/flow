@@ -226,7 +226,9 @@ fn render_loop() -> Result<(), String> {
             }
             if window.is_null() {
                 // L'application passe en arrière-plan : l'espace est enregistré tel quel
-                if let (Some((a, _)), Some(f)) = (app.as_ref(), espace.as_mut()) {
+                if let (Some((a, _)), Some(f)) = (app.as_mut(), espace.as_mut()) {
+                    // Les documents non enregistrés sont d'abord mis à l'abri
+                    a.suspendre();
                     if let Err(e) = f.suivre(&a.espace()) {
                         log(&format!("espace non enregistré : {e}"));
                     }
@@ -261,6 +263,7 @@ fn render_loop() -> Result<(), String> {
             }
             app.commun.fichier_reglages = fichier.as_ref().map(|f| f.chemin.display().to_string());
             app.commun.fichier_espace = espace.as_ref().map(|f| f.chemin.display().to_string());
+            app.commun.dossier = espace.as_ref().and_then(|f| f.chemin.parent()).map(|d| d.to_path_buf());
             // L'espace de travail, s'il a changé sur le disque (au premier lancement, ou
             // modifié à la main) ; sinon les fenêtres relisent ce qui a pu changer
             if let Some(f) = espace.as_mut() {

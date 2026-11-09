@@ -69,6 +69,9 @@ pub enum Frappe {
     Effacer,
     /// Entrée : valide le champ.
     Entree,
+    /// Un retour à la ligne venu d'un texte collé : une fin de ligne dans un éditeur,
+    /// une espace dans un champ d'une ligne.
+    Ligne,
     Gauche,
     Droite,
 }
@@ -569,20 +572,19 @@ impl Clavier {
     }
 }
 
-/// Les frappes qui écrivent un texte collé, dans un champ d'une ligne : retours à la
-/// ligne et tabulations deviennent des espaces, les autres caractères de contrôle sont
-/// écartés, et le tout est borné à `COLLE_MAX` caractères.
+/// Les frappes qui écrivent un texte collé : les retours à la ligne deviennent
+/// `Frappe::Ligne`, les tabulations des espaces, les autres caractères de contrôle
+/// sont écartés, et le tout est borné à `COLLE_MAX` caractères.
 pub fn collees(texte: &str) -> Vec<Frappe> {
     texte
         .chars()
         .filter_map(|c| match c {
-            '\r' => None,
-            '\n' | '\t' => Some(' '),
+            '\n' => Some(Frappe::Ligne),
+            '\t' => Some(Frappe::Car(' ')),
             c if c.is_control() => None,
-            c => Some(c),
+            c => Some(Frappe::Car(c)),
         })
         .take(COLLE_MAX)
-        .map(Frappe::Car)
         .collect()
 }
 
@@ -607,7 +609,8 @@ impl Edition {
         let n = self.texte.chars().count();
         self.curseur = self.curseur.min(n);
         match f {
-            Frappe::Car(c) => {
+            Frappe::Car(_) | Frappe::Ligne => {
+                let c = if let Frappe::Car(c) = f { c } else { ' ' };
                 let o = self.octet(self.curseur);
                 self.texte.insert(o, c);
                 self.curseur += 1;
@@ -682,8 +685,14 @@ mod tests {
     #[test]
     fn le_texte_colle_tient_sur_une_ligne() {
         let f = collees("a\r\nb\tc\u{7}é😀");
-        let t: String = f.iter().map(|f| if let Frappe::Car(c) = f { *c } else { '?' }).collect();
-        assert_eq!(t, "a b cé😀");
+        let t: String = f.iter().map(|f| if let Frappe::Car(c) = f { *c } else { '⏎' }).collect();
+        assert_eq!(t, "a⏎b cé😀");
+        // Dans un champ d'une ligne, le retour à la ligne devient une espace
+        let mut e = Edition::default();
+        f.iter().for_each(|f| {
+            e.appliquer(*f);
+        });
+        assert_eq!(e.texte, "a b cé😀");
         assert_eq!(collees(&"x".repeat(COLLE_MAX + 5)).len(), COLLE_MAX);
         assert!(collees("").is_empty());
     }

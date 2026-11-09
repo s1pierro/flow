@@ -1,9 +1,10 @@
 //! Le contexte Fichiers : un explorateur. Chaque fenêtre a son dossier ouvert et son
 //! choix d'afficher les fichiers cachés. Un dossier s'ouvre au toucher, un fichier
-//! audio se lit dans la piste « Fichier » du mixeur.
+//! audio se lit dans la piste « Fichier » du mixeur, un fichier texte s'ouvre dans
+//! l'éditeur, dans une fenêtre à côté.
 
 use super::{hachage, ligne_fichier, Puce, TEINTES};
-use crate::contexte::{Commun, Contexte, Etat, Genre};
+use crate::contexte::{Commun, Contexte, Demande, Etat, Genre};
 use crate::disque;
 use crate::draw::Rect;
 use crate::explorateur::{self, Dossier, Nature};
@@ -149,6 +150,11 @@ impl Contexte for Fichiers {
                     Nature::Dossier => aller = Some(chemin),
                     Nature::Audio if joue => radio::lecteur_fichiers().arreter(),
                     Nature::Audio => radio::lecteur_fichiers().jouer(&chemin.to_string_lossy()),
+                    Nature::Texte => {
+                        let mut etat = Etat::default();
+                        etat.mettre("document", chemin.display());
+                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::texte::CLE, etat });
+                    }
                     _ => {}
                 }
             }
