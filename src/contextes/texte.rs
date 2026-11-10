@@ -12,14 +12,21 @@
 //!   (`Flow/brouillons/`) quand l'application passe en arrière-plan ou que la fenêtre
 //!   se ferme : on le retrouve au lancement suivant.
 //!
-//! L'espace de travail retient le document, le curseur, le brouillon et le nom d'un
-//! nouveau document.
+//! - À gauche, la gouttière : le numéro de chaque ligne du texte (pas des lignes
+//!   coupées à l'écran) et, devant une ligne qui ouvre un bloc entre accolades sur
+//!   plusieurs lignes, un chevron. Toucher la gouttière plie ou déplie le bloc : ses
+//!   lignes intérieures disparaissent, l'accolade fermante reste, et une pastille
+//!   « ··· N » (N lignes cachées) le déplie aussi. Le curseur ne reste jamais dans un
+//!   bloc plié : il le déplie.
+//!
+//! L'espace de travail retient le document, le curseur, le brouillon, le nom d'un
+//! nouveau document et les blocs pliés (`plis`, numéros de ligne à partir de 0).
 
 use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::Rect;
 use crate::surface::{FenetreId, Placee};
-use crate::tampon::{couper, ligne_de, position_en, Segment, Tampon};
+use crate::tampon::{blocs, couper, ligne_de, logiques, position_en, Segment, Tampon};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
@@ -32,6 +39,10 @@ const CHAMP: Id = id("texte/champ");
 const NOM: Id = id("texte/nom");
 const NOM_CORPS: Id = id("texte/nom-corps");
 const ENREGISTRER: Id = id("texte/enregistrer");
+const GOUTTIERE: Id = id("texte/gouttiere");
+const PLI: Id = id("texte/pli");
+/// La taille des numéros de ligne.
+const TAILLE_NUMEROS: f32 = 12.0;
 /// La taille du texte, et la taille de fichier au-delà de laquelle il n'est pas ouvert.
 const TAILLE: f32 = 15.0;
 const TAILLE_MAX: u64 = 4 * 1024 * 1024;
@@ -61,8 +72,15 @@ pub struct Texte {
     nom: Edition,
     /// Un message pour la ligne d'état, et s'il signale une erreur.
     message: Option<(String, bool)>,
-    /// Le découpage en lignes : pour quelle révision et combien de colonnes.
-    coupe: Option<(u64, usize, Vec<Segment>)>,
+    /// Le découpage en lignes : pour quelle révision et combien de colonnes, les
+    /// lignes à l'écran et la ligne du texte de chacune.
+    coupe: Option<(u64, usize, Vec<Segment>, Vec<usize>)>,
+    /// Les blocs entre accolades (lignes de début et de fin), pour quelle révision.
+    blocs: Option<(u64, Vec<(usize, usize)>)>,
+    /// Les lignes de début des blocs repliés, croissantes.
+    plis: Vec<usize>,
+    /// Les lignes à l'écran visibles (hors des blocs repliés), et pour quel état.
+    vue: Option<(u64, usize, Vec<usize>, Vec<usize>)>,
     /// Faire défiler jusqu'au curseur à la prochaine image.
     suivre: bool,
 }
@@ -73,6 +91,12 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         brouillon: e.texte("brouillon").map(PathBuf::from),
         curseur_lu: e.nombre("curseur").map_or(0, |n| n.max(0.0) as usize),
         nom: Edition::new(e.texte("nom").unwrap_or("")),
+        plis: {
+            let mut v: Vec<usize> = e.nombres("plis").into_iter().map(|n| n.max(0.0) as usize).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        },
         ..Texte::default()
     })
 }
@@ -109,6 +133,24 @@ fn lire_fichier(chemin: &Path) -> Result<(String, bool), String> {
     let texte = String::from_utf8(octets).map_err(|_| "Ce fichier n'est pas du texte (UTF-8).".to_string())?;
     let crlf = texte.contains("\r\n");
     Ok((if crlf { texte.replace("\r\n", "\n") } else { texte }, crlf))
+}
+
+/// Les lignes à l'écran dont la ligne du texte n'est pas cachée (`cachees` : des
+/// intervalles inclus, croissants).
+fn visibles(logique: &[usize], cachees: &[(usize, usize)]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(logique.len());
+    let mut k = 0;
+    for (i, &l) in logique.iter().enumerate() {
+        while k < cachees.len() && cachees[k].1 < l {
+            k += 1;
+        }
+        // Les intervalles peuvent s'emboîter : le suivant peut commencer plus tôt
+        let cache = cachees[k..].iter().take_while(|c| c.0 <= l).any(|c| l <= c.1);
+        if !cache {
+            out.push(i);
+        }
+    }
+    out
 }
 
 impl Texte {
@@ -197,11 +239,70 @@ impl Texte {
 
     /// Le découpage en lignes, refait si le texte ou la largeur ont changé.
     fn segments(&mut self, colonnes: usize) -> &[Segment] {
-        let a_jour = self.coupe.as_ref().is_some_and(|(r, n, _)| *r == self.tampon.revision && *n == colonnes);
-        if !a_jour {
-            self.coupe = Some((self.tampon.revision, colonnes, couper(&self.tampon.car, colonnes)));
-        }
+        self.couper(colonnes);
         &self.coupe.as_ref().unwrap().2
+    }
+
+    fn couper(&mut self, colonnes: usize) {
+        let a_jour = self.coupe.as_ref().is_some_and(|(r, n, _, _)| *r == self.tampon.revision && *n == colonnes);
+        if !a_jour {
+            let s = couper(&self.tampon.car, colonnes);
+            let l = logiques(&self.tampon.car, &s);
+            self.coupe = Some((self.tampon.revision, colonnes, s, l));
+        }
+    }
+
+    /// Les blocs entre accolades, refaits si le texte a changé ; les plis qui ne
+    /// commencent plus un bloc sont oubliés.
+    fn blocs(&mut self) -> &[(usize, usize)] {
+        if self.blocs.as_ref().is_none_or(|(r, _)| *r != self.tampon.revision) {
+            let b = blocs(&self.tampon.car);
+            self.plis.retain(|l| b.iter().any(|x| x.0 == *l));
+            self.blocs = Some((self.tampon.revision, b));
+        }
+        &self.blocs.as_ref().unwrap().1
+    }
+
+    /// Les lignes du texte cachées par les plis : des intervalles inclus, croissants.
+    fn cachees(&mut self) -> Vec<(usize, usize)> {
+        let plis = self.plis.clone();
+        let mut v: Vec<(usize, usize)> = self.blocs().iter().filter(|b| plis.contains(&b.0) && b.1 > b.0 + 1).map(|b| (b.0 + 1, b.1 - 1)).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Les lignes à l'écran visibles, refaites si le texte, la largeur ou les plis ont
+    /// changé.
+    fn visibles(&mut self, colonnes: usize) -> Vec<usize> {
+        self.couper(colonnes);
+        self.blocs();
+        let a_jour = self.vue.as_ref().is_some_and(|(r, n, p, _)| *r == self.tampon.revision && *n == colonnes && *p == self.plis);
+        if !a_jour {
+            let cachees = self.cachees();
+            let logique = &self.coupe.as_ref().unwrap().3;
+            let v = visibles(logique, &cachees);
+            self.vue = Some((self.tampon.revision, colonnes, self.plis.clone(), v));
+        }
+        self.vue.as_ref().unwrap().3.clone()
+    }
+
+    /// Plie ou déplie le bloc qui commence à la ligne `l`.
+    fn basculer(&mut self, l: usize) {
+        if !self.blocs().iter().any(|b| b.0 == l) {
+            return;
+        }
+        match self.plis.binary_search(&l) {
+            Ok(i) => {
+                self.plis.remove(i);
+            }
+            Err(i) => self.plis.insert(i, l),
+        }
+    }
+
+    /// Déplie les blocs qui cachent la ligne `l` du texte.
+    fn montrer(&mut self, l: usize) {
+        let blocs = self.blocs().to_vec();
+        self.plis.retain(|p| !blocs.iter().any(|b| b.0 == *p && *p < l && l < b.1));
     }
 }
 
@@ -232,6 +333,9 @@ impl Contexte for Texte {
         let curseur = if self.charge { self.tampon.curseur } else { self.curseur_lu };
         if curseur > 0 {
             e.mettre("curseur", curseur);
+        }
+        if !self.plis.is_empty() {
+            e.mettre("plis", self.plis.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" "));
         }
     }
 
@@ -322,19 +426,27 @@ impl Contexte for Texte {
         }
         cx.dl.rrect(Rect::new(r.x, r.y + haut - d, r.w, d.max(1.0)), 0.0, col.ligne);
 
-        // Le texte
+        // Le texte, avec à gauche la gouttière : les numéros de ligne et les plis
         let zone = Rect::new(r.x, r.y + haut, r.w, (r.h - haut).max(0.0));
         let champ = sub_id(CHAMP, k);
         let scroll = sub_id(TEXTE, k);
         let lh = (cx.px(TAILLE) * 1.5).round().max(1.0);
         let cw = cx.mesure_mono("0", TAILLE).max(1.0);
+        let cn = cx.mesure_mono("0", TAILLE_NUMEROS).max(1.0);
         let marge_haut = 8.0 * d;
-        let colonnes = ((zone.w - 28.0 * d) / cw).floor().max(4.0) as usize;
+        let chiffres = self.tampon.lignes().to_string().len().max(2);
+        let fleche = (lh * 0.8).round();
+        let gouttiere = (chiffres as f32 * cn + fleche + 10.0 * d).round();
+        let colonnes = ((zone.w - 28.0 * d - gouttiere) / cw).floor().max(4.0) as usize;
+        // Le curseur ne reste pas dans un bloc replié
         let curseur = self.tampon.curseur;
-        let (ligne_curseur, n) = {
-            let s = self.segments(colonnes);
-            (ligne_de(s, curseur), s.len())
-        };
+        let seg_curseur = ligne_de(self.segments(colonnes), curseur);
+        let l_curseur = self.coupe.as_ref().unwrap().3[seg_curseur];
+        self.montrer(l_curseur);
+        let vis = self.visibles(colonnes);
+        let rang = |seg: usize| vis.partition_point(|&v| v < seg);
+        let ligne_curseur = rang(seg_curseur);
+        let n = vis.len();
         // Le curseur reste visible après une frappe
         if std::mem::take(&mut self.suivre) {
             let (off, contenu) = c.scrolls.get(&scroll).copied().unwrap_or((0.0, 0.0));
@@ -351,35 +463,104 @@ impl Contexte for Texte {
         let mut b = cx.body(scroll, zone, &c.scrolls);
         let top = b.y;
         let vue = b.rect();
+        let xt = b.x + gouttiere;
         let focus = c.clavier.cible == Some(champ);
-        cx.ui.region_add(champ, zone, Sense::Click { scroll: Some(b.id()) });
+        let (s, logique) = {
+            let co = self.coupe.as_ref().unwrap();
+            (co.2.clone(), co.3.clone())
+        };
+        let blocs_ = self.blocs().to_vec();
+        let premiere = ((vue.y - top) / lh).floor().max(0.0) as usize;
+        let derniere = (((vue.bottom() - top) / lh).ceil().max(0.0) as usize).min(n);
+        // Le fond de la gouttière et son filet
+        let g = Rect::new(vue.x, vue.y, b.x - vue.x + gouttiere - 4.0 * d, vue.h);
+        cx.dl.rrect(g, 0.0, col.fond);
+        cx.dl.rrect(Rect::new(g.right(), vue.y, d.max(1.0), vue.h), 0.0, col.ligne);
+        cx.ui.region_add(champ, Rect::new(g.right(), zone.y, zone.right() - g.right(), zone.h), Sense::Click { scroll: Some(b.id()) });
+        // Toucher la gouttière plie ou déplie le bloc de la ligne
+        let kg = sub_id(GOUTTIERE, k);
+        cx.ui.region_add(kg, g, Sense::Click { scroll: Some(b.id()) });
+        let mut basculer = None;
+        if let Some((_, y)) = cx.ui.clic_en(kg) {
+            let row = ((y - top) / lh).floor().max(0.0) as usize;
+            if let Some(&seg) = vis.get(row) {
+                basculer = Some(logique[seg]);
+            }
+        }
+        // Les pastilles « ··· » des blocs repliés : les toucher déplie
+        let mut pastilles = Vec::new();
+        let couleur = if self.lecture_seule { col.pale } else { col.texte };
+        let l_courante = l_curseur;
+        for row in premiere..derniere {
+            let si = vis[row];
+            let (a, e) = s[si];
+            let y = top + row as f32 * lh;
+            let cy = y + lh / 2.0;
+            let t: String = self.tampon.car[a..e].iter().collect();
+            cx.mono_at(xt, cy, &t, TAILLE, couleur);
+            let l = logique[si];
+            let premiere_du_texte = si == 0 || logique[si - 1] != l;
+            if premiere_du_texte {
+                let num = (l + 1).to_string();
+                let wn = cx.mesure_mono(&num, TAILLE_NUMEROS);
+                let xn = b.x + chiffres as f32 * cn - wn;
+                cx.mono_at(xn, cy, &num, TAILLE_NUMEROS, if l == l_courante && focus { col.texte } else { col.pale });
+                if let Some(bl) = blocs_.iter().find(|x| x.0 == l) {
+                    let plie = self.plis.binary_search(&l).is_ok() && bl.1 > bl.0 + 1;
+                    let f = Rect::new(b.x + chiffres as f32 * cn + 4.0 * d, y + (lh - fleche) / 2.0, fleche, fleche);
+                    let (fx, fy, u) = (f.cx(), f.cy(), fleche / 10.0);
+                    let tf = (1.4 * d).max(1.0);
+                    let tc = if plie { col.accent } else { col.pale };
+                    if plie {
+                        cx.dl.line([fx - 1.5 * u, fy - 3.0 * u], [fx + 1.5 * u, fy], tf, tc);
+                        cx.dl.line([fx + 1.5 * u, fy], [fx - 1.5 * u, fy + 3.0 * u], tf, tc);
+                    } else {
+                        cx.dl.line([fx - 3.0 * u, fy - 1.5 * u], [fx, fy + 1.5 * u], tf, tc);
+                        cx.dl.line([fx, fy + 1.5 * u], [fx + 3.0 * u, fy - 1.5 * u], tf, tc);
+                    }
+                }
+            }
+            // Au bout de la dernière ligne à l'écran d'un bloc replié : « ··· N »
+            let derniere_du_texte = s.get(si + 1).is_none_or(|_| logique[si + 1] != l);
+            if derniere_du_texte && self.plis.binary_search(&l).is_ok() {
+                if let Some(bl) = blocs_.iter().find(|x| x.0 == l && x.1 > x.0 + 1) {
+                    let texte = format!("··· {}", bl.1 - bl.0 - 1);
+                    let wp = cx.mesure_mono(&texte, TAILLE_NUMEROS) + 12.0 * d;
+                    let pr = Rect::new(xt + cx.mesure_mono(&t, TAILLE) + 8.0 * d, y + lh * 0.15, wp, lh * 0.7);
+                    let kp = sub_id(PLI, k * 1_000_003 + l);
+                    pastilles.push((kp, pr, l));
+                    cx.dl.rrect(pr, pr.h / 2.0, col.puce);
+                    cx.mono_at(pr.x + 6.0 * d, pr.cy(), &texte, TAILLE_NUMEROS, col.accent);
+                }
+            }
+        }
+        for (kp, pr, l) in pastilles {
+            if cx.ui.click(kp, pr, Some(b.id())) {
+                basculer = Some(l);
+            }
+        }
         if let Some((x, y)) = cx.ui.clic_en(champ) {
-            let ligne = ((y - top) / lh).floor().max(0.0) as usize;
-            let colonne = ((x - b.x) / cw).round().max(0.0) as usize;
-            let s = self.segments(colonnes);
-            self.tampon.curseur = position_en(s, ligne, colonne);
+            let row = ((y - top) / lh).floor().max(0.0) as usize;
+            let seg = vis.get(row.min(n.saturating_sub(1))).copied().unwrap_or(0);
+            let colonne = ((x - xt) / cw).round().max(0.0) as usize;
+            self.tampon.curseur = position_en(&s, seg, colonne);
             if !self.lecture_seule {
                 c.clavier.ouvrir(champ);
                 self.suivre = true;
             }
         }
-        if self.tampon.car.is_empty() && !focus {
-            cx.text_at(b.x, top + lh / 2.0, if self.lecture_seule { "" } else { "Touchez pour écrire" }, TAILLE, col.pale);
+        if let Some(l) = basculer {
+            self.basculer(l);
         }
-        let premiere = ((vue.y - top) / lh).floor().max(0.0) as usize;
-        let derniere = (((vue.bottom() - top) / lh).ceil().max(0.0) as usize).min(n);
-        let couleur = if self.lecture_seule { col.pale } else { col.texte };
-        let curseur = self.tampon.curseur;
-        let s = self.segments(colonnes).to_vec();
-        for (i, &(a, e)) in s.iter().enumerate().take(derniere).skip(premiere) {
-            let t: String = self.tampon.car[a..e].iter().collect();
-            cx.mono_at(b.x, top + i as f32 * lh + lh / 2.0, &t, TAILLE, couleur);
+        if self.tampon.car.is_empty() && !focus {
+            cx.text_at(xt, top + lh / 2.0, if self.lecture_seule { "" } else { "Touchez pour écrire" }, TAILLE, col.pale);
         }
         if focus {
+            let curseur = self.tampon.curseur;
             let l = ligne_de(&s, curseur);
             let avant: String = self.tampon.car[s[l].0..curseur.max(s[l].0)].iter().collect();
-            let x = b.x + cx.mesure_mono(&avant, TAILLE);
-            let y = top + l as f32 * lh;
+            let x = xt + cx.mesure_mono(&avant, TAILLE);
+            let y = top + rang(l) as f32 * lh;
             cx.dl.rrect(Rect::new(x - d, y + lh * 0.15, 2.0 * d, lh * 0.7), d, col.accent);
         }
         b.y = top + n as f32 * lh;
@@ -479,6 +660,37 @@ mod tests {
         u.enregistrer(&c).unwrap();
         assert!(!brouillon.exists());
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn les_blocs_se_replient_et_se_deplient() {
+        let mut t = Texte::default();
+        t.charger();
+        taper(&mut t, "fn a() {\n    b {\n        c\n    }\n    d\n}\nfin");
+        // Sept lignes, deux blocs : 0 à 5, et 1 à 3
+        assert_eq!(t.visibles(80).len(), 7);
+        t.basculer(1);
+        assert_eq!(t.visibles(80), vec![0, 1, 3, 4, 5, 6]);
+        t.basculer(0);
+        assert_eq!(t.visibles(80), vec![0, 5, 6]);
+        // Une ligne sans bloc ne se plie pas ; le pli se retient dans l'espace
+        t.basculer(4);
+        let mut e = Etat::default();
+        t.ecrire(&mut e);
+        assert_eq!(e.texte("plis"), Some("0 1"));
+        // Le curseur dans un bloc replié déplie tout ce qui le cache
+        t.montrer(2);
+        assert!(t.plis.is_empty());
+        assert_eq!(t.visibles(80).len(), 7);
+        // Un pli qui ne commence plus un bloc après une modification est oublié
+        t.basculer(1);
+        t.tampon.curseur = t.tampon.car.iter().position(|c| *c == 'b').unwrap() + 2;
+        taper(&mut t, "x");
+        t.tampon.curseur = 0;
+        t.tampon.car.retain(|c| *c != '{');
+        t.tampon.revision += 1;
+        assert!(t.blocs().is_empty());
+        assert!(t.plis.is_empty());
     }
 
     #[test]

@@ -112,6 +112,85 @@ pub fn position_en(segments: &[Segment], ligne: usize, colonne: usize) -> usize 
     (debut + colonne).min(fin)
 }
 
+/// La ligne du texte (à partir de 0) de chaque ligne à l'écran.
+pub fn logiques(car: &[char], segments: &[Segment]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(segments.len());
+    let mut l = 0;
+    for (k, s) in segments.iter().enumerate() {
+        if k > 0 {
+            let p = segments[k - 1].1;
+            if s.0 == p + 1 && car.get(p) == Some(&'\n') {
+                l += 1;
+            }
+        }
+        out.push(l);
+    }
+    out
+}
+
+/// Les blocs entre accolades qui tiennent sur plusieurs lignes : la ligne de
+/// l'accolade ouvrante et celle de la fermante, par ligne de départ croissante (pour
+/// une ligne qui en ouvre plusieurs, le plus grand). Les accolades des chaînes, des
+/// caractères (`'{'`) et des commentaires (`//`, `/* */`) ne comptent pas.
+pub fn blocs(car: &[char]) -> Vec<(usize, usize)> {
+    let mut pile: Vec<usize> = Vec::new();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let (mut i, mut ligne) = (0, 0);
+    while i < car.len() {
+        let c = car[i];
+        match c {
+            '\n' => ligne += 1,
+            '/' if car.get(i + 1) == Some(&'/') => {
+                while i < car.len() && car[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '/' if car.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < car.len() && !(car[i] == '*' && car.get(i + 1) == Some(&'/')) {
+                    if car[i] == '\n' {
+                        ligne += 1;
+                    }
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            '"' => {
+                i += 1;
+                while i < car.len() && car[i] != '"' {
+                    if car[i] == '\\' {
+                        i += 1;
+                    }
+                    if car.get(i) == Some(&'\n') {
+                        ligne += 1;
+                    }
+                    i += 1;
+                }
+            }
+            // Un caractère : 'x' ou '\x' (pas une durée de vie, 'a sans guillemet fermant)
+            '\'' if car.get(i + 2) == Some(&'\'') && car.get(i + 1) != Some(&'\\') => i += 2,
+            '\'' if car.get(i + 1) == Some(&'\\') && car.get(i + 3) == Some(&'\'') => i += 3,
+            '{' => pile.push(ligne),
+            '}' => {
+                if let Some(debut) = pile.pop() {
+                    if ligne > debut {
+                        match out.iter_mut().find(|b| b.0 == debut) {
+                            Some(b) => b.1 = b.1.max(ligne),
+                            None => out.push((debut, ligne)),
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.sort_unstable();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +224,17 @@ mod tests {
         assert_eq!(position_en(&s, 1, 2), 10);
         assert_eq!(position_en(&s, 1, 99), 13);
         assert_eq!(position_en(&s, 9, 0), 14);
+    }
+
+    #[test]
+    fn les_blocs_entre_accolades() {
+        let t: Vec<char> = "fn a() {\n    let s = \"{\";\n    if x { y }\n    // {\n    let c = '{';\n    if b {\n        z\n    } else {\n        w\n    }\n}\n".chars().collect();
+        assert_eq!(blocs(&t), vec![(0, 10), (5, 7), (7, 9)]);
+        let s = couper(&t, 8);
+        let l = logiques(&t, &s);
+        assert_eq!(l.len(), s.len());
+        assert_eq!(*l.last().unwrap(), 11);
+        assert!(l.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] + 1));
     }
 
     #[test]

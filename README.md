@@ -6,7 +6,7 @@ composer son espace de travail à son goût. Née d'une copie de
 [Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
 Contextes : Accueil (les contextes en cartes, celui des fenêtres nées du menu), Fichiers (les
-entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers), Texte (éditeur, qui prend aussi la place de l'explorateur
+entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers), Texte (éditeur à numéros de ligne et blocs entre accolades repliables, qui prend aussi la place de l'explorateur
 quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste), Encre (dessin à
 main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts),
 Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie surveillée,

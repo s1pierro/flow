@@ -45,6 +45,7 @@ fn main() {
         Shot { name: "mixeur", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mixeur-etroit", w: 1200, h: 1920, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
+        Shot { name: "texte-code", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -110,6 +111,14 @@ fn main() {
             app.commun.theme.sombre = s.gestes == 2;
         }
 
+        if s.name == "texte-code" {
+            // Un fichier Rust, deux blocs repliés, le curseur plus bas
+            let f = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tampon.rs");
+            let car: Vec<char> = std::fs::read_to_string(f).unwrap().chars().collect();
+            let b = flow::tampon::blocs(&car);
+            let plis = format!("{} {}", b[1].0, b[3].0);
+            app.ouvrir_espace(&format!("fenetres = F1:texte\n[fenetre 1]\ndocument = {f}\nplis = {plis}\n"));
+        }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu
             app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
