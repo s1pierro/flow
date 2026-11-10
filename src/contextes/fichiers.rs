@@ -16,7 +16,7 @@ use crate::widgets::{Cx, Icon};
 use std::path::PathBuf;
 
 pub const CLE: &str = "fichiers";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Fichiers", icone: Icon::Dossier, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Fichiers", legende: "Parcourir le stockage, ouvrir les documents", icone: Icon::Dossier, ouvrir };
 
 const FICHIERS: Id = id("fichiers");
 

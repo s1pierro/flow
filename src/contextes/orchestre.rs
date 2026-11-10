@@ -14,7 +14,7 @@ use crate::widgets::{Body, Cx, Icon};
 use std::sync::atomic::Ordering;
 
 pub const CLE: &str = "orchestre";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Orchestre", icone: Icon::Orchestre, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Orchestre", legende: "Empreintes, batterie, contextes : l'état de Flow", icone: Icon::Orchestre, ouvrir };
 
 const ORCHESTRE: Id = id("orchestre");
 /// La durée montrée par la courbe de la batterie.

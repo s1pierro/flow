@@ -12,7 +12,7 @@ use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 
 pub const CLE: &str = "radio";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Radio", icone: Icon::Radio, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Radio", legende: "Écouter un flux en ligne", icone: Icon::Radio, ouvrir };
 
 const RADIO: Id = id("radio");
 const RADIO_CHAMP: Id = id("radio-adresse");

@@ -134,6 +134,11 @@ pub enum Icon {
     /// Le mixeur : trois curseurs verticaux.
     /// L'orchestrateur : un nœud relié à ses satellites.
     Orchestre,
+    /// L'Accueil : une maison.
+    Maison,
+    /// Partager une fenêtre en deux colonnes, ou en deux lignes.
+    ScinderColonnes,
+    ScinderLignes,
     Mixeur,
     /// Annuler, rétablir : une flèche en demi-tour.
     Annuler,
@@ -269,6 +274,24 @@ impl Cx<'_> {
                 for y in [-6.0, 0.0, 6.0] {
                     self.dl.rrect(Rect::new(cx - 8.5 * u - 1.3 * u, cy + (y - 1.3) * u, 2.6 * u, 2.6 * u), 1.3 * u, color);
                     self.dl.line(p(-4.0, y), p(9.0, y), t, color);
+                }
+            }
+            Icon::Maison => {
+                let v = [p(-8.0, 9.0), p(-8.0, -1.0), p(0.0, -9.0), p(8.0, -1.0), p(8.0, 9.0)];
+                for i in 0..4 {
+                    self.dl.line(v[i], v[i + 1], t, color);
+                }
+                self.dl.line(p(-9.0, 9.0), p(9.0, 9.0), t, color);
+                self.dl.rrect(Rect::new(cx - 2.5 * u, cy + 3.0 * u, 5.0 * u, 6.0 * u), 0.8 * u, color);
+            }
+            Icon::ScinderColonnes | Icon::ScinderLignes => {
+                let b = Rect::new(cx - 10.0 * u, cy - 8.0 * u, 20.0 * u, 16.0 * u);
+                self.dl.rrect(b, 2.5 * u, color);
+                self.dl.rrect(b.inset(1.8 * u), 1.2 * u, self.theme.couleurs().surface);
+                if icon == Icon::ScinderColonnes {
+                    self.dl.line(p(0.0, -8.0), p(0.0, 8.0), 1.8 * u, color);
+                } else {
+                    self.dl.line(p(-10.0, 0.0), p(10.0, 0.0), 1.8 * u, color);
                 }
             }
             Icon::Orchestre => {

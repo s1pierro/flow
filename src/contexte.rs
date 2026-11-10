@@ -31,6 +31,8 @@ pub struct Genre {
     pub cle: &'static str,
     /// Le nom affiché dans la barre de la fenêtre et le menu.
     pub nom: &'static str,
+    /// Une phrase courte qui dit à quoi il sert (cartes de l'Accueil).
+    pub legende: &'static str,
     pub icone: Icon,
     /// Crée une instance à partir de son état enregistré (vide pour une fenêtre
     /// nouvelle). Les valeurs absentes ou illisibles prennent leur valeur par défaut.

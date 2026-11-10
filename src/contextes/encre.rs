@@ -29,7 +29,7 @@ use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
 
 pub const CLE: &str = "encre";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Encre", icone: Icon::Encre, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Encre", legende: "Dessiner à main levée, en SVG", icone: Icon::Encre, ouvrir };
 
 const ENCRE: Id = id("encre");
 const NOM: Id = id("encre/nom");

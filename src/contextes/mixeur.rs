@@ -15,7 +15,7 @@ use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Body, Cx, Icon};
 
 pub const CLE: &str = "mixeur";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Mixeur", icone: Icon::Mixeur, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Mixeur", legende: "Le volume de chaque piste audio", icone: Icon::Mixeur, ouvrir };
 
 const MIXEUR: Id = id("mixeur");
 const ROUGE: [u8; 4] = [0xE0, 0x3A, 0x3A, 255];

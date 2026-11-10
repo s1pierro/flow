@@ -216,7 +216,7 @@ impl App {
                         i.mettre_a_l_abri(&self.commun);
                     }
                 }
-                Changement::Vue { .. } => {}
+                Changement::Vue { .. } | Changement::Nouvelle(_) => {}
             }
         }
         for p in placees {
@@ -256,6 +256,7 @@ impl App {
         }
         let l = self.shell.layout(screen, dt);
         let vues = contextes::vues();
+        self.surface.accueil = contextes::indice(contextes::accueil::CLE).unwrap_or(0);
         let placees = self.surface.frame(cx, l.workspace, &vues);
         self.suivre_fenetres(&placees);
         for p in &placees {
@@ -597,6 +598,7 @@ mod tests {
     #[test]
     fn un_fichier_texte_remplace_l_explorateur_une_seule_fois() {
         let mut r = Rig::new();
+        r.app.ouvrir_espace("fenetres = F1:fichiers\n");
         r.app.surface.partager(1, crate::surface::Sens::Colonnes, 0.5);
         r.frames(1);
         let mut etat = Etat::default();
@@ -612,6 +614,20 @@ mod tests {
         r.app.commun.demandes.push(Demande::Ouvrir { depuis: 2, cle: "texte", etat });
         r.frames(2);
         assert_eq!(r.app.surface.vue(2), Some(vue("fichiers")));
+    }
+
+    #[test]
+    fn une_carte_de_l_accueil_ouvre_son_contexte_et_le_menu_scinde_sur_l_accueil() {
+        let mut r = Rig::new();
+        r.frames(1);
+        assert_eq!(r.app.fenetres[&1].cle(), "accueil");
+        r.app.commun.demandes.push(Demande::Ouvrir { depuis: 1, cle: "encre", etat: Etat::default() });
+        r.frames(1);
+        assert_eq!(r.app.fenetres[&1].cle(), "encre");
+        let n = r.app.surface.scinder(1, crate::surface::Sens::Lignes, vue("accueil")).unwrap();
+        r.frames(1);
+        assert_eq!(r.app.fenetres[&n].cle(), "accueil");
+        assert_eq!(r.app.fenetres[&1].cle(), "encre");
     }
 
     #[test]

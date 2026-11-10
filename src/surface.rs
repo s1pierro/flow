@@ -18,7 +18,8 @@
 //!   bas de la fenêtre (les partages les plus proches qui les portent), de 10 à 90 %.
 //!   Elle montre toujours un point, et un tiret le long de chaque bord qu'elle peut
 //!   déplacer : les deux ensemble forment un chevron.
-//! - **Menu** : toucher l'icône ou le titre ouvre le choix de la vue, et la fermeture.
+//! - **Menu** : toucher l'icône ou le titre ouvre le choix de la vue, le partage en
+//!   deux moitiés (la nouvelle montre l'Accueil) et la fermeture.
 //!   La fenêtre voisine reprend la place d'une fenêtre fermée.
 //!
 //! L'application appelle `frame` (disposition, barres, gestes) avant de dessiner le
@@ -84,6 +85,9 @@ pub struct Placee {
 pub enum Changement {
     /// `de` s'est partagée ; `nouvelle` est née, avec la même vue.
     Partagee { de: FenetreId, nouvelle: FenetreId },
+    /// Une fenêtre nouvelle, née d'un partage par le menu : elle montre la vue
+    /// d'accueil, avec une instance neuve (pas une copie).
+    Nouvelle(FenetreId),
     Fermee(FenetreId),
     Vue { id: FenetreId, vue: u32 },
 }
@@ -105,6 +109,8 @@ pub struct Surface {
     /// La poignée tirée : sa fenêtre, et l'écart du doigt aux bords droit et bas.
     tirage: Option<(FenetreId, f32, f32)>,
     menu: Option<FenetreId>,
+    /// La vue des fenêtres nées d'un partage par le menu (l'Accueil).
+    pub accueil: u32,
     rect: Rect,
     placees: Vec<Placee>,
     changements: Vec<Changement>,
@@ -249,7 +255,7 @@ impl Surface {
 
     fn de(racine: Noeud) -> Surface {
         let suivant = racine.max_id() + 1;
-        Surface { racine, suivant, geste: None, tirage: None, menu: None, rect: Rect::default(), placees: Vec::new(), changements: Vec::new(), modifiee: false }
+        Surface { racine, suivant, geste: None, tirage: None, menu: None, accueil: 0, rect: Rect::default(), placees: Vec::new(), changements: Vec::new(), modifiee: false }
     }
 
     /// Les fenêtres dans le rectangle `r` : identifiant, vue et cadre.
@@ -304,35 +310,41 @@ impl Surface {
     /// Partage la fenêtre `f` : la nouvelle prend la première part (`ratio`), avec la même
     /// vue. Renvoie son identifiant.
     pub fn partager(&mut self, f: FenetreId, sens: Sens, ratio: f32) -> Option<FenetreId> {
-        self.partager_ou(f, sens, ratio, false)
+        self.partager_ou(f, sens, ratio, false, None)
     }
 
     /// Partage la fenêtre `f` : elle garde la première part (`ratio`) et la nouvelle,
     /// avec la même vue, prend la seconde (à droite, ou en bas). Renvoie son identifiant.
     pub fn partager_apres(&mut self, f: FenetreId, sens: Sens, ratio: f32) -> Option<FenetreId> {
-        self.partager_ou(f, sens, ratio, true)
+        self.partager_ou(f, sens, ratio, true, None)
     }
 
-    fn partager_ou(&mut self, f: FenetreId, sens: Sens, ratio: f32, apres: bool) -> Option<FenetreId> {
+    /// Partage la fenêtre `f` en deux moitiés : la nouvelle, à droite ou en bas, montre
+    /// la vue `vue` (`Changement::Nouvelle`).
+    pub fn scinder(&mut self, f: FenetreId, sens: Sens, vue: u32) -> Option<FenetreId> {
+        self.partager_ou(f, sens, 0.5, true, Some(vue))
+    }
+
+    fn partager_ou(&mut self, f: FenetreId, sens: Sens, ratio: f32, apres: bool, autre: Option<u32>) -> Option<FenetreId> {
         let nouvelle = self.suivant;
-        fn remplacer(n: &mut Noeud, f: FenetreId, sens: Sens, ratio: f32, nouvelle: FenetreId, apres: bool) -> bool {
+        fn remplacer(n: &mut Noeud, f: FenetreId, sens: Sens, ratio: f32, nouvelle: FenetreId, apres: bool, autre: Option<u32>) -> bool {
             match n {
                 Noeud::Fenetre { id, vue } if *id == f => {
                     let vue = *vue;
-                    let (nv, an) = (Box::new(Noeud::Fenetre { id: nouvelle, vue }), Box::new(Noeud::Fenetre { id: f, vue }));
+                    let (nv, an) = (Box::new(Noeud::Fenetre { id: nouvelle, vue: autre.unwrap_or(vue) }), Box::new(Noeud::Fenetre { id: f, vue }));
                     let (a, b) = if apres { (an, nv) } else { (nv, an) };
                     *n = Noeud::Partage { sens, ratio: ratio.clamp(MIN, MAX), a, b };
                     true
                 }
                 Noeud::Fenetre { .. } => false,
-                Noeud::Partage { a, b, .. } => remplacer(a, f, sens, ratio, nouvelle, apres) || remplacer(b, f, sens, ratio, nouvelle, apres),
+                Noeud::Partage { a, b, .. } => remplacer(a, f, sens, ratio, nouvelle, apres, autre) || remplacer(b, f, sens, ratio, nouvelle, apres, autre),
             }
         }
-        if !remplacer(&mut self.racine, f, sens, ratio, nouvelle, apres) {
+        if !remplacer(&mut self.racine, f, sens, ratio, nouvelle, apres, autre) {
             return None;
         }
         self.suivant += 1;
-        self.changements.push(Changement::Partagee { de: f, nouvelle });
+        self.changements.push(if autre.is_some() { Changement::Nouvelle(nouvelle) } else { Changement::Partagee { de: f, nouvelle } });
         self.modifiee = true;
         Some(nouvelle)
     }
@@ -561,8 +573,9 @@ impl Surface {
             self.menu = None;
             return;
         }
+        // Les vues, puis la ligne des partages (deux icônes), puis la fermeture
         let fermer = self.nombre() > 1;
-        let lignes = vues.len() + fermer as usize;
+        let lignes = vues.len() + 1 + fermer as usize;
         let (w, lh) = ((MENU_LARGE * d * cx.theme.texte).min(self.rect.w), (MENU_LIGNE * cx.commande()).round());
         let h = lh * lignes as f32 + 8.0 * d;
         // Au-dessus du titre, qui l'a ouvert
@@ -589,6 +602,23 @@ impl Surface {
                     self.menu = None;
                     if !actuelle {
                         self.changer_vue(p.id, i as u32);
+                    }
+                }
+            } else if i == vues.len() {
+                // Deux moitiés : côte à côte, et l'une sur l'autre ; la nouvelle fenêtre
+                // montre l'Accueil
+                cx.dl.rrect(Rect::new(l.x + 8.0 * d, l.y, l.w - 16.0 * d, d.max(1.0)), 0.0, col.ligne);
+                for (k, (sens, icone)) in [(Sens::Colonnes, Icon::ScinderColonnes), (Sens::Lignes, Icon::ScinderLignes)].into_iter().enumerate() {
+                    let moitie = Rect::new(l.x + k as f32 * l.w / 2.0, l.y, l.w / 2.0, l.h);
+                    let mk = sub_id(sub_id(LIGNE_MENU, 1000), k);
+                    let appui = cx.ui.click(mk, moitie.inset(2.0 * d), None);
+                    if cx.ui.pressed(mk) {
+                        cx.dl.rrect(moitie.inset(2.0 * d), 8.0 * d, col.puce);
+                    }
+                    cx.icon(Rect::new(moitie.cx() - ic / 2.0, l.cy() - ic / 2.0, ic, ic), icone, col.texte);
+                    if appui {
+                        self.menu = None;
+                        self.scinder(p.id, sens, self.accueil);
                     }
                 }
             } else {
@@ -765,14 +795,15 @@ mod tests {
         // Le titre de la fenêtre de droite ouvre le menu, au-dessus de la barre
         b.toucher(520., 785.);
         assert_eq!(b.s.menu, Some(1));
-        // Trois lignes de 42 : le menu commence à 764 - 134 - 2, ses lignes 4 plus bas
-        let ligne = |i: f32| 628. + 4. + 42. * (i + 0.5);
+        // Quatre lignes de 42 (deux vues, les partages, la fermeture) : le menu commence
+        // à 764 - 176 - 2, ses lignes 4 plus bas
+        let ligne = |i: f32| 586. + 4. + 42. * (i + 0.5);
         b.toucher(600., ligne(1.));
         assert_eq!(b.s.vue(1), Some(1));
         assert_eq!(b.s.menu, None);
         // Puis « Fermer la fenêtre »
         b.toucher(520., 785.);
-        b.toucher(600., ligne(2.));
+        b.toucher(600., ligne(3.));
         assert_eq!(b.s.nombre(), 1);
         assert_eq!(b.s.changements(), vec![Changement::Vue { id: 1, vue: 1 }, Changement::Fermee(1)]);
         // Toucher à côté referme le menu sans rien changer
@@ -781,6 +812,28 @@ mod tests {
         b.toucher(900., 100.);
         assert_eq!(b.s.menu, None);
         assert_eq!(b.s.nombre(), 1);
+    }
+
+    #[test]
+    fn le_menu_scinde_et_la_nouvelle_montre_l_accueil() {
+        let mut b = Banc::new();
+        b.s.accueil = 1;
+        b.image();
+        b.changements();
+        // Une seule fenêtre : trois lignes (deux vues, les partages), sans fermeture
+        b.toucher(20., 785.);
+        assert_eq!(b.s.menu, Some(1));
+        let ligne = 764. - (42. * 3. + 8.) - 2. + 4. + 42. * 2.5;
+        // La moitié droite : l'une sur l'autre
+        let m = (MENU_LARGE).min(1000.);
+        b.toucher(4. + 4. + m * 0.75, ligne);
+        assert_eq!(b.s.nombre(), 2);
+        assert_eq!(b.s.changements(), vec![Changement::Nouvelle(2)]);
+        let p = b.image();
+        assert_eq!(p[1].id, 2);
+        assert_eq!(p[1].vue, 1);
+        assert_eq!(p[1].cadre, Rect::new(0., 400., 1000., 400.));
+        assert_eq!(p[0].vue, 0);
     }
 
     #[test]

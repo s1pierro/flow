@@ -17,7 +17,7 @@ use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 
 pub const CLE: &str = "disque";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Disque", icone: Icon::Anneau, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Disque", legende: "L'occupation du stockage, en anneaux", icone: Icon::Anneau, ouvrir };
 
 const DISQUE: Id = id("disque");
 /// Anneaux du graphique, autour du dossier central.

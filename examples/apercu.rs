@@ -45,6 +45,8 @@ fn main() {
         Shot { name: "mixeur", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mixeur-etroit", w: 1200, h: 1920, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
+        Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
     ];
     let mut egl = Egl::new(true).expect("EGL");
@@ -108,6 +110,10 @@ fn main() {
             app.commun.theme.sombre = s.gestes == 2;
         }
 
+        if s.name == "accueil" {
+            // L'Accueil à côté d'une fenêtre Encre, née du menu
+            app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
+        }
         let mut scene = None;
         for i in 0..60 {
             let t = i as f64 * 0.05;
@@ -137,6 +143,12 @@ fn main() {
                 }
                 (2, 30) => ui.event(Event::Down { id: 0, x: 300.0, y: 500.0 }, t),
                 _ => {}
+            }
+            if i == 30 && s.name == "accueil-menu" {
+                // Le titre de la fenêtre ouvre son menu
+                let c = 48.0 * s.dp;
+                ui.event(Event::Down { id: 0, x: 80.0, y: h - c - 0.375 * c }, t);
+                ui.event(Event::Up { id: 0 }, t + 0.02);
             }
             if i == 30 && s.help {
                 // Vraie séquence tactile : appui sur la pastille d'aide, dans la barre du bas.

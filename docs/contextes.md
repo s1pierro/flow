@@ -61,7 +61,7 @@ use crate::widgets::{Cx, Icon};
 use std::path::PathBuf;
 
 pub const CLE: &str = "texte";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Texte", icone: Icon::Fichier, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Texte", legende: "Éditer un texte brut", icone: Icon::Fichier, ouvrir };
 
 const TEXTE: Id = id("texte");
 
@@ -105,7 +105,8 @@ impl Contexte for Texte {
 ### 2. La déclaration
 
 Dans `src/contextes/mod.rs` : `pub mod texte;`, puis `texte::GENRE` dans `GENRES`.
-Le contexte apparaît alors dans le menu de chaque fenêtre. Le test
+Le contexte apparaît alors dans le menu de chaque fenêtre, et en carte dans
+l'Accueil, avec sa `legende` (une phrase courte, sur deux lignes au plus). Le test
 `les_cles_sont_uniques_et_valides` vérifie la clé.
 
 ### 3. Vérifier
@@ -203,6 +204,16 @@ le trait du pincement) : le contexte n'a qu'à réagir. La distance et les duré
 règlent dans l'onglet Gestes des paramètres (`Commun::gestes`). Le contexte Encre
 (`contextes/encre.rs`) sert d'exemple : un doigt trace (saisie, tap), deux doigts
 naviguent (pincement : zoom autour du centre des doigts et déplacement).
+
+## L'Accueil et le partage par le menu
+
+L'Accueil (`contextes/accueil.rs`, premier de `GENRES`, donc contexte de la première
+fenêtre) montre les autres contextes en cartes ; toucher une carte envoie un
+`Demande::Ouvrir` pour sa propre fenêtre. Le menu de la barre d'une fenêtre porte, au-dessus de
+« Fermer la fenêtre », deux icônes : partager côte à côte ou l'une sous l'autre
+(`Surface::scinder`, en deux moitiés). La nouvelle fenêtre montre `Surface::accueil`
+avec une instance neuve (`Changement::Nouvelle`), alors que la pastille + glissée
+copie l'instance (`Changement::Partagee`).
 
 ## Ouvrir un contexte depuis un autre
 

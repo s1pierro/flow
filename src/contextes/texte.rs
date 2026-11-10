@@ -25,7 +25,7 @@ use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
 
 pub const CLE: &str = "texte";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Texte", icone: Icon::Fichier, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Texte", legende: "Éditer un texte brut, avec brouillons", icone: Icon::Fichier, ouvrir };
 
 const TEXTE: Id = id("texte");
 const CHAMP: Id = id("texte/champ");
