@@ -131,6 +131,8 @@ pub enum Icon {
     /// Encre : un crayon et son trait ; la gomme.
     Encre,
     Gomme,
+    /// Le mixeur : trois curseurs verticaux.
+    Mixeur,
     /// Annuler, rétablir : une flèche en demi-tour.
     Annuler,
     Retablir,
@@ -265,6 +267,12 @@ impl Cx<'_> {
                 for y in [-6.0, 0.0, 6.0] {
                     self.dl.rrect(Rect::new(cx - 8.5 * u - 1.3 * u, cy + (y - 1.3) * u, 2.6 * u, 2.6 * u), 1.3 * u, color);
                     self.dl.line(p(-4.0, y), p(9.0, y), t, color);
+                }
+            }
+            Icon::Mixeur => {
+                for (x, k) in [(-6.0, 3.0), (0.0, -4.0), (6.0, 1.5)] {
+                    self.dl.line(p(x, -9.0), p(x, 9.0), 1.6 * u, color);
+                    self.dl.rrect(Rect::new(cx + (x - 3.0) * u, cy + (k - 2.0) * u, 6.0 * u, 4.0 * u), 1.5 * u, color);
                 }
             }
             Icon::Sliders => {

@@ -42,6 +42,8 @@ fn main() {
         Shot { name: "clavier", w: 1920, h: 1200, dp: 1.5, end: true, help: false, fenetres: false, clavier: true, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: true, disque: None, gestes: 0 },
         Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "mixeur", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "mixeur-etroit", w: 1200, h: 1920, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
     ];
@@ -87,6 +89,14 @@ fn main() {
             app.surface.changer_vue(f, indice("fichiers").unwrap());
         }
 
+        if s.name.starts_with("mixeur") {
+            // Trois pistes connues (sans rien jouer : l'aperçu reste muet)
+            use flow::mixage::{mixeur, Reglage};
+            mixeur().regler("Radio", Reglage { gain: 0.65, balance: -0.3, ..Reglage::default() });
+            mixeur().regler("Fichier", Reglage { muet: true, ..Reglage::default() });
+            mixeur().regler("Essai", Reglage { gain: 0.4, prioritaire: true, ..Reglage::default() });
+            app.ouvrir_espace("fenetres = F1:mixeur\n");
+        }
         if s.gestes > 0 {
             // Le dessin s'enregistre : pas dans le projet
             let d = std::env::temp_dir().join("flow-apercu");
