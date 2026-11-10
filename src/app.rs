@@ -50,10 +50,9 @@ pub struct App {
     pub surface: Surface,
     /// L'instance de contexte de chaque fenêtre.
     fenetres: HashMap<FenetreId, Box<dyn Contexte>>,
-    /// L'heure (heures, minutes) et la batterie (niveau, en charge), données par le
-    /// système ; rien hors d'Android.
+    /// L'heure (heures, minutes), donnée par le système ; rien hors d'Android. La
+    /// batterie est relevée par l'orchestrateur (`commun.orchestre`).
     pub heure: Option<(u8, u8)>,
-    pub batterie: Option<(u8, bool)>,
     end_content: EndContent,
     /// L'onglet ouvert du panneau des paramètres, et son champ d'essai du clavier.
     pub onglet_parametres: usize,
@@ -68,7 +67,6 @@ impl App {
             surface: Surface::new(0),
             fenetres: HashMap::new(),
             heure: None,
-            batterie: None,
             end_content: EndContent::Parametres,
             onglet_parametres: 0,
             essai: Edition::default(),
@@ -231,6 +229,17 @@ impl App {
         }
     }
 
+    /// Déclare à l'orchestrateur les instances ouvertes, dans l'ordre des fenêtres.
+    fn recenser(&mut self, placees: &[Placee]) {
+        let o = &mut self.commun.orchestre;
+        o.instances.clear();
+        for p in placees {
+            if let Some(i) = self.fenetres.get(&p.id) {
+                o.instances.push(crate::orchestre::Instance { fenetre: p.id, cle: i.cle(), document: i.document().map(Path::to_path_buf) });
+            }
+        }
+    }
+
     pub fn frame(&mut self, cx: &mut Cx, screen: Rect, dt: f32) -> Scene {
         cx.theme = self.commun.theme;
         cx.ui.reglages_gestes = self.commun.gestes;
@@ -263,8 +272,10 @@ impl App {
             cx.mono_at(e.x + 4.0 * d, e.cy(), &etat, 12.0, col.pale);
             cx.clip(None);
         }
-        // Une analyse finie se résume en empreintes, enregistrées sur le disque
-        self.commun.suivre_analyse();
+        // L'orchestrateur : le recensement des instances ouvertes, puis ses tâches
+        // (empreintes, enregistrements)
+        self.recenser(&placees);
+        self.commun.orchestrer(cx.ui.doigts() == 0);
         for d in std::mem::take(&mut self.commun.demandes) {
             self.traiter(d);
         }
@@ -314,7 +325,7 @@ impl App {
             cx.text_at(x, r.cy(), &s, 15.0, col.texte);
             x -= cx.pad();
         }
-        if let Some((niveau, charge)) = self.batterie {
+        if let Some((niveau, charge)) = self.commun.orchestre.batterie() {
             let s = format!("{niveau} %");
             let w = cx.measure(&s, 13.0);
             x -= w;

@@ -253,8 +253,12 @@ fn render_loop() -> Result<(), String> {
         if minute != Some(h.1) {
             minute = Some(h.1);
             app.heure = Some((h.0, h.1));
-            if let Some(env) = env {
-                app.batterie = unsafe { crate::acces::batterie(env, activite) };
+            // La batterie, à l'intervalle que règle l'orchestrateur
+            let t = crate::disque::maintenant();
+            if let Some(env) = env.filter(|_| app.commun.orchestre.batterie_due(t)) {
+                if let Some((niveau, charge)) = unsafe { crate::acces::batterie(env, activite) } {
+                    app.commun.orchestre.relever(niveau, charge, t);
+                }
             }
         }
         if std::mem::take(&mut relire) {
@@ -334,6 +338,18 @@ struct Tm {
 extern "C" {
     fn time(t: *mut i64) -> i64;
     fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+}
+
+/// L'heure locale (heures, minutes) d'une date Unix, pour le journal.
+pub fn heure_de(t: u64) -> (u8, u8) {
+    unsafe {
+        let t = t as i64;
+        let mut tm: Tm = std::mem::zeroed();
+        if localtime_r(&t, &mut tm).is_null() {
+            return (0, 0);
+        }
+        (tm.hour as u8, tm.min as u8)
+    }
 }
 
 /// L'heure locale : heures, minutes, secondes.

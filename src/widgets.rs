@@ -132,6 +132,8 @@ pub enum Icon {
     Encre,
     Gomme,
     /// Le mixeur : trois curseurs verticaux.
+    /// L'orchestrateur : un nœud relié à ses satellites.
+    Orchestre,
     Mixeur,
     /// Annuler, rétablir : une flèche en demi-tour.
     Annuler,
@@ -268,6 +270,14 @@ impl Cx<'_> {
                     self.dl.rrect(Rect::new(cx - 8.5 * u - 1.3 * u, cy + (y - 1.3) * u, 2.6 * u, 2.6 * u), 1.3 * u, color);
                     self.dl.line(p(-4.0, y), p(9.0, y), t, color);
                 }
+            }
+            Icon::Orchestre => {
+                for (x, y) in [(-7.0, -7.0), (7.0, -7.0), (7.0, 7.0), (-7.0, 7.0)] {
+                    self.dl.line(p(0.0, 0.0), p(x, y), 1.6 * u, color);
+                    self.dl.rrect(Rect::new(cx + (x - 2.6) * u, cy + (y - 2.6) * u, 5.2 * u, 5.2 * u), 2.6 * u, color);
+                }
+                self.dl.rrect(Rect::new(cx - 4.5 * u, cy - 4.5 * u, 9.0 * u, 9.0 * u), 4.5 * u, color);
+                self.dl.rrect(Rect::new(cx - 2.6 * u, cy - 2.6 * u, 5.2 * u, 5.2 * u), 2.6 * u, self.theme.couleurs().surface);
             }
             Icon::Mixeur => {
                 for (x, k) in [(-6.0, 3.0), (0.0, -4.0), (6.0, 1.5)] {

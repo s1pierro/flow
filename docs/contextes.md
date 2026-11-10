@@ -42,7 +42,8 @@ d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enreg
 par noms et résolu plus tard) — l'analyse se résume dans `Commun::empreintes`, enregistrée
 dans `Flow/empreintes.txt`, que Fichiers lit sans relancer de parcours, `texte.rs` (un contexte à document : lecture,
 enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`), `encre.rs`
-(une zone à gestes élaborés, un document SVG enregistré à chaque trait).
+(une zone à gestes élaborés, un document SVG enregistré à la demande), `orchestre.rs`
+(la vue d'un module global, sans état propre).
 
 `texte.rs` est la référence pour un contexte qui édite des fichiers (le futur SVG).
 
@@ -280,6 +281,25 @@ voir la même chose (une ressource coûteuse comme l'analyse du stockage, un ré
 global). Un réglage de l'application va dans le panneau des paramètres et le fichier
 des réglages (`reglages.rs`) ; un état partagé à retrouver au lancement suivant va
 dans la section `[commun]` (voir `App::espace` et `App::ouvrir_espace`).
+
+## L'orchestrateur
+
+`src/orchestre.rs` tient à jour ce dont toute l'application dépend, hors de toute
+fenêtre ; il vit dans `Commun::orchestre` et travaille à chaque image depuis
+`Commun::orchestrer` (appelé par `App::frame` après le dessin des fenêtres). Le
+contexte Orchestre (`contextes/orchestre.rs`) en montre les états et les réglages.
+
+| Tâche | Ce qu'il fait | Fichier |
+| --- | --- | --- |
+| Empreintes | Refait la synthèse du stockage quand elle a vieilli au-delà de la période réglée (24 h par défaut), la reporte si la batterie est basse hors charge | `Flow/empreintes.txt` |
+| Batterie | La relève à intervalle réglé (boucle de rendu, `android.rs`), garde deux jours d'historique, en tire débit et autonomie, annonce le seuil bas | `Flow/batterie.txt` |
+| Recensement | Les genres de `GENRES` et les instances ouvertes (`App::recenser`), avec leur document | — |
+
+Ses réglages sont dans `Flow/orchestre.txt` (paires `clé = valeur`, modifiables à la
+main) ; ce qu'il fait s'inscrit dans un journal en mémoire (`Orchestre::noter`).
+Un contexte n'a rien à faire pour être recensé. Une nouvelle tâche de fond (une
+synchronisation, un nettoyage des brouillons…) s'ajoute dans `Commun::orchestrer`,
+avec son état exposé dans le contexte Orchestre.
 
 ## À venir
 

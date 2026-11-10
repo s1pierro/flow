@@ -5,6 +5,7 @@
 //!   OpenGL, donc testable sur n'importe quelle machine ;
 //! - `contexte`, `contextes` : les sous-applications que montrent les fenêtres ;
 //! - `espace` : l'espace de travail enregistré dans un fichier texte ;
+//! - `orchestre` : l'orchestrateur (empreintes, batterie, recensement des contextes) ;
 //! - `app` : l'application, qui réunit tout.
 
 pub mod acces;
@@ -21,6 +22,7 @@ pub mod explorateur;
 pub mod gestes;
 pub mod gles;
 pub mod mixage;
+pub mod orchestre;
 pub mod parametres;
 pub mod radio;
 pub mod reglages;
