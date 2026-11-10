@@ -104,6 +104,56 @@ pub fn ligne_fichier(cx: &mut Cx, b: &mut Body, id: Id, puce: Puce, nom: &str, i
     clic
 }
 
+/// Coupe `texte` en lignes d'au plus `large` pixels, `max` lignes au plus ; la
+/// dernière se termine par « … » si tout ne tient pas.
+pub fn couper(cx: &mut Cx, texte: &str, taille: f32, large: f32, max: usize) -> Vec<String> {
+    let mut lignes: Vec<String> = Vec::new();
+    let mut cour = String::new();
+    let mots: Vec<&str> = texte.split_whitespace().collect();
+    for m in &mots {
+        let essai = if cour.is_empty() { m.to_string() } else { format!("{cour} {m}") };
+        if cour.is_empty() || cx.measure(&essai, taille) <= large {
+            cour = essai;
+            continue;
+        }
+        lignes.push(std::mem::take(&mut cour));
+        cour = m.to_string();
+        if lignes.len() == max {
+            // Plus de place : la dernière ligne gardée annonce la suite
+            let mut der = lignes.pop().unwrap_or_default();
+            while !der.is_empty() && cx.measure(&format!("{der}…"), taille) > large {
+                der.pop();
+            }
+            lignes.push(format!("{}…", der.trim_end()));
+            return lignes;
+        }
+    }
+    if !cour.is_empty() {
+        lignes.push(cour);
+    }
+    lignes
+}
+
+/// `texte` sur une ligne d'au plus `large` pixels : coupé et terminé par « … » s'il
+/// ne tient pas.
+pub fn abreger(cx: &mut Cx, texte: &str, taille: f32, large: f32) -> String {
+    if cx.measure(texte, taille) <= large {
+        return texte.to_string();
+    }
+    let c: Vec<char> = texte.chars().collect();
+    let (mut lo, mut hi) = (0, c.len());
+    while lo < hi {
+        let m = (lo + hi).div_ceil(2);
+        let essai: String = c[..m].iter().collect::<String>() + "…";
+        if cx.measure(&essai, taille) <= large {
+            lo = m;
+        } else {
+            hi = m - 1;
+        }
+    }
+    c[..lo].iter().collect::<String>().trim_end().to_string() + "…"
+}
+
 /// Niveaux montrés au plus dans une empreinte : au-delà, les plus proches du dossier.
 const EMPREINTE_NIVEAUX: usize = 5;
 /// Ouverture minimale d'un secteur d'empreinte, pour qu'il reste visible.

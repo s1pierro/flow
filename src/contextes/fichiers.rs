@@ -3,12 +3,16 @@
 //! audio se lit dans la piste « Fichier » du mixeur, un fichier texte s'ouvre dans
 //! l'éditeur, un SVG dans Encre : l'un ou l'autre prend la place de l'explorateur
 //! dans la fenêtre.
+//!
+//! Les entrées sont des cartes de 3,5 pour 1 : à gauche l'empreinte d'un dossier (sa
+//! place dans la synthèse du stockage) ou le badge du type MIME d'un fichier, à
+//! droite le nom, une légende (taille, part du parent ou type) et la date.
 
-use super::{hachage, ligne_fichier, Puce, TEINTES};
+use super::{abreger, empreinte, hachage, ligne_fichier, Puce, TEINTES};
 use crate::contexte::{Commun, Contexte, Demande, Etat, Genre};
 use crate::disque;
 use crate::draw::Rect;
-use crate::explorateur::{self, Dossier, Nature};
+use crate::explorateur::{self, Dossier, Famille, Nature};
 use crate::radio;
 use crate::surface::Placee;
 use crate::ui::{id, sub_id, Id};
@@ -19,6 +23,44 @@ pub const CLE: &str = "fichiers";
 pub const GENRE: Genre = Genre { cle: CLE, nom: "Fichiers", legende: "Parcourir le stockage, ouvrir les documents", icone: Icon::Dossier, ouvrir };
 
 const FICHIERS: Id = id("fichiers");
+/// Le rapport largeur sur hauteur des cartes.
+const RAPPORT: f32 = 3.5;
+/// Largeur visée d'une carte (dp) : le nombre de colonnes en découle.
+const CARTE_LARGE: f32 = 260.0;
+/// Hauteur minimale d'une carte (dp), quand la fenêtre est étroite.
+const CARTE_MIN: f32 = 56.0;
+
+/// Le badge du type d'un fichier : un carré teinté selon sa famille, son extension
+/// au centre.
+fn badge(cx: &mut Cx, r: Rect, texte: &str, famille: Famille) {
+    let teinte = match famille {
+        Famille::Audio => TEINTES[4],
+        Famille::Image => TEINTES[2],
+        Famille::Video => TEINTES[1],
+        Famille::Texte => TEINTES[0],
+        Famille::Document => TEINTES[6],
+        Famille::Archive => TEINTES[3],
+        Famille::Application => TEINTES[5],
+        Famille::Inconnue => [0x8A, 0x8F, 0x98, 255],
+    };
+    cx.dl.rrect(r, r.w * 0.22, teinte);
+    // Le coin replié, en haut à droite
+    let p = r.w * 0.28;
+    cx.dl.rrect(Rect::new(r.right() - p, r.y, p, p), r.w * 0.06, [255, 255, 255, 70]);
+    let taille = (r.h / cx.dp / cx.theme.texte * if texte.chars().count() > 3 { 0.24 } else { 0.3 }).clamp(8.0, 20.0);
+    cx.centered(Rect::new(r.x, r.y + r.h * 0.12, r.w, r.h * 0.8), texte, taille, [255, 255, 255, 255]);
+}
+
+/// Une date de modification : l'heure si c'est aujourd'hui, sinon le jour.
+fn date(t: u64, maintenant: u64) -> String {
+    let (j, m, a) = crate::android::date_de(t);
+    if crate::android::date_de(maintenant) == (j, m, a) {
+        let (h, mi) = crate::android::heure_de(t);
+        format!("Modifié aujourd'hui à {h:02}:{mi:02}")
+    } else {
+        format!("Modifié le {j:02}/{m:02}/{a}")
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct Fichiers {
@@ -124,24 +166,70 @@ impl Contexte for Fichiers {
         } else if dossier.entrees.is_empty() {
             cx.paragraph(&mut b, "Dossier vide.");
         }
+        // Les entrées, en cartes de 3,5 pour 1, sur autant de colonnes que la largeur
+        // le permet
+        let ecart = cx.ecart().max(8.0 * d);
+        b.y += ecart;
+        let colonnes = (((b.w + ecart) / (CARTE_LARGE * d + ecart)).floor() as usize).max(1);
+        let large = (b.w - ecart * (colonnes - 1) as f32) / colonnes as f32;
+        let haute = (large / RAPPORT).max(CARTE_MIN * d * cx.theme.texte).round();
+        let vue = b.rect();
+        let maintenant = disque::maintenant();
         for (i, e) in dossier.entrees.iter().enumerate() {
+            let carte = Rect::new(b.x + (i % colonnes) as f32 * (large + ecart), b.y + (i / colonnes) as f32 * (haute + ecart), large, haute);
+            if carte.bottom() < vue.y || carte.y > vue.bottom() {
+                continue;
+            }
             let chemin = dossier.chemin.join(&e.nom);
-            let icone = match e.nature {
-                Nature::Dossier => Icon::Dossier,
-                Nature::Audio => Icon::Note,
-                Nature::Image => Icon::Photo,
-                Nature::Video => Icon::Film,
-                _ => Icon::Fichier,
-            };
-            let info = if e.dossier() { String::new() } else { explorateur::taille(e.taille) };
             let joue = lecture.as_deref() == chemin.to_str();
-            // L'empreinte d'un dossier : sa place dans le graphique du stockage
-            let puce = match (&situation, e.dossier()) {
-                (Some(p), true) => p.enfant(&e.nom).map(|(arcs, teinte)| Puce::Empreinte(arcs, TEINTES[teinte % TEINTES.len()])),
-                _ => None,
+            let k = sub_id(base, i);
+            let clic = cx.ui.click(k, carte, Some(b.id()));
+            let appui = cx.ui.pressed(k);
+            let rayon = cx.theme.rayon(carte.h).min(14.0 * d);
+            cx.dl.rrect(carte, rayon, if appui || joue { col.accent } else { col.ligne });
+            cx.dl.rrect(carte.inset(d.max(1.0)), rayon, if appui { col.puce } else { col.fond });
+            // À gauche, un carré : l'empreinte du dossier, ou le badge du type du fichier
+            let pad = (carte.h * 0.16).clamp(6.0 * d, 14.0 * d);
+            let cote = carte.h - 2.0 * pad;
+            let carre = Rect::new(carte.x + pad, carte.y + pad, cote, cote);
+            let legende = if e.dossier() {
+                let sous = situation.as_ref().and_then(|p| Some((p.enfant(&e.nom)?, p.noeud.enfants.iter().find(|x| x.nom == e.nom)?.taille, p.noeud.taille)));
+                match sous {
+                    Some(((arcs, teinte), t, parent)) => {
+                        empreinte(cx, carre, &arcs, TEINTES[teinte % TEINTES.len()]);
+                        let part = if parent > 0 { t as f64 / parent as f64 * 100.0 } else { 0.0 };
+                        let part = if part >= 10.0 { format!("{part:.0} %") } else { format!("{part:.1} %").replace('.', ",") };
+                        format!("Dossier · {} · {part} du parent", explorateur::taille(t))
+                    }
+                    None => {
+                        cx.dl.rrect(carre, cote * 0.22, col.puce);
+                        cx.icon(carre.inset(cote * 0.2), Icon::Dossier, col.accent);
+                        // Trop petit pour la synthèse, ou pas encore analysé
+                        if synthese.is_some() { "Dossier · presque vide".to_string() } else { "Dossier".to_string() }
+                    }
+                }
+            } else {
+                let (type_mime, famille) = explorateur::mime(&e.nom);
+                badge(cx, carre, &explorateur::badge(&e.nom), famille);
+                format!("{type_mime} · {}", explorateur::taille(e.taille))
             };
-            let puce = puce.unwrap_or(Puce::Icone(icone));
-            if ligne_fichier(cx, &mut b, sub_id(base, i), puce, &e.nom, &info, joue) {
+            let date = e.modifie.and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| date(t.as_secs(), maintenant));
+            // À droite : le titre, la légende, la date
+            let x = carre.right() + pad;
+            let w = (carte.right() - pad - x).max(0.0);
+            cx.clip(Some(Rect::new(x, carte.y, w, carte.h).intersect(&vue)));
+            let t = cx.theme.texte;
+            let lignes = if date.is_some() && carte.h >= 64.0 * d * t { 3.0 } else { 2.0 };
+            let y0 = carte.cy() - (20.0 + 16.0 * (lignes - 1.0)) * d * t / 2.0;
+            let titre = abreger(cx, &e.nom, 15.0, w);
+            cx.text_at(x, y0 + 10.0 * d * t, &titre, 15.0, if joue { col.accent } else { col.texte });
+            let legende = abreger(cx, &legende, 12.0, w);
+            cx.text_at(x, y0 + 28.0 * d * t, &legende, 12.0, col.pale);
+            if let (Some(date), 3.0) = (&date, lignes) {
+                cx.text_at(x, y0 + 44.0 * d * t, date, 12.0, col.pale);
+            }
+            cx.clip(Some(vue));
+            if clic {
                 match e.nature {
                     Nature::Dossier => aller = Some(chemin),
                     Nature::Audio if joue => radio::lecteur_fichiers().arreter(),
@@ -160,6 +248,7 @@ impl Contexte for Fichiers {
                 }
             }
         }
+        b.y += dossier.entrees.len().div_ceil(colonnes) as f32 * (haute + ecart);
         b.y += cx.ecart();
         let mut caches = self.caches;
         cx.toggle(&mut b, sub_id(base, 999_998), "Fichiers cachés", &mut caches);

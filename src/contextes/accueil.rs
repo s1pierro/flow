@@ -4,7 +4,7 @@
 //! fenêtre. C'est le contexte des fenêtres nées du menu (« Côte à côte », « Dessous »).
 
 use crate::contexte::{Commun, Contexte, Demande, Etat, Genre};
-use crate::contextes::GENRES;
+use crate::contextes::{couper, GENRES};
 use crate::draw::Rect;
 use crate::surface::Placee;
 use crate::ui::{id, sub_id, Id};
@@ -24,36 +24,6 @@ pub struct Accueil;
 
 fn ouvrir(_e: &Etat) -> Box<dyn Contexte> {
     Box::new(Accueil)
-}
-
-/// Coupe `texte` en lignes d'au plus `large` pixels, `max` lignes au plus ; la
-/// dernière se termine par « … » si tout ne tient pas.
-fn couper(cx: &mut Cx, texte: &str, taille: f32, large: f32, max: usize) -> Vec<String> {
-    let mut lignes: Vec<String> = Vec::new();
-    let mut cour = String::new();
-    let mots: Vec<&str> = texte.split_whitespace().collect();
-    for m in &mots {
-        let essai = if cour.is_empty() { m.to_string() } else { format!("{cour} {m}") };
-        if cour.is_empty() || cx.measure(&essai, taille) <= large {
-            cour = essai;
-            continue;
-        }
-        lignes.push(std::mem::take(&mut cour));
-        cour = m.to_string();
-        if lignes.len() == max {
-            // Plus de place : la dernière ligne gardée annonce la suite
-            let mut der = lignes.pop().unwrap_or_default();
-            while !der.is_empty() && cx.measure(&format!("{der}…"), taille) > large {
-                der.pop();
-            }
-            lignes.push(format!("{}…", der.trim_end()));
-            return lignes;
-        }
-    }
-    if !cour.is_empty() {
-        lignes.push(cour);
-    }
-    lignes
 }
 
 impl Contexte for Accueil {

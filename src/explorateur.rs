@@ -32,6 +32,95 @@ impl Nature {
     }
 }
 
+/// La famille d'un type MIME, pour la teinte de son badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Famille {
+    Audio,
+    Image,
+    Video,
+    Texte,
+    Document,
+    Archive,
+    Application,
+    Inconnue,
+}
+
+/// Le type MIME d'un fichier, d'après son extension, et sa famille.
+pub fn mime(nom: &str) -> (&'static str, Famille) {
+    use Famille::*;
+    let ext = nom.rsplit_once('.').filter(|(a, _)| !a.is_empty()).map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "mp3" => ("audio/mpeg", Audio),
+        "ogg" | "oga" => ("audio/ogg", Audio),
+        "opus" => ("audio/opus", Audio),
+        "flac" => ("audio/flac", Audio),
+        "m4a" => ("audio/mp4", Audio),
+        "aac" => ("audio/aac", Audio),
+        "wav" => ("audio/wav", Audio),
+        "amr" => ("audio/amr", Audio),
+        "mka" => ("audio/x-matroska", Audio),
+        "mid" | "midi" => ("audio/midi", Audio),
+        "png" => ("image/png", Image),
+        "jpg" | "jpeg" => ("image/jpeg", Image),
+        "gif" => ("image/gif", Image),
+        "webp" => ("image/webp", Image),
+        "bmp" => ("image/bmp", Image),
+        "heic" => ("image/heic", Image),
+        "avif" => ("image/avif", Image),
+        "svg" => ("image/svg+xml", Image),
+        "ico" => ("image/x-icon", Image),
+        "mp4" | "m4v" => ("video/mp4", Video),
+        "mkv" => ("video/x-matroska", Video),
+        "webm" => ("video/webm", Video),
+        "mov" => ("video/quicktime", Video),
+        "avi" => ("video/x-msvideo", Video),
+        "3gp" => ("video/3gpp", Video),
+        "ts" => ("video/mp2t", Video),
+        "txt" | "log" | "conf" | "ini" => ("text/plain", Texte),
+        "md" => ("text/markdown", Texte),
+        "csv" => ("text/csv", Texte),
+        "html" | "htm" => ("text/html", Texte),
+        "css" => ("text/css", Texte),
+        "js" => ("text/javascript", Texte),
+        "json" => ("application/json", Texte),
+        "xml" => ("application/xml", Texte),
+        "toml" => ("application/toml", Texte),
+        "rs" => ("text/x-rust", Texte),
+        "py" => ("text/x-python", Texte),
+        "sh" => ("application/x-sh", Texte),
+        "java" => ("text/x-java", Texte),
+        "c" | "h" => ("text/x-c", Texte),
+        "pdf" => ("application/pdf", Document),
+        "odt" => ("application/vnd.oasis.opendocument.text", Document),
+        "ods" => ("application/vnd.oasis.opendocument.spreadsheet", Document),
+        "doc" => ("application/msword", Document),
+        "docx" => ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", Document),
+        "xlsx" => ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", Document),
+        "epub" => ("application/epub+zip", Document),
+        "zip" => ("application/zip", Archive),
+        "gz" | "tgz" => ("application/gzip", Archive),
+        "tar" => ("application/x-tar", Archive),
+        "xz" => ("application/x-xz", Archive),
+        "7z" => ("application/x-7z-compressed", Archive),
+        "rar" => ("application/vnd.rar", Archive),
+        "apk" => ("application/vnd.android.package-archive", Application),
+        "jar" => ("application/java-archive", Application),
+        "so" => ("application/x-sharedlib", Application),
+        "glb" => ("model/gltf-binary", Application),
+        "gltf" => ("model/gltf+json", Application),
+        _ => ("application/octet-stream", Inconnue),
+    }
+}
+
+/// Ce qu'affiche le badge d'un fichier : son extension en capitales (4 lettres au
+/// plus), ou « ? » sans extension.
+pub fn badge(nom: &str) -> String {
+    match nom.rsplit_once('.').filter(|(a, e)| !a.is_empty() && !e.is_empty()) {
+        Some((_, e)) => e.chars().take(4).collect::<String>().to_uppercase(),
+        None => "?".into(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Entree {
     pub nom: String,
@@ -225,6 +314,17 @@ mod tests {
         assert_eq!(a[2].1, Path::new("/storage/emulated/0/Music/Album"));
         let a = ariane(Path::new("/system/fonts"), Some(r));
         assert_eq!(a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["/", "system", "fonts"]);
+    }
+
+    #[test]
+    fn type_mime_et_badge() {
+        assert_eq!(mime("Chanson.FLAC"), ("audio/flac", Famille::Audio));
+        assert_eq!(mime("plan.pdf").1, Famille::Document);
+        assert_eq!(mime(".bashrc"), ("application/octet-stream", Famille::Inconnue));
+        assert_eq!(badge("archive.tar.gz"), "GZ");
+        assert_eq!(badge("flow-0.11.apk"), "APK");
+        assert_eq!(badge("LISEZMOI"), "?");
+        assert_eq!(badge("x.markdown"), "MARK");
     }
 
     #[test]

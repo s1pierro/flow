@@ -29,7 +29,7 @@ barre du bas.
 | Fichier | Rôle |
 | --- | --- |
 | `src/contexte.rs` | Le trait `Contexte`, `Genre`, `Commun`, `Etat` (l'état enregistré) |
-| `src/contextes/mod.rs` | La liste `GENRES`, et des outils de liste partagés (`ligne_fichier`, `Puce`) |
+| `src/contextes/mod.rs` | La liste `GENRES`, et des outils partagés (`ligne_fichier`, `Puce`, `empreinte`, `couper`, `abreger`) |
 | `src/contextes/<nom>.rs` | Un contexte |
 | `src/espace.rs` | Le format de `espace.txt`, sa lecture et son écriture |
 | `src/parametres.rs` | Le panneau des paramètres de l'application |

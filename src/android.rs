@@ -352,6 +352,18 @@ pub fn heure_de(t: u64) -> (u8, u8) {
     }
 }
 
+/// La date locale (jour, mois, année) d'une date Unix.
+pub fn date_de(t: u64) -> (u8, u8, i32) {
+    unsafe {
+        let t = t as i64;
+        let mut tm: Tm = std::mem::zeroed();
+        if localtime_r(&t, &mut tm).is_null() {
+            return (1, 1, 1970);
+        }
+        (tm.mday as u8, (tm.mon + 1) as u8, tm.year + 1900)
+    }
+}
+
 /// L'heure locale : heures, minutes, secondes.
 fn heure() -> (u8, u8, u8) {
     unsafe {
