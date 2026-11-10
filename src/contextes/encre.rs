@@ -10,16 +10,20 @@
 //!   rétablit (l'historique dure le temps de la session) ; le zoom affiché y ramène la
 //!   vue à 100 %.
 //!
-//! Le dessin est un document SVG (`Documents/Encre/dessin-N.svg` pour un nouveau),
-//! enregistré à chaque trait terminé. Chaque trait y est un `<path>` fait de segments
-//! droits, en unités qui valent un dp à 100 %. Un SVG venu d'ailleurs s'ouvre en
-//! lecture seule : Encre n'en montre que les tracés simples qu'il comprend, et ne
-//! l'écrase jamais.
+//! Le dessin est un document SVG. « Enregistrer », en haut, l'écrit : un nouveau
+//! dessin va dans `Documents/Encre/`, sous le nom saisi à côté (`dessin-N` sinon).
+//! Ce qui n'est pas enregistré est mis à l'abri dans un brouillon (`Flow/brouillons/`)
+//! quand la fenêtre se ferme ou que l'application passe en arrière-plan, et retrouvé
+//! au lancement suivant. Chaque trait est un `<path>` fait de segments droits, en
+//! unités qui valent un dp à 100 %. Un SVG venu d'ailleurs s'ouvre en lecture seule :
+//! Encre n'en montre que les tracés simples qu'il comprend, ne l'écrase jamais, mais
+//! peut en enregistrer une copie dans `Documents/Encre/`.
 
+use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
 use crate::gestes::Geste;
-use crate::surface::Placee;
+use crate::surface::{FenetreId, Placee};
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
@@ -28,6 +32,9 @@ pub const CLE: &str = "encre";
 pub const GENRE: Genre = Genre { cle: CLE, nom: "Encre", icone: Icon::Encre, ouvrir };
 
 const ENCRE: Id = id("encre");
+const NOM: Id = id("encre/nom");
+const NOM_CORPS: Id = id("encre/nom-corps");
+const BROUILLONS: &str = "brouillons";
 
 /// Les épaisseurs proposées, en unités du dessin (dp à 100 %).
 pub const TAILLES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
@@ -78,6 +85,12 @@ struct Vue {
 #[derive(Clone)]
 pub struct Encre {
     chemin: Option<PathBuf>,
+    /// Le brouillon où le dessin non enregistré a été mis à l'abri.
+    brouillon: Option<PathBuf>,
+    /// Le dessin a changé depuis le dernier enregistrement.
+    modifie: bool,
+    /// Le nom d'un nouveau dessin.
+    nom: Edition,
     traits: Vec<Trait>,
     charge: bool,
     /// Un SVG venu d'ailleurs : on ne l'écrase pas.
@@ -115,6 +128,9 @@ fn lire(e: &Etat) -> Encre {
     };
     Encre {
         chemin: e.texte("document").filter(|t| !t.is_empty()).map(PathBuf::from),
+        brouillon: e.texte("brouillon").filter(|t| !t.is_empty()).map(PathBuf::from),
+        modifie: false,
+        nom: Edition::new(e.texte("nom").unwrap_or("")),
         traits: Vec::new(),
         charge: false,
         lecture_seule: false,
@@ -273,6 +289,15 @@ impl Encre {
 
     fn charger(&mut self) {
         self.charge = true;
+        // Un brouillon passe avant le fichier : c'est le travail non enregistré
+        if let Some(b) = &self.brouillon {
+            if let Ok(t) = std::fs::read_to_string(b) {
+                self.traits = depuis_svg(&t).0;
+                self.modifie = true;
+                return;
+            }
+            self.brouillon = None;
+        }
         let Some(c) = &self.chemin else { return };
         match std::fs::read_to_string(c) {
             Ok(t) if t == self.connu => {}
@@ -294,26 +319,89 @@ impl Encre {
         }
     }
 
-    /// Le fichier d'un nouveau dessin : `Documents/Encre/dessin-N.svg`, sans écraser.
-    fn destination(c: &Commun) -> Option<PathBuf> {
-        let d = c.racine.as_ref()?.join("Documents").join("Encre");
-        (1..).map(|n| d.join(format!("dessin-{n}.svg"))).find(|p| !p.exists())
+    /// Le fichier où enregistrer : le document ; pour un nouveau dessin (ou la copie
+    /// d'un SVG en lecture seule), le nom saisi dans `Documents/Encre/`, sans écraser.
+    fn destination(&self, c: &Commun) -> Result<PathBuf, String> {
+        if let Some(p) = self.chemin.as_ref().filter(|_| !self.lecture_seule) {
+            return Ok(p.clone());
+        }
+        let dossier = c.racine.as_ref().map(|r| r.join("Documents").join("Encre")).ok_or("Aucun dossier où enregistrer.")?;
+        let saisi = self.nom.texte.trim().trim_end_matches(".svg").to_string();
+        if saisi.contains('/') || saisi.starts_with('.') {
+            return Err("Nom de fichier invalide.".into());
+        }
+        // Sans nom : celui du SVG copié, ou dessin-N
+        let base = if !saisi.is_empty() {
+            saisi
+        } else if let Some(stem) = self.chemin.as_ref().and_then(|p| p.file_stem()) {
+            format!("{}-copie", stem.to_string_lossy())
+        } else {
+            return (1..).map(|n| dossier.join(format!("dessin-{n}.svg"))).find(|p| !p.exists()).ok_or_else(|| "Aucun nom libre.".into());
+        };
+        let p = dossier.join(format!("{base}.svg"));
+        if p.exists() {
+            return Err(format!("{base}.svg existe déjà : choisissez un autre nom."));
+        }
+        Ok(p)
     }
 
-    fn enregistrer(&mut self, c: &Commun) {
-        if self.lecture_seule {
-            return;
-        }
-        if self.chemin.is_none() {
-            self.chemin = Encre::destination(c);
-        }
-        let Some(ch) = self.chemin.clone() else {
-            self.message = Some("Pas de stockage : le dessin n'est pas enregistré.".into());
-            return;
-        };
+    fn enregistrer(&mut self, c: &Commun) -> Result<(), String> {
+        let chemin = self.destination(c)?;
         let svg = vers_svg(&self.traits);
-        self.message = super::texte::ecrire_fichier(&ch, &svg).err();
+        super::texte::ecrire_fichier(&chemin, &svg)?;
+        self.chemin = Some(chemin);
+        self.lecture_seule = false;
+        self.modifie = false;
         self.connu = svg;
+        self.nom = Edition::default();
+        if let Some(b) = self.brouillon.take() {
+            let _ = std::fs::remove_file(b);
+        }
+        Ok(())
+    }
+
+    fn nom_affiche(&self) -> String {
+        match &self.chemin {
+            Some(p) => p.file_name().map_or(p.display().to_string(), |n| n.to_string_lossy().into_owned()),
+            None => "Nouveau dessin".into(),
+        }
+    }
+
+    /// En haut : le nom du dessin (ou sa saisie pour un nouveau), et « Enregistrer ».
+    fn entete(&mut self, cx: &mut Cx, c: &mut Commun, p: &Placee, r: Rect) {
+        let (d, col) = (cx.dp, cx.couleurs());
+        let (h, m, gap) = (cx.commande(), cx.coin(), cx.ecart());
+        let k = p.id as usize;
+        cx.dl.rrect(r, 0.0, col.surface);
+        let label = if self.lecture_seule { "Enregistrer une copie" } else { "Enregistrer" };
+        let wp = cx.pill_width(label);
+        let xp = r.right() - wp - m;
+        let x0 = p.suite.0;
+        let actif = self.modifie && !self.lecture_seule;
+        if xp > x0 + gap && cx.pill(sub_id(NOM, 1_000 + k), xp, r.y + m, label, actif) && (self.modifie || self.lecture_seule || self.chemin.is_none()) {
+            self.message = Some(match self.enregistrer(c) {
+                Ok(()) => format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())),
+                Err(e) => e,
+            });
+        }
+        let x1 = (xp - gap).max(x0);
+        if self.chemin.is_some() && !self.lecture_seule {
+            let dossier = self.chemin.as_ref().and_then(|c| c.parent()).map_or(String::new(), |p| p.display().to_string());
+            cx.clip(Some(Rect::new(x0, r.y, x1 - x0, r.h)));
+            let pastille = if self.modifie { " •" } else { "" };
+            cx.text_at(x0, r.y + m + h * 0.32, &format!("{}{pastille}", self.nom_affiche()), 16.0, col.texte);
+            cx.text_at(x0, r.y + m + h * 0.78, &dossier, 12.0, col.pale);
+            cx.clip(None);
+        } else {
+            // Un nouveau dessin, ou la copie d'un SVG étranger : son nom se saisit ici
+            let pad = 14.0 * d;
+            let zone = Rect::new(x0 - pad, r.y + m - 8.0 * d - (cx.theme.marge * 0.4 * d).round(), x1 - x0 + 2.0 * pad, r.h);
+            let mut b = cx.body(sub_id(NOM_CORPS, k), zone, &c.scrolls);
+            let indication = if self.lecture_seule { "Nom de la copie" } else { "Nom du dessin" };
+            clavier::champ(cx, &mut b, sub_id(NOM, k), indication, &mut self.nom, &mut c.clavier);
+            cx.body_end(b, &mut c.scrolls);
+        }
+        cx.dl.rrect(Rect::new(r.x, r.bottom() - d, r.w, d.max(1.0)), 0.0, col.ligne);
     }
 
     fn noter(&mut self, a: Action) {
@@ -605,15 +693,57 @@ impl Contexte for Encre {
         if let Some(c) = &self.chemin {
             e.mettre("document", c.display());
         }
+        if !self.nom.texte.trim().is_empty() {
+            e.mettre("nom", self.nom.texte.trim());
+        }
+        if let Some(b) = &self.brouillon {
+            e.mettre("brouillon", b.display());
+        }
         self.outils(e);
         e.mettre("vue", format!("{:.1} {:.1} {:.3}", self.vue.x, self.vue.y, self.vue.zoom));
     }
 
     fn retour(&mut self, _c: &Commun) {
-        // Le fichier a pu changer entre-temps
-        if self.charge && !self.trace {
+        // Le fichier a pu changer entre-temps : relu s'il n'y a rien de neuf ici
+        if self.charge && !self.trace && !self.modifie {
             self.charger();
         }
+    }
+
+    fn mettre_a_l_abri(&mut self, c: &Commun) {
+        if !self.charge {
+            return;
+        }
+        if !self.modifie {
+            if let Some(b) = self.brouillon.take() {
+                let _ = std::fs::remove_file(b);
+            }
+            return;
+        }
+        let nouveau = || {
+            let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+            c.dossier.as_ref().map(|d| d.join(BROUILLONS).join(format!("encre-{t}.svg")))
+        };
+        let Some(chemin) = self.brouillon.clone().or_else(nouveau) else { return };
+        match super::texte::ecrire_fichier(&chemin, &vers_svg(&self.traits)) {
+            Ok(()) => self.brouillon = Some(chemin),
+            Err(e) => crate::android::log(&format!("brouillon d'Encre non écrit : {e}")),
+        }
+    }
+
+    /// Le nom d'un nouveau dessin ; Entrée l'enregistre.
+    fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
+        if cible != sub_id(NOM, f as usize) {
+            return false;
+        }
+        if self.nom.appliquer(frappe) {
+            c.clavier.fermer();
+            self.message = Some(match self.enregistrer(c) {
+                Ok(()) => "Enregistré.".to_string(),
+                Err(e) => e,
+            });
+        }
+        true
     }
 
     fn dessiner(&mut self, cx: &mut Cx, c: &mut Commun, p: &Placee) -> String {
@@ -623,7 +753,8 @@ impl Contexte for Encre {
         let r = p.contenu;
         let base = sub_id(ENCRE, p.id as usize);
         let hb = cx.commande().min(r.h / 3.0);
-        let feuille = Rect::new(r.x, r.y, r.w, r.h - hb);
+        let haut = (cx.commande() + 2.0 * cx.coin()).min(r.h / 3.0);
+        let feuille = Rect::new(r.x, r.y + haut, r.w, r.h - hb - haut);
         self.zone = feuille;
         self.dp = cx.dp;
         let mut changer = false;
@@ -631,7 +762,8 @@ impl Contexte for Encre {
             changer |= self.recevoir(g);
         }
         if changer {
-            self.enregistrer(c);
+            self.modifie = true;
+            self.message = None;
         }
         self.feuille(cx, feuille);
         if let Some(m) = &self.message {
@@ -644,11 +776,19 @@ impl Contexte for Encre {
             cx.clip(None);
         }
         if self.barre(cx, Rect::new(r.x, r.bottom() - hb, r.w, hb), base) {
-            self.enregistrer(c);
+            self.modifie = true;
+            self.message = None;
         }
-        let nom = self.chemin.as_ref().and_then(|c| c.file_name()).map_or("nouveau dessin".into(), |n| n.to_string_lossy().into_owned());
+        self.entete(cx, c, p, Rect::new(r.x, r.y, r.w, haut));
         let n = self.traits.len();
-        format!("{nom} · {n} trait{}{}", if n > 1 { "s" } else { "" }, if self.lecture_seule { " · lecture seule" } else { "" })
+        let etat = if self.lecture_seule {
+            " · lecture seule"
+        } else if self.modifie {
+            " · non enregistré"
+        } else {
+            ""
+        };
+        format!("{} · {n} trait{}{etat}", self.nom_affiche(), if n > 1 { "s" } else { "" })
     }
 }
 
@@ -747,6 +887,29 @@ mod tests {
     }
 
     #[test]
+    fn un_dessin_non_enregistre_est_mis_a_l_abri() {
+        let d = std::env::temp_dir().join(format!("flow-encre-abri-{}", std::process::id()));
+        let c = Commun { racine: Some(d.clone()), dossier: Some(d.join("Flow")), ..Commun::default() };
+        let mut e = encre();
+        e.recevoir(Geste::Tap { x: 150.0, y: 150.0, intensite: 0.0, precision: 0.0 });
+        e.modifie = true;
+        e.mettre_a_l_abri(&c);
+        let mut et = Etat::default();
+        e.ecrire(&mut et);
+        assert!(et.texte("brouillon").is_some());
+        // Rouvert : le brouillon revient, toujours à enregistrer
+        let mut e2 = lire(&et);
+        e2.charger();
+        assert_eq!(e2.traits, e.traits);
+        assert!(e2.modifie);
+        // Enregistré : le brouillon disparaît
+        let b = e2.brouillon.clone().unwrap();
+        e2.enregistrer(&c).unwrap();
+        assert!(!b.exists() && e2.brouillon.is_none());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
     fn pincer_garde_le_point_sous_les_doigts() {
         let mut e = encre();
         let centre = (500.0, 400.0);
@@ -768,9 +931,16 @@ mod tests {
         let c = Commun { racine: Some(d.clone()), ..Commun::default() };
         let mut e = encre();
         e.recevoir(Geste::Tap { x: 150.0, y: 150.0, intensite: 0.0, precision: 0.0 });
-        e.enregistrer(&c);
+        e.enregistrer(&c).unwrap();
         let f = d.join("Documents/Encre/dessin-1.svg");
         assert_eq!(e.chemin.as_deref(), Some(f.as_path()));
+        // Un nom saisi, qui ne doit pas écraser
+        let mut n = encre();
+        n.nom = Edition::new("dessin-1");
+        assert!(n.enregistrer(&c).is_err());
+        n.nom = Edition::new("chat");
+        n.enregistrer(&c).unwrap();
+        assert!(d.join("Documents/Encre/chat.svg").exists());
         let mut et = Etat::default();
         e.ecrire(&mut et);
         let mut e2 = lire(&et);

@@ -545,7 +545,8 @@ impl Cx<'_> {
         let content = b.y - b.top + 12.0 * self.dp;
         let off = b.rect.y - b.top;
         scrolls.insert(b.id, (off, content));
-        if content > b.rect.h {
+        // Quelques pixels de trop ne valent pas une barre (un champ seul dans un bandeau)
+        if content > b.rect.h + 24.0 * self.dp {
             let h = (b.rect.h * b.rect.h / content).max(32.0 * self.dp);
             let y = b.rect.y + off / (content - b.rect.h) * (b.rect.h - h);
             self.dl.rrect(Rect::new(b.rect.right() - 6.0 * self.dp, y, 3.0 * self.dp, h), 1.5 * self.dp, [0x6C, 0x6C, 0x80, 120]);
