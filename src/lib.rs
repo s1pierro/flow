@@ -29,6 +29,7 @@ pub mod reglages;
 pub mod renderer;
 pub mod shell;
 pub mod surface;
+pub mod syntaxe;
 pub mod tampon;
 pub mod text;
 pub mod ui;

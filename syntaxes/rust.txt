@@ -1,0 +1,21 @@
+# Coloration syntaxique de Flow : Rust.
+# Une paire « clé = valeur » par ligne ; les listes se séparent par des espaces et
+# une clé répétée complète sa liste. Le nom du fichier (sans .txt) est la clé du
+# langage. Fichier modifiable : Flow le relit au retour dans l'application.
+nom = Rust
+extensions = rs
+commentaire_ligne = //
+commentaire_bloc = /* */
+chaines = "
+echappement = \
+# 'a' est un caractère, 'a seul une durée de vie
+caracteres = oui
+# #[derive(…)] et #![…] : des annotations
+annotations = #[ #![
+macros = oui
+majuscules_types = oui
+mots_cles = as async await break const continue crate dyn else enum extern fn for if impl in
+mots_cles = let loop match mod move mut pub ref return static struct super trait type unsafe use
+mots_cles = where while yield
+types = bool char str u8 u16 u32 u64 u128 usize i8 i16 i32 i64 i128 isize f32 f64
+constantes = true false self Self None Some Ok Err

@@ -1,0 +1,14 @@
+# Coloration syntaxique de Flow : JavaScript. Voir rust.txt pour le format.
+nom = JavaScript
+extensions = js mjs cjs jsx
+commentaire_ligne = //
+commentaire_bloc = /* */
+# Les gabarits `…` peuvent tenir sur plusieurs lignes
+chaines = " ' `
+echappement = \
+majuscules_types = oui
+mots_cles = async await break case catch class const continue debugger default delete do else
+mots_cles = export extends finally for from function if import in instanceof let new of return
+mots_cles = static super switch this throw try typeof var void while with yield get set
+types = console window document globalThis
+constantes = true false null undefined NaN Infinity

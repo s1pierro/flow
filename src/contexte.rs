@@ -128,6 +128,9 @@ pub struct Commun {
     pub demandes: Vec<Demande>,
     /// L'orchestrateur : empreintes, batterie, recensement des contextes.
     pub orchestre: Orchestre,
+    /// Les dictionnaires de coloration syntaxique, lus à la première demande et relus
+    /// au retour dans l'application.
+    pub syntaxes: Option<Arc<crate::syntaxe::Bibliotheque>>,
 }
 
 impl Default for Commun {
@@ -148,11 +151,18 @@ impl Default for Commun {
             dossier: None,
             demandes: Vec::new(),
             orchestre: Orchestre::default(),
+            syntaxes: None,
         }
     }
 }
 
 impl Commun {
+    /// Les dictionnaires de coloration syntaxique (`Flow/syntaxes/`).
+    pub fn syntaxes(&mut self) -> Arc<crate::syntaxe::Bibliotheque> {
+        let dossier = self.dossier.as_ref().map(|d| d.join(crate::syntaxe::DOSSIER));
+        self.syntaxes.get_or_insert_with(|| Arc::new(crate::syntaxe::Bibliotheque::charger(dossier.as_deref()))).clone()
+    }
+
     /// L'analyse du stockage, lancée à la première demande.
     pub fn analyser(&mut self) -> Option<&Analyse> {
         if self.analyse.is_none() {

@@ -46,6 +46,7 @@ fn main() {
         Shot { name: "mixeur-etroit", w: 1200, h: 1920, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
         Shot { name: "texte-code", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "texte-html", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -118,6 +119,15 @@ fn main() {
             let b = flow::tampon::blocs(&car);
             let plis = format!("{} {}", b[1].0, b[3].0);
             app.ouvrir_espace(&format!("fenetres = F1:texte\n[fenetre 1]\ndocument = {f}\nplis = {plis}\n"));
+        }
+        if s.name == "texte-html" {
+            // Une page HTML (script et style), en thème sombre
+            let d = std::env::temp_dir().join("flow-apercu-html");
+            let _ = std::fs::create_dir_all(&d);
+            let f = d.join("page.html");
+            std::fs::write(&f, "<!DOCTYPE html>\n<!-- Une page d'essai -->\n<html lang=\"fr\">\n<head>\n  <meta charset=\"utf-8\">\n  <style>\n    @media (min-width: 600px) {\n      body { font-size: 18px; color: #1e1e25 !important; }\n    }\n  </style>\n</head>\n<body>\n  <p class=\"note\">Bonjour &amp; bienvenue</p>\n  <script>\n    // Compte jusqu'à dix\n    const n = 10;\n    for (let i = 0; i < n; i++) {\n      console.log(`pas ${i}`, Math.sqrt(i * 2.5));\n    }\n  </script>\n</body>\n</html>\n").unwrap();
+            app.ouvrir_espace(&format!("fenetres = F1:texte\n[fenetre 1]\ndocument = {}\n", f.display()));
+            app.commun.theme.sombre = true;
         }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu

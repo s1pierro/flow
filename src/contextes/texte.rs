@@ -19,12 +19,17 @@
 //!   « ··· N » (N lignes cachées) le déplie aussi. Le curseur ne reste jamais dans un
 //!   bloc plié : il le déplie.
 //!
+//! - La coloration syntaxique suit l'extension du document (ou du nom saisi) :
+//!   voir `crate::syntaxe` et les dictionnaires de `Flow/syntaxes/`.
+//!
 //! L'espace de travail retient le document, le curseur, le brouillon, le nom d'un
 //! nouveau document et les blocs pliés (`plis`, numéros de ligne à partir de 0).
 
 use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
-use crate::draw::Rect;
+use crate::draw::{Color, Rect};
+use crate::syntaxe::{Bibliotheque, Classe, Plage};
+use std::sync::Arc;
 use crate::surface::{FenetreId, Placee};
 use crate::tampon::{blocs, couper, ligne_de, logiques, position_en, Segment, Tampon};
 use crate::ui::{id, sub_id, Id, Sense};
@@ -79,6 +84,9 @@ pub struct Texte {
     blocs: Option<(u64, Vec<(usize, usize)>)>,
     /// Les lignes de début des blocs repliés, croissantes.
     plis: Vec<usize>,
+    /// La coloration : pour quelle révision et quels dictionnaires (leur adresse), le
+    /// nom du langage, et les plages colorées.
+    couleurs: Option<(u64, usize, Option<String>, Vec<Plage>)>,
     /// Les lignes à l'écran visibles (hors des blocs repliés), et pour quel état.
     vue: Option<(u64, usize, Vec<usize>, Vec<usize>)>,
     /// Faire défiler jusqu'au curseur à la prochaine image.
@@ -133,6 +141,24 @@ fn lire_fichier(chemin: &Path) -> Result<(String, bool), String> {
     let texte = String::from_utf8(octets).map_err(|_| "Ce fichier n'est pas du texte (UTF-8).".to_string())?;
     let crlf = texte.contains("\r\n");
     Ok((if crlf { texte.replace("\r\n", "\n") } else { texte }, crlf))
+}
+
+/// La couleur d'une classe de la coloration, en thème clair ou sombre.
+fn teinte(k: Classe, sombre: bool) -> Color {
+    let (clair, fonce): ([u8; 3], [u8; 3]) = match k {
+        Classe::MotCle => ([0xA6, 0x26, 0xA4], [0xD1, 0x8C, 0xF0]),
+        Classe::Type => ([0x0E, 0x7C, 0x86], [0x4E, 0xC9, 0xB0]),
+        Classe::Constante | Classe::Nombre => ([0xB3, 0x55, 0x00], [0xF0, 0xA8, 0x60]),
+        Classe::Chaine => ([0x2E, 0x7D, 0x32], [0x98, 0xC3, 0x79]),
+        Classe::Commentaire => ([0x8A, 0x8F, 0x98], [0x7F, 0x84, 0x8E]),
+        Classe::Fonction => ([0x1D, 0x5F, 0xD0], [0x61, 0xAF, 0xEF]),
+        Classe::Macro => ([0xC2, 0x18, 0x5B], [0xE0, 0x6C, 0x9F]),
+        Classe::Balise => ([0xC6, 0x28, 0x28], [0xE0, 0x6C, 0x75]),
+        Classe::Attribut => ([0x9A, 0x67, 0x00], [0xE5, 0xC0, 0x7B]),
+        Classe::Preprocesseur => ([0x6A, 0x4F, 0xC8], [0xB4, 0x9C, 0xF0]),
+    };
+    let c = if sombre { fonce } else { clair };
+    [c[0], c[1], c[2], 255]
 }
 
 /// Les lignes à l'écran dont la ligne du texte n'est pas cachée (`cachees` : des
@@ -284,6 +310,26 @@ impl Texte {
             self.vue = Some((self.tampon.revision, colonnes, self.plis.clone(), v));
         }
         self.vue.as_ref().unwrap().3.clone()
+    }
+
+    /// Le nom de fichier qui décide du langage : celui du document, ou le nom saisi.
+    fn nom_fichier(&self) -> String {
+        match &self.chemin {
+            Some(p) => p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+            None => self.nom.texte.trim().to_string(),
+        }
+    }
+
+    /// Refait la coloration si le texte, le nom ou les dictionnaires ont changé.
+    fn colorer(&mut self, bib: &Arc<Bibliotheque>) {
+        let adresse = Arc::as_ptr(bib) as usize;
+        let langue = bib.pour(&self.nom_fichier());
+        let nom = langue.map(|l| l.nom.clone());
+        let a_jour = self.couleurs.as_ref().is_some_and(|(r, a, n, _)| *r == self.tampon.revision && *a == adresse && *n == nom);
+        if !a_jour {
+            let plages = langue.map_or(Vec::new(), |l| bib.colorer(&self.tampon.car, l));
+            self.couleurs = Some((self.tampon.revision, adresse, nom, plages));
+        }
     }
 
     /// Plie ou déplie le bloc qui commence à la ligne `l`.
@@ -487,6 +533,10 @@ impl Contexte for Texte {
                 basculer = Some(logique[seg]);
             }
         }
+        // La coloration syntaxique, d'après l'extension du document
+        let bib = c.syntaxes();
+        self.colorer(&bib);
+        let plages = self.couleurs.as_ref().map_or(Vec::new(), |c| c.3.clone());
         // Les pastilles « ··· » des blocs repliés : les toucher déplie
         let mut pastilles = Vec::new();
         let couleur = if self.lecture_seule { col.pale } else { col.texte };
@@ -497,7 +547,30 @@ impl Contexte for Texte {
             let y = top + row as f32 * lh;
             let cy = y + lh / 2.0;
             let t: String = self.tampon.car[a..e].iter().collect();
-            cx.mono_at(xt, cy, &t, TAILLE, couleur);
+            if plages.is_empty() || self.lecture_seule {
+                cx.mono_at(xt, cy, &t, TAILLE, couleur);
+            } else {
+                // Par morceaux : le texte ordinaire et les plages colorées
+                let mut pos = a;
+                let mut x = xt;
+                let morceau = |cx: &mut Cx, de: usize, a_: usize, teinte: Color, x: &mut f32| {
+                    if a_ > de {
+                        let m: String = self.tampon.car[de..a_].iter().collect();
+                        cx.mono_at(*x, cy, &m, TAILLE, teinte);
+                        *x += cx.mesure_mono(&m, TAILLE);
+                    }
+                };
+                let mut k = plages.partition_point(|p| p.1 <= a);
+                while k < plages.len() && plages[k].0 < e {
+                    let (pa, pe, classe) = plages[k];
+                    let (pa, pe) = (pa.max(a), pe.min(e));
+                    morceau(cx, pos, pa, couleur, &mut x);
+                    morceau(cx, pa, pe, teinte(classe, cx.theme.sombre), &mut x);
+                    pos = pe;
+                    k += 1;
+                }
+                morceau(cx, pos, e, couleur, &mut x);
+            }
             let l = logique[si];
             let premiere_du_texte = si == 0 || logique[si - 1] != l;
             if premiere_du_texte {
@@ -572,7 +645,8 @@ impl Contexte for Texte {
         }
         let (l, co) = self.tampon.position();
         let lignes = self.tampon.lignes();
-        format!("{} · {l}:{co} · {lignes} ligne{}{}", self.nom_affiche(), if lignes > 1 { "s" } else { "" }, if self.modifie { " · modifié" } else { "" })
+        let langue = self.couleurs.as_ref().and_then(|c| c.2.clone()).map_or(String::new(), |n| format!(" · {n}"));
+        format!("{}{langue} · {l}:{co} · {lignes} ligne{}{}", self.nom_affiche(), if lignes > 1 { "s" } else { "" }, if self.modifie { " · modifié" } else { "" })
     }
 }
 

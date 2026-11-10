@@ -1,0 +1,7 @@
+# Coloration syntaxique de Flow : HTML. Voir rust.txt pour le format.
+nom = HTML
+extensions = html htm xhtml
+# Un langage à balises : <balise attribut="valeur">, <!-- commentaire -->, &entité;
+balisage = oui
+# Le contenu de ces balises est coloré avec un autre langage (balise:clé)
+incorpore = script:js style:css

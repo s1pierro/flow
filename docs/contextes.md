@@ -294,6 +294,19 @@ global). Un réglage de l'application va dans le panneau des paramètres et le f
 des réglages (`reglages.rs`) ; un état partagé à retrouver au lancement suivant va
 dans la section `[commun]` (voir `App::espace` et `App::ouvrir_espace`).
 
+## La coloration syntaxique
+
+`src/syntaxe.rs` colore un texte d'après un dictionnaire par langage
+(`syntaxes/<clé>.txt` dans le projet, intégré à l'APK et recopié dans
+`Flow/syntaxes/`, où il prime et peut être retouché ; un nouveau `.txt` y ajoute un
+langage). `Commun::syntaxes()` donne la bibliothèque, relue au retour dans
+l'application ; `Bibliotheque::pour(nom)` trouve le langage par extension et
+`colorer` rend des plages `(début, fin, Classe)`. Les clés du format : `nom`,
+`extensions`, `commentaire_ligne`, `commentaire_bloc`, `chaines`, `echappement`,
+`caracteres`, `annotations`, `preprocesseur`, `prefixe_mot_cle`, `diese`, `macros`,
+`majuscules_types`, `tirets`, `proprietes`, `balisage`, `incorpore`, `mots_cles`,
+`types`, `constantes` (voir `syntaxes/rust.txt`).
+
 ## L'orchestrateur
 
 `src/orchestre.rs` tient à jour ce dont toute l'application dépend, hors de toute

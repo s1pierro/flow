@@ -1,0 +1,5 @@
+# Coloration syntaxique de Flow : SVG. Voir rust.txt pour le format.
+nom = SVG
+extensions = svg
+balisage = oui
+incorpore = style:css script:js

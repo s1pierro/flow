@@ -1,0 +1,16 @@
+# Coloration syntaxique de Flow : C. Voir rust.txt pour le format.
+nom = C
+extensions = c h
+commentaire_ligne = //
+commentaire_bloc = /* */
+chaines = " '
+echappement = \
+# Une ligne qui commence par # : directive du préprocesseur
+preprocesseur = #
+mots_cles = auto break case const continue default do else enum extern for goto if inline
+mots_cles = register restrict return sizeof static struct switch typedef union volatile while
+mots_cles = _Alignas _Alignof _Atomic _Generic _Noreturn _Static_assert _Thread_local
+types = void char short int long float double signed unsigned bool _Bool size_t ssize_t
+types = int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t intptr_t uintptr_t
+types = ptrdiff_t FILE
+constantes = NULL true false EOF stdin stdout stderr

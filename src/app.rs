@@ -138,6 +138,8 @@ impl App {
     /// contextes relisent ce qui a pu changer sur le disque.
     pub fn racine_en(&mut self, racine: Option<PathBuf>) {
         self.commun.racine = racine;
+        // Les dictionnaires de syntaxe ont pu être retouchés
+        self.commun.syntaxes = None;
         for i in self.fenetres.values_mut() {
             i.retour(&self.commun);
         }

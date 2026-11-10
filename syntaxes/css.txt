@@ -1,0 +1,16 @@
+# Coloration syntaxique de Flow : CSS. Voir rust.txt pour le format.
+nom = CSS
+extensions = css
+commentaire_bloc = /* */
+chaines = " '
+echappement = \
+# Les mots peuvent contenir des tirets (font-size, --variable)
+tirets = oui
+# Dans les accolades, un mot suivi de « : » est une propriété
+proprietes = oui
+# @media, @import… : des mots-clés
+prefixe_mot_cle = @
+# #fff, #3b82f6 (et les sélecteurs #id) : des constantes
+diese = oui
+mots_cles = !important
+constantes = inherit initial unset revert auto none transparent currentColor

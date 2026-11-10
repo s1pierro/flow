@@ -1,0 +1,20 @@
+# Coloration syntaxique de Flow : C++. Voir rust.txt pour le format.
+nom = C++
+extensions = cpp cc cxx c++ hpp hh hxx h++ ino
+commentaire_ligne = //
+commentaire_bloc = /* */
+chaines = " '
+echappement = \
+preprocesseur = #
+majuscules_types = non
+mots_cles = alignas alignof and asm auto break case catch class concept const consteval constexpr
+mots_cles = constinit const_cast continue co_await co_return co_yield decltype default delete do
+mots_cles = dynamic_cast else enum explicit export extern final for friend goto if inline mutable
+mots_cles = namespace new noexcept not operator or override private protected public register
+mots_cles = reinterpret_cast requires return sizeof static static_assert static_cast struct switch
+mots_cles = template thread_local throw try typedef typeid typename union using virtual volatile
+mots_cles = while xor
+types = void char wchar_t char8_t char16_t char32_t short int long float double signed unsigned
+types = bool size_t int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t
+types = std string string_view vector array map unordered_map set unique_ptr shared_ptr optional
+constantes = nullptr NULL true false this
