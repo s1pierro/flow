@@ -47,6 +47,7 @@ fn main() {
         Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
         Shot { name: "texte-code", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte-html", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "texte-python", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -127,6 +128,17 @@ fn main() {
             let f = d.join("page.html");
             std::fs::write(&f, "<!DOCTYPE html>\n<!-- Une page d'essai -->\n<html lang=\"fr\">\n<head>\n  <meta charset=\"utf-8\">\n  <style>\n    @media (min-width: 600px) {\n      body { font-size: 18px; color: #1e1e25 !important; }\n    }\n  </style>\n</head>\n<body>\n  <p class=\"note\">Bonjour &amp; bienvenue</p>\n  <script>\n    // Compte jusqu'à dix\n    const n = 10;\n    for (let i = 0; i < n; i++) {\n      console.log(`pas ${i}`, Math.sqrt(i * 2.5));\n    }\n  </script>\n</body>\n</html>\n").unwrap();
             app.ouvrir_espace(&format!("fenetres = F1:texte\n[fenetre 1]\ndocument = {}\n", f.display()));
+            app.commun.theme.sombre = true;
+        }
+        if s.name == "texte-python" {
+            // Python à gauche, Markdown avec un bloc TOML et un JSON à droite
+            let d = std::env::temp_dir().join("flow-apercu-python");
+            let _ = std::fs::create_dir_all(&d);
+            let py = d.join("essai.py");
+            std::fs::write(&py, "import json\nfrom pathlib import Path\n\n\n@dataclass\nclass Note:\n    \"\"\"Une note, avec\n    son titre.\"\"\"\n    titre: str\n    poids: float = 1.5\n\n    def lire(self, chemin: Path) -> dict:\n        # Lit le fichier\n        if not chemin.exists():\n            return None\n        return json.loads(chemin.read_text())\n").unwrap();
+            let md = d.join("notes.md");
+            std::fs::write(&md, "# Réglages\n\nLe fichier **Cargo.toml** décrit le `crate` :\n\n```toml\n[package]\nname = \"flow\"  # le nom\nversion = \"0.15.0\"\n```\n\n> Voir [la doc](https://doc.rust-lang.org).\n\n```json\n{\"actif\": true, \"taille\": 12}\n```\n\n- un\n- deux\n").unwrap();
+            app.ouvrir_espace(&format!("fenetres = L0.5000(F1:texte,F2:texte)\n[fenetre 1]\ndocument = {}\n[fenetre 2]\ndocument = {}\n", py.display(), md.display()));
             app.commun.theme.sombre = true;
         }
         if s.name == "accueil" {

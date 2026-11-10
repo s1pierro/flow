@@ -1,0 +1,13 @@
+# Coloration syntaxique de Flow : TOML. Voir rust.txt pour le format.
+nom = TOML
+extensions = toml
+commentaire_ligne = #
+chaines = " '
+chaines_triples = """ '''
+echappement = \
+tirets = oui
+# [section] et [[tableau]] en début de ligne
+sections = oui
+# « clé = » en début de ligne : une clé
+cles = oui
+constantes = true false inf nan

@@ -11,7 +11,13 @@
 //!   directives du préprocesseur (`#include`), propriétés CSS ;
 //! - le **balisage** (`balisage = oui`) : balises, attributs, valeurs, entités,
 //!   commentaires, et le contenu de certaines balises coloré avec un autre langage
-//!   (`incorpore = script:js style:css`).
+//!   (`incorpore = script:js style:css`) ;
+//! - le **Markdown** (`markdown = oui`) : titres, citations, listes, filets, code,
+//!   emphase, liens ; un bloc ```langage est coloré dans ce langage.
+//!
+//! Le code connaît aussi les chaînes triples (Python, TOML), les en-têtes
+//! `[section]` et les clés `clé =` (TOML), les clés `"clé":` (JSON) et les
+//! décorateurs `@nom` (Python).
 //!
 //! L'analyse rend des plages `(début, fin, Classe)` en caractères, croissantes et
 //! disjointes ; le reste du texte garde la couleur ordinaire.
@@ -39,7 +45,7 @@ pub enum Classe {
 pub type Plage = (usize, usize, Classe);
 
 /// Les dictionnaires livrés avec Flow : clé et contenu.
-pub const INTEGRES: [(&str, &str); 7] = [
+pub const INTEGRES: [(&str, &str); 11] = [
     ("rust", include_str!("../syntaxes/rust.txt")),
     ("c", include_str!("../syntaxes/c.txt")),
     ("cpp", include_str!("../syntaxes/cpp.txt")),
@@ -47,6 +53,10 @@ pub const INTEGRES: [(&str, &str); 7] = [
     ("css", include_str!("../syntaxes/css.txt")),
     ("html", include_str!("../syntaxes/html.txt")),
     ("svg", include_str!("../syntaxes/svg.txt")),
+    ("markdown", include_str!("../syntaxes/markdown.txt")),
+    ("toml", include_str!("../syntaxes/toml.txt")),
+    ("json", include_str!("../syntaxes/json.txt")),
+    ("python", include_str!("../syntaxes/python.txt")),
 ];
 
 /// Le dossier des dictionnaires, dans celui de Flow.
@@ -62,6 +72,12 @@ pub struct Syntaxe {
     commentaire_ligne: Vec<Vec<char>>,
     commentaire_bloc: Option<(Vec<char>, Vec<char>)>,
     chaines: Vec<char>,
+    chaines_triples: Vec<Vec<char>>,
+    cles_chaines: bool,
+    sections: bool,
+    cles: bool,
+    prefixe_annotation: Option<char>,
+    markdown: bool,
     echappement: Option<char>,
     caracteres: bool,
     annotations: Vec<Vec<char>>,
@@ -104,6 +120,12 @@ impl Syntaxe {
                     }
                 }
                 "chaines" => s.chaines.extend(liste().filter_map(|m| m.chars().next())),
+                "chaines_triples" => s.chaines_triples.extend(liste().map(|m| m.chars().collect())),
+                "cles_chaines" => s.cles_chaines = oui(v),
+                "sections" => s.sections = oui(v),
+                "cles" => s.cles = oui(v),
+                "prefixe_annotation" => s.prefixe_annotation = premier,
+                "markdown" => s.markdown = oui(v),
                 "echappement" => s.echappement = premier,
                 "caracteres" => s.caracteres = oui(v),
                 "annotations" => s.annotations.extend(liste().map(|m| m.chars().collect())),
@@ -174,6 +196,16 @@ impl Bibliotheque {
         self.langues.iter().find(|l| l.cle == cle)
     }
 
+    /// Un langage désigné par sa clé, son nom ou une de ses extensions (« rust »,
+    /// « Rust », « rs »), sans tenir compte de la casse : l'étiquette d'un bloc de code.
+    pub fn nomme(&self, n: &str) -> Option<&Syntaxe> {
+        let n = n.trim().to_lowercase();
+        if n.is_empty() {
+            return None;
+        }
+        self.langues.iter().find(|l| l.cle == n || l.nom.to_lowercase() == n || l.extensions.contains(&n))
+    }
+
     /// Le langage d'un fichier, d'après son extension.
     pub fn pour(&self, nom: &str) -> Option<&Syntaxe> {
         let ext = nom.rsplit_once('.').filter(|(a, _)| !a.is_empty())?.1.to_lowercase();
@@ -183,12 +215,18 @@ impl Bibliotheque {
     /// Les plages colorées de `car` dans le langage `s`.
     pub fn colorer(&self, car: &[char], s: &Syntaxe) -> Vec<Plage> {
         let mut out = Vec::new();
-        if s.balisage {
-            balisage(car, 0, car.len(), s, self, &mut out);
-        } else {
-            code(car, 0, car.len(), s, &mut out);
-        }
+        self.colorer_dans(car, 0, car.len(), s, &mut out);
         out
+    }
+
+    fn colorer_dans(&self, car: &[char], debut: usize, fin: usize, s: &Syntaxe, out: &mut Vec<Plage>) {
+        if s.markdown {
+            markdown(car, debut, fin, self, out);
+        } else if s.balisage {
+            balisage(car, debut, fin, s, self, out);
+        } else {
+            code(car, debut, fin, s, out);
+        }
     }
 }
 
@@ -296,10 +334,52 @@ fn code(car: &[char], debut: usize, fin: usize, s: &Syntaxe, out: &mut Vec<Plage
             i = j;
             continue;
         }
+        // [section] et [[tableau]] en début de ligne
+        if s.sections && c == '[' && ligne_vierge {
+            let j = car[i..fin].iter().position(|&x| x == '\n').map_or(fin, |k| i + k);
+            let f = (i..j).rev().find(|&k| car[k] == ']').map_or(j, |k| k + 1);
+            out.push((i, f, Classe::Balise));
+            i = f;
+            continue;
+        }
+        // « clé = » en début de ligne (clés à points ou entre guillemets)
+        if s.cles && ligne_vierge && (mot(c, true) || c == '"' || c == '\'') {
+            let mut j = i;
+            while j < fin && (mot(car[j], true) || matches!(car[j], '.' | ' ' | '\t')) || (j < fin && (car[j] == '"' || car[j] == '\'')) {
+                if car[j] == '"' || car[j] == '\'' {
+                    j = chaine(car, j, fin, car[j], s.echappement);
+                } else {
+                    j += 1;
+                }
+            }
+            if j < fin && car[j] == '=' && car.get(j + 1) != Some(&'=') {
+                let mut f = j;
+                while f > i && matches!(car[f - 1], ' ' | '\t') {
+                    f -= 1;
+                }
+                out.push((i, f, Classe::Attribut));
+                i = j;
+                continue;
+            }
+        }
         // Chaînes, caractères
+        if let Some(m) = s.chaines_triples.iter().find(|m| commence(car, i, m)) {
+            let mut j = i + m.len();
+            while j < fin && !commence(car, j, m) {
+                if Some(car[j]) == s.echappement {
+                    j += 1;
+                }
+                j += 1;
+            }
+            let j = (j + m.len()).min(fin);
+            out.push((i, j, Classe::Chaine));
+            i = j;
+            continue;
+        }
         if s.chaines.contains(&c) {
             let j = chaine(car, i, fin, c, s.echappement);
-            out.push((i, j, Classe::Chaine));
+            let cle = s.cles_chaines && suivant(car, j, fin) == Some(':');
+            out.push((i, j, if cle { Classe::Attribut } else { Classe::Chaine }));
             i = j;
             continue;
         }
@@ -328,11 +408,14 @@ fn code(car: &[char], debut: usize, fin: usize, s: &Syntaxe, out: &mut Vec<Plage
             i = j;
             continue;
         }
-        // @media, #3b82f6, !important
-        let prefixe = (s.prefixe_mot_cle == Some(c) && car.get(i + 1).is_some_and(|&x| x.is_alphabetic())).then_some(Classe::MotCle).or_else(|| (s.diese && c == '#' && car.get(i + 1).is_some_and(|&x| x.is_alphanumeric())).then_some(Classe::Constante));
+        // @media, @decorateur, #3b82f6, !important
+        let prefixe = (s.prefixe_annotation == Some(c) && car.get(i + 1).is_some_and(|&x| x.is_alphabetic() || x == '_'))
+            .then_some(Classe::Preprocesseur)
+            .or_else(|| (s.prefixe_mot_cle == Some(c) && car.get(i + 1).is_some_and(|&x| x.is_alphabetic())).then_some(Classe::MotCle))
+            .or_else(|| (s.diese && c == '#' && car.get(i + 1).is_some_and(|&x| x.is_alphanumeric())).then_some(Classe::Constante));
         if let Some(classe) = prefixe {
             let mut j = i + 1;
-            while j < fin && mot(car[j], s.tirets) {
+            while j < fin && (mot(car[j], s.tirets) || (classe == Classe::Preprocesseur && car[j] == '.')) {
                 j += 1;
             }
             out.push((i, j, classe));
@@ -483,6 +566,141 @@ fn balisage(car: &[char], debut: usize, fin: usize, s: &Syntaxe, bib: &Bibliothe
     }
 }
 
+/// Le Markdown de `debut..fin`, ligne par ligne : titres, citations, listes, filets,
+/// blocs de code (colorés dans leur langage), puis l'intérieur des lignes.
+fn markdown(car: &[char], debut: usize, fin: usize, bib: &Bibliotheque, out: &mut Vec<Plage>) {
+    let fin_de = |i: usize| car[i..fin].iter().position(|&x| x == '\n').map_or(fin, |k| i + k);
+    let mut i = debut;
+    while i < fin {
+        let fl = fin_de(i);
+        let mut j = i;
+        while j < fl && (car[j] == ' ' || car[j] == '\t') {
+            j += 1;
+        }
+        // Un bloc de code : ``` ou ~~~, jusqu'à la même clôture
+        let cloture: Option<Vec<char>> = ["```", "~~~"].iter().map(|m| m.chars().collect::<Vec<char>>()).find(|m| commence(car, j, m));
+        if let Some(m) = cloture {
+            let etiquette: String = car[j + m.len()..fl].iter().collect::<String>().split(|c: char| c.is_whitespace() || c == '{' || c == ',').next().unwrap_or("").to_string();
+            out.push((j, fl, Classe::Preprocesseur));
+            let dedans = (fl + 1).min(fin);
+            let mut k = dedans;
+            let mut fin_bloc = fin;
+            let mut ligne_cloture = None;
+            while k < fin {
+                let fk = fin_de(k);
+                let mut d = k;
+                while d < fk && car[d] == ' ' {
+                    d += 1;
+                }
+                if commence(car, d, &m) {
+                    fin_bloc = k;
+                    ligne_cloture = Some((d, fk));
+                    break;
+                }
+                k = fk + 1;
+            }
+            let fin_bloc = fin_bloc.min(fin);
+            match bib.nomme(&etiquette).filter(|l| !l.markdown) {
+                Some(l) if dedans < fin_bloc => bib.colorer_dans(car, dedans, fin_bloc, l, out),
+                _ if dedans < fin_bloc => out.push((dedans, fin_bloc, Classe::Chaine)),
+                _ => {}
+            }
+            match ligne_cloture {
+                Some((d, fk)) => {
+                    out.push((d, fk, Classe::Preprocesseur));
+                    i = fk + 1;
+                }
+                None => i = fin,
+            }
+            continue;
+        }
+        let c = car.get(j).copied().unwrap_or('\n');
+        let dieses = car[j..fl].iter().take_while(|&&x| x == '#').count();
+        if (1..=6).contains(&dieses) && (j + dieses == fl || car[j + dieses] == ' ') {
+            out.push((j, fl, Classe::MotCle));
+        } else if c == '>' {
+            out.push((j, fl, Classe::Commentaire));
+        } else if matches!(c, '-' | '*' | '_') && car[j..fl].iter().filter(|&&x| x == c).count() >= 3 && car[j..fl].iter().all(|&x| x == c || x == ' ') {
+            out.push((j, fl, Classe::Balise));
+        } else {
+            // Une puce ou un numéro de liste, puis le texte
+            let mut t = j;
+            if matches!(c, '-' | '*' | '+') && car.get(j + 1) == Some(&' ') {
+                out.push((j, j + 1, Classe::Balise));
+                t = j + 1;
+            } else {
+                let n = car[j..fl].iter().take_while(|x| x.is_ascii_digit()).count();
+                if n > 0 && matches!(car.get(j + n), Some('.') | Some(')')) && car.get(j + n + 1) == Some(&' ') {
+                    out.push((j, j + n + 1, Classe::Balise));
+                    t = j + n + 1;
+                }
+            }
+            en_ligne(car, t, fl, out);
+        }
+        i = fl + 1;
+    }
+}
+
+/// L'intérieur d'une ligne de Markdown : code, emphase, liens.
+fn en_ligne(car: &[char], debut: usize, fin: usize, out: &mut Vec<Plage>) {
+    let trouver = |de: usize, m: &[char]| (de..fin).find(|&k| commence(car, k, m));
+    let mut i = debut;
+    while i < fin {
+        let c = car[i];
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        if c == '`' {
+            let n = car[i..fin].iter().take_while(|&&x| x == '`').count();
+            let m = vec!['`'; n];
+            if let Some(k) = trouver(i + n, &m) {
+                out.push((i, k + n, Classe::Chaine));
+                i = k + n;
+                continue;
+            }
+            i += n;
+            continue;
+        }
+        if (c == '*' || c == '_') && !(c == '_' && i > debut && car[i - 1].is_alphanumeric()) {
+            let n = if car.get(i + 1) == Some(&c) { 2 } else { 1 };
+            let m = vec![c; n];
+            if car.get(i + n).is_some_and(|x| !x.is_whitespace()) {
+                if let Some(k) = trouver(i + n + 1, &m).filter(|&k| !car[k - 1].is_whitespace()) {
+                    out.push((i, k + n, Classe::Attribut));
+                    i = k + n;
+                    continue;
+                }
+            }
+            i += n;
+            continue;
+        }
+        if c == '[' || (c == '!' && car.get(i + 1) == Some(&'[')) {
+            let o = if c == '!' { i + 1 } else { i };
+            if let Some(f) = (o + 1..fin).find(|&k| car[k] == ']') {
+                out.push((i, f + 1, Classe::Fonction));
+                if car.get(f + 1) == Some(&'(') {
+                    if let Some(p) = (f + 2..fin).find(|&k| car[k] == ')') {
+                        out.push((f + 1, p + 1, Classe::Commentaire));
+                        i = p + 1;
+                        continue;
+                    }
+                }
+                i = f + 1;
+                continue;
+            }
+        }
+        if c == '<' && (commence_i(car, i + 1, "http") || commence_i(car, i + 1, "mailto:")) {
+            if let Some(f) = (i + 1..fin).find(|&k| car[k] == '>') {
+                out.push((i, f + 1, Classe::Commentaire));
+                i = f + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,7 +721,11 @@ mod tests {
     #[test]
     fn les_langages_se_trouvent_par_extension() {
         let b = Bibliotheque::integree();
-        assert_eq!(b.langues.len(), 7);
+        assert_eq!(b.langues.len(), 11);
+        assert_eq!(b.pour("Cargo.toml").unwrap().cle, "toml");
+        assert_eq!(b.pour("LISEZMOI.md").unwrap().cle, "markdown");
+        assert_eq!(b.nomme("py").unwrap().cle, "python");
+        assert_eq!(b.nomme("Rust").unwrap().cle, "rust");
         assert_eq!(b.pour("main.RS").unwrap().nom, "Rust");
         assert_eq!(b.pour("x.hpp").unwrap().cle, "cpp");
         assert_eq!(b.pour("dessin.svg").unwrap().cle, "svg");
@@ -593,15 +815,48 @@ mod tests {
     }
 
     #[test]
+    fn python_toml_json() {
+        let p = plages("python", "@app.route('/')\ndef f(x=None):\n    \"\"\"Doc\n    sur deux lignes\"\"\"\n    return x  # fin");
+        assert_eq!(p, vec![a("@app.route", Classe::Preprocesseur), a("'/'", Classe::Chaine), a("def", Classe::MotCle), a("f", Classe::Fonction), a("None", Classe::Constante), a("\"\"\"Doc\n    sur deux lignes\"\"\"", Classe::Chaine), a("return", Classe::MotCle), a("# fin", Classe::Commentaire)]);
+        let p = plages("toml", "[package]\nname = \"flow\"\nopt-level = 3 # vite\n[[bin]]\ntest = true");
+        assert_eq!(p, vec![a("[package]", Classe::Balise), a("name", Classe::Attribut), a("\"flow\"", Classe::Chaine), a("opt-level", Classe::Attribut), a("3", Classe::Nombre), a("# vite", Classe::Commentaire), a("[[bin]]", Classe::Balise), a("test", Classe::Attribut), a("true", Classe::Constante)]);
+        let p = plages("json", "{\"a\": [1.5, \"b\", null]}");
+        assert_eq!(p, vec![a("\"a\"", Classe::Attribut), a("1.5", Classe::Nombre), a("\"b\"", Classe::Chaine), a("null", Classe::Constante)]);
+    }
+
+    #[test]
+    fn markdown_et_ses_blocs_de_code() {
+        let p = plages("markdown", "# Titre\n- un **gras** et `code`\n> citation\n1. [lien](http://x) snake_case\n```rust\nfn a() {}\n```\n---");
+        assert_eq!(
+            p,
+            vec![
+                a("# Titre", Classe::MotCle),
+                a("-", Classe::Balise),
+                a("**gras**", Classe::Attribut),
+                a("`code`", Classe::Chaine),
+                a("> citation", Classe::Commentaire),
+                a("1.", Classe::Balise),
+                a("[lien]", Classe::Fonction),
+                a("(http://x)", Classe::Commentaire),
+                a("```rust", Classe::Preprocesseur),
+                a("fn", Classe::MotCle),
+                a("a", Classe::Fonction),
+                a("```", Classe::Preprocesseur),
+                a("---", Classe::Balise),
+            ]
+        );
+    }
+
+    #[test]
     fn le_dossier_prime_et_ajoute_des_langages() {
         let d = std::env::temp_dir().join(format!("flow-syntaxes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("rust.txt"), "nom = Rouille\nextensions = rs\nmots_cles = fn\n").unwrap();
-        std::fs::write(d.join("toml.txt"), "nom = TOML\nextensions = toml\ncommentaire_ligne = #\n").unwrap();
+        std::fs::write(d.join("ini.txt"), "nom = INI\nextensions = ini\ncommentaire_ligne = ;\n").unwrap();
         let b = Bibliotheque::charger(Some(&d));
         assert_eq!(b.pour("a.rs").unwrap().nom, "Rouille");
-        assert_eq!(b.pour("Cargo.toml").unwrap().nom, "TOML");
+        assert_eq!(b.pour("php.ini").unwrap().nom, "INI");
         // Les dictionnaires manquants sont recopiés, et la retouche est gardée
         assert!(d.join("html.txt").exists());
         assert!(std::fs::read_to_string(d.join("rust.txt")).unwrap().contains("Rouille"));

@@ -1,0 +1,10 @@
+# Coloration syntaxique de Flow : JSON (et JSON avec commentaires). Voir rust.txt pour le format.
+nom = JSON
+extensions = json jsonc json5 geojson webmanifest
+commentaire_ligne = //
+commentaire_bloc = /* */
+chaines = "
+echappement = \
+# Une chaîne suivie de « : » est une clé
+cles_chaines = oui
+constantes = true false null

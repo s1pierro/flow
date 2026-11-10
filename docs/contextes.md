@@ -302,10 +302,13 @@ dans la section `[commun]` (voir `App::espace` et `App::ouvrir_espace`).
 langage). `Commun::syntaxes()` donne la bibliothèque, relue au retour dans
 l'application ; `Bibliotheque::pour(nom)` trouve le langage par extension et
 `colorer` rend des plages `(début, fin, Classe)`. Les clés du format : `nom`,
-`extensions`, `commentaire_ligne`, `commentaire_bloc`, `chaines`, `echappement`,
-`caracteres`, `annotations`, `preprocesseur`, `prefixe_mot_cle`, `diese`, `macros`,
-`majuscules_types`, `tirets`, `proprietes`, `balisage`, `incorpore`, `mots_cles`,
-`types`, `constantes` (voir `syntaxes/rust.txt`).
+`extensions`, `commentaire_ligne`, `commentaire_bloc`, `chaines`, `chaines_triples`,
+`echappement`, `caracteres`, `annotations`, `prefixe_annotation`, `preprocesseur`,
+`prefixe_mot_cle`, `diese`, `macros`, `majuscules_types`, `tirets`, `proprietes`,
+`sections`, `cles`, `cles_chaines`, `balisage`, `incorpore`, `markdown`, `mots_cles`,
+`types`, `constantes` (voir `syntaxes/rust.txt`). Trois analyseurs : le code, le
+balisage (`balisage = oui`) et le Markdown (`markdown = oui`, ses blocs de code
+colorés dans le langage de leur étiquette, `Bibliotheque::nomme`).
 
 ## L'orchestrateur
 

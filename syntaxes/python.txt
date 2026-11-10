@@ -1,0 +1,16 @@
+# Coloration syntaxique de Flow : Python. Voir rust.txt pour le format.
+nom = Python
+extensions = py pyw pyi
+commentaire_ligne = #
+chaines = " '
+# Les chaînes triples peuvent tenir sur plusieurs lignes
+chaines_triples = """ '''
+echappement = \
+# @decorateur : une annotation
+prefixe_annotation = @
+majuscules_types = oui
+mots_cles = and as assert async await break case class continue def del elif else except
+mots_cles = finally for from global if import in is lambda match nonlocal not or pass raise
+mots_cles = return try while with yield
+types = int float complex str bytes bytearray bool list dict set frozenset tuple object type
+constantes = True False None self cls NotImplemented Ellipsis __name__ __main__

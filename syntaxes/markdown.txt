@@ -1,0 +1,6 @@
+# Coloration syntaxique de Flow : Markdown. Voir rust.txt pour le format.
+nom = Markdown
+extensions = md markdown mdown mkd
+# Titres, listes, citations, emphase, code (les blocs ```langage sont colorés dans
+# leur langage, d'après sa clé, son nom ou une de ses extensions), liens
+markdown = oui

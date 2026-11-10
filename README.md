@@ -8,7 +8,7 @@ composer son espace de travail à son goût. Née d'une copie de
 Contextes : Accueil (les contextes en cartes, celui des fenêtres nées du menu), Fichiers (les
 entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers), Texte (éditeur à numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
-JavaScript, CSS, HTML, SVG ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
+JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
 quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste), Encre (dessin à
 main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts),
 Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie surveillée,
