@@ -263,6 +263,8 @@ impl App {
             cx.mono_at(e.x + 4.0 * d, e.cy(), &etat, 12.0, col.pale);
             cx.clip(None);
         }
+        // Une analyse finie se résume en empreintes, enregistrées sur le disque
+        self.commun.suivre_analyse();
         for d in std::mem::take(&mut self.commun.demandes) {
             self.traiter(d);
         }

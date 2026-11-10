@@ -150,7 +150,7 @@ fn main() {
             ui.end_frame();
             if s.disque.is_some() {
                 // Laisse l'analyse finir
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::thread::sleep(std::time::Duration::from_millis(60));
             }
         }
         render.draw(w, h, scene.unwrap().fond, &dl, &mut text);

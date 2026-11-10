@@ -14,7 +14,8 @@
 //! Le guide d'intégration est dans `docs/contextes.md`.
 
 use crate::clavier::{Clavier, Frappe};
-use crate::disque::Analyse;
+use crate::disque::{self, Analyse, Noeud, Synthese};
+use std::sync::Arc;
 use crate::radio::Historique;
 use crate::surface::{FenetreId, Placee};
 use crate::gestes::ReglagesGestes;
@@ -107,6 +108,12 @@ pub struct Commun {
     pub racine: Option<PathBuf>,
     /// L'analyse du stockage, une pour toutes les fenêtres (Disque, Fichiers).
     pub analyse: Option<Analyse>,
+    /// La synthèse de la dernière analyse (les empreintes des dossiers), relue de
+    /// `Flow/empreintes.txt` ou tirée d'une analyse finie.
+    pub empreintes: Option<Arc<Synthese>>,
+    pub(crate) empreintes_lues: bool,
+    /// L'arbre dont la synthèse est tirée : une analyse finie n'est résumée qu'une fois.
+    pub(crate) resume: Option<Arc<Noeud>>,
     /// Les derniers flux radio écoutés.
     pub historique: Historique,
     /// Où sont enregistrés les réglages et l'espace de travail, pour l'indiquer.
@@ -127,6 +134,9 @@ impl Default for Commun {
             scrolls: Scrolls::new(),
             racine: None,
             analyse: None,
+            empreintes: None,
+            empreintes_lues: false,
+            resume: None,
             historique: Historique::default(),
             fichier_reglages: None,
             fichier_espace: None,
@@ -145,6 +155,55 @@ impl Commun {
             }
         }
         self.analyse.as_ref()
+    }
+
+    /// Une analyse vient de finir : sa synthèse remplace l'ancienne et s'enregistre
+    /// (dans un thread). Appelé à chaque image : ne coûte rien le reste du temps.
+    pub fn suivre_analyse(&mut self) {
+        let Some(a) = &self.analyse else { return };
+        let Some((n, _)) = a.resultat() else { return };
+        if self.resume.as_ref().is_some_and(|r| Arc::ptr_eq(r, &n)) {
+            return;
+        }
+        let s = Synthese { racine: a.racine.clone(), date: disque::maintenant(), arbre: disque::Empreinte::depuis(&n) };
+        if let Some(f) = self.dossier.as_ref().map(|d| d.join(disque::EMPREINTES)) {
+            let texte = s.ecrire();
+            std::thread::spawn(move || {
+                let tmp = f.with_extension("txt~");
+                let r = f.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&tmp, texte)).and_then(|_| std::fs::rename(&tmp, &f));
+                if let Err(e) = r {
+                    crate::android::log(&format!("empreintes non enregistrées : {e}"));
+                }
+            });
+        }
+        self.empreintes = Some(Arc::new(s));
+        self.empreintes_lues = true;
+        self.resume = Some(n);
+    }
+
+    /// Les empreintes des dossiers, pour Fichiers : la synthèse enregistrée, relue une
+    /// fois. Sans synthèse, ou si elle a plus d'un jour, une analyse est lancée en
+    /// arrière-plan : hors des demandes de l'utilisateur (contexte Disque), le stockage
+    /// n'est pas parcouru plus d'une fois par jour.
+    pub fn empreintes(&mut self) -> Option<Arc<Synthese>> {
+        if !std::mem::replace(&mut self.empreintes_lues, true) {
+            let lue = self.dossier.as_ref().and_then(|d| std::fs::read_to_string(d.join(disque::EMPREINTES)).ok()).and_then(|t| Synthese::lire(&t));
+            // Une synthèse d'un autre stockage ne sert à rien
+            self.empreintes = lue.filter(|s| Some(&s.racine) == self.racine.as_ref()).map(Arc::new);
+        }
+        let vieille = self.empreintes.as_ref().is_none_or(|s| disque::maintenant().saturating_sub(s.date) >= disque::UN_JOUR);
+        if vieille {
+            match &self.analyse {
+                Some(a) if a.en_cours() => {}
+                // Une analyse finie mais pas encore résumée : elle le sera à l'image suivante
+                Some(a) if a.resultat().is_some_and(|(n, _)| !self.resume.as_ref().is_some_and(|r| Arc::ptr_eq(r, &n))) => {}
+                _ => {
+                    self.analyse = None;
+                    self.analyser();
+                }
+            }
+        }
+        self.empreintes.clone()
     }
 }
 
@@ -214,3 +273,46 @@ mod tests {
         assert_eq!(e.nombre("absente"), None);
     }
 }
+
+#[cfg(test)]
+mod tests_empreintes {
+    use super::*;
+
+    #[test]
+    fn la_synthese_est_relue_et_refaite_au_plus_une_fois_par_jour() {
+        let d = std::env::temp_dir().join(format!("flow-empreintes-{}", std::process::id()));
+        let racine = d.join("stockage");
+        std::fs::create_dir_all(racine.join("Musique")).unwrap();
+        std::fs::write(racine.join("Musique/a.ogg"), vec![1u8; 9000]).unwrap();
+        let mut c = Commun { racine: Some(racine.clone()), dossier: Some(d.join("Flow")), ..Commun::default() };
+        // Rien sur le disque : une analyse part, puis se résume et s'enregistre
+        assert!(c.empreintes().is_none());
+        assert!(c.analyse.is_some());
+        while c.analyse.as_ref().unwrap().en_cours() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        c.suivre_analyse();
+        let s = c.empreintes().unwrap();
+        assert!(disque::situer(&s.arbre, &["Musique"]).is_some());
+        let f = d.join("Flow").join(disque::EMPREINTES);
+        for _ in 0..200 {
+            if f.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Au lancement suivant : la synthèse du jour est relue, sans nouvelle analyse
+        let mut c2 = Commun { racine: Some(racine.clone()), dossier: Some(d.join("Flow")), ..Commun::default() };
+        assert_eq!(c2.empreintes().as_deref(), Some(&*s));
+        assert!(c2.analyse.is_none());
+        // Vieille d'un jour : une analyse repart
+        let mut vieille = (*s).clone();
+        vieille.date -= disque::UN_JOUR;
+        std::fs::write(&f, vieille.ecrire()).unwrap();
+        let mut c3 = Commun { racine: Some(racine), dossier: Some(d.join("Flow")), ..Commun::default() };
+        assert!(c3.empreintes().is_some());
+        assert!(c3.analyse.is_some());
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+

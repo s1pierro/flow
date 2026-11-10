@@ -24,6 +24,10 @@ Package `fr.s1pierro.flow`. Dans `Flow/` à la racine du stockage :
 - `espace.txt` : les fenêtres, leur contexte et leur état, retrouvés au lancement
   suivant ;
 - `brouillons/` : les modifications non enregistrées des documents, mises à l'abri.
+- `empreintes.txt` : la synthèse de l'analyse du stockage (les dossiers et leurs
+  tailles), qui donne les empreintes des dossiers dans Fichiers sans tout parcourir
+  au lancement ; refaite au plus une fois par jour, ou à chaque analyse demandée
+  dans Disque.
 
 Les deux se modifient à la main. Pour écrire un nouveau contexte, voir
 [`docs/contextes.md`](docs/contextes.md).

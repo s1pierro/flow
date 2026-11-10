@@ -227,6 +227,161 @@ pub fn placer<'a, S: AsRef<str>>(racine: &'a Noeud, noms: &[S]) -> Option<Place<
     Some(p)
 }
 
+/// La synthèse d'une analyse, pour les empreintes des dossiers dans Fichiers : les
+/// dossiers seuls, avec ce qu'il faut pour retrouver leur angle dans le graphique sans
+/// l'arbre complet. Elle s'enregistre dans `Flow/empreintes.txt`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Empreinte {
+    pub nom: String,
+    pub taille: u64,
+    /// Sa place parmi les entrées du parent, fichiers compris (la teinte du graphique).
+    pub rang: usize,
+    /// Les octets des entrées qui le précèdent dans le parent (son angle de départ).
+    pub avant: u64,
+    pub enfants: Vec<Empreinte>,
+}
+
+/// Le nom du fichier de la synthèse, dans le dossier de Flow.
+pub const EMPREINTES: &str = "empreintes.txt";
+/// Un dossier plus petit que cette part du tout n'a pas d'empreinte visible : il n'est
+/// pas gardé.
+const SEUIL_EMPREINTE: f64 = 1e-5;
+/// L'âge au-delà duquel la synthèse est refaite, en secondes.
+pub const UN_JOUR: u64 = 24 * 3600;
+
+impl Empreinte {
+    pub fn depuis(n: &Noeud) -> Empreinte {
+        fn aller(n: &Noeud, rang: usize, avant: u64, min: u64) -> Empreinte {
+            let mut e = Empreinte { nom: n.nom.clone(), taille: n.taille, rang, avant, enfants: Vec::new() };
+            let mut acc = 0;
+            for (i, c) in n.enfants.iter().enumerate() {
+                if c.dossier && c.taille > 0 && c.taille >= min && !c.nom.contains(['\t', '\n', '\r']) {
+                    e.enfants.push(aller(c, i, acc, min));
+                }
+                acc += c.taille;
+            }
+            e
+        }
+        aller(n, 0, 0, (n.taille as f64 * SEUIL_EMPREINTE).ceil() as u64)
+    }
+
+    /// L'angle d'un enfant, dans l'angle `span` de ce dossier.
+    fn arc(&self, enfant: &Empreinte, span: (f32, f32)) -> (f32, f32) {
+        if self.taille == 0 {
+            return (span.0, span.0);
+        }
+        let k = (span.1 - span.0) / self.taille as f32;
+        let a0 = span.0 + k * enfant.avant as f32;
+        (a0, a0 + k * enfant.taille as f32)
+    }
+}
+
+/// Un dossier situé dans la synthèse : son nœud, ses angles depuis la racine, la
+/// teinte de sa branche.
+pub struct Situation<'a> {
+    pub noeud: &'a Empreinte,
+    pub arcs: Vec<(f32, f32)>,
+    pub teinte: Option<usize>,
+}
+
+impl Situation<'_> {
+    /// L'empreinte d'un sous-dossier : ses angles et sa teinte.
+    pub fn enfant(&self, nom: &str) -> Option<(Vec<(f32, f32)>, usize)> {
+        let e = self.noeud.enfants.iter().find(|e| e.nom == nom)?;
+        let span = self.arcs.last().copied().unwrap_or((0.0, std::f32::consts::TAU));
+        let mut arcs = self.arcs.clone();
+        arcs.push(self.noeud.arc(e, span));
+        Some((arcs, self.teinte.unwrap_or(e.rang)))
+    }
+}
+
+/// Suit des noms depuis la racine de la synthèse (comme `placer` dans l'arbre complet).
+pub fn situer<'a, S: AsRef<str>>(racine: &'a Empreinte, noms: &[S]) -> Option<Situation<'a>> {
+    let mut p = Situation { noeud: racine, arcs: Vec::new(), teinte: None };
+    let mut span = (0.0, std::f32::consts::TAU);
+    for nom in noms {
+        let e = p.noeud.enfants.iter().find(|e| e.nom == nom.as_ref())?;
+        span = p.noeud.arc(e, span);
+        p.arcs.push(span);
+        p.teinte.get_or_insert(e.rang);
+        p.noeud = e;
+    }
+    Some(p)
+}
+
+/// La synthèse et ce qu'elle décrit : le dossier analysé, et quand (secondes Unix).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Synthese {
+    pub racine: PathBuf,
+    pub date: u64,
+    pub arbre: Empreinte,
+}
+
+/// L'heure, en secondes Unix.
+pub fn maintenant() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+impl Synthese {
+    pub fn ecrire(&self) -> String {
+        let mut s = String::new();
+        s += "# Synthèse de l'analyse du stockage : les empreintes des dossiers dans Fichiers.\n";
+        s += "# Refaite par Flow au plus une fois par jour, ou à chaque analyse demandée.\n";
+        s += "# Une ligne par dossier : profondeur, rang parmi les entrées du parent (fichiers\n";
+        s += "# compris), octets avant lui, taille en octets, nom ; séparés par des tabulations.\n";
+        s += &format!("racine = {}\ndate = {}\n", self.racine.display(), self.date);
+        fn aller(e: &Empreinte, prof: usize, s: &mut String) {
+            *s += &format!("{prof}\t{}\t{}\t{}\t{}\n", e.rang, e.avant, e.taille, e.nom);
+            for c in &e.enfants {
+                aller(c, prof + 1, s);
+            }
+        }
+        aller(&self.arbre, 0, &mut s);
+        s
+    }
+
+    /// Relit une synthèse ; `None` si elle est illisible.
+    pub fn lire(t: &str) -> Option<Synthese> {
+        let (mut racine, mut date) = (None, None);
+        // La pile des dossiers ouverts, du plus haut au plus profond
+        let mut pile: Vec<Empreinte> = Vec::new();
+        let fermer = |pile: &mut Vec<Empreinte>, jusqua: usize| {
+            while pile.len() > jusqua.max(1) {
+                let e = pile.pop().unwrap();
+                pile.last_mut().unwrap().enfants.push(e);
+            }
+        };
+        for l in t.lines() {
+            if l.starts_with('#') || l.trim().is_empty() {
+                continue;
+            }
+            if let Some(v) = l.strip_prefix("racine = ") {
+                racine = Some(PathBuf::from(v));
+                continue;
+            }
+            if let Some(v) = l.strip_prefix("date = ") {
+                date = v.trim().parse().ok();
+                continue;
+            }
+            let mut c = l.splitn(5, '\t');
+            let mut n = || c.next();
+            let (prof, rang, avant, taille, nom) = (n()?.parse::<usize>().ok()?, n()?.parse().ok()?, n()?.parse().ok()?, n()?.parse().ok()?, n()?.to_string());
+            if prof == 0 {
+                if !pile.is_empty() {
+                    return None;
+                }
+            } else if prof > pile.len() {
+                return None;
+            } else {
+                fermer(&mut pile, prof);
+            }
+            pile.push(Empreinte { nom, taille, rang, avant, enfants: Vec::new() });
+        }
+        fermer(&mut pile, 1);
+        Some(Synthese { racine: racine?, date: date?, arbre: pile.pop()? })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +420,24 @@ mod tests {
         // Un seuil écarte les secteurs trop étroits sans décaler les suivants
         let s = secteurs(&arbre, 1, 0.3 * tau);
         assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn la_synthese_place_les_dossiers_comme_le_graphique() {
+        let arbre = d("racine", vec![f("gros", 500), d("photos", vec![f("a", 100), d("vacances", vec![f("b", 60)]), f("c", 10)]), f("petit", 5), d("vide", vec![])]);
+        let s = Synthese { racine: "/x".into(), date: 42, arbre: Empreinte::depuis(&arbre) };
+        // Les dossiers vides et les fichiers ne sont pas gardés
+        assert_eq!(s.arbre.enfants.len(), 1);
+        assert_eq!(Synthese::lire(&s.ecrire()), Some(s.clone()));
+        let complet = placer(&arbre, &["photos", "vacances"]).unwrap();
+        let resume = situer(&s.arbre, &["photos", "vacances"]).unwrap();
+        assert_eq!(complet.arcs, resume.arcs);
+        assert_eq!(complet.teinte, resume.teinte);
+        // L'empreinte d'un sous-dossier, comme Fichiers la calcule depuis l'arbre complet
+        let parent = situer(&s.arbre, &["photos"]).unwrap();
+        let (arcs, teinte) = parent.enfant("vacances").unwrap();
+        assert_eq!((arcs, Some(teinte)), (complet.arcs.clone(), complet.teinte));
+        assert!(Synthese::lire("racine = /x\ndate = 1\n2\t0\t0\t1\tperdu\n").is_none());
     }
 
     #[test]

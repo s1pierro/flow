@@ -72,12 +72,13 @@ impl Contexte for Fichiers {
         }
         let dossier = self.dossier.clone().unwrap_or_default();
         let base = sub_id(FICHIERS, p.id as usize);
-        // Les empreintes viennent de l'analyse du stockage, lancée au besoin
-        let arbre = c.analyser().and_then(|a| a.resultat().map(|(n, _)| (n, a.racine.clone())));
-        let situation = arbre.as_ref().and_then(|(n, racine)| {
-            let rel = dossier.chemin.strip_prefix(racine).ok()?;
+        // Les empreintes viennent de la synthèse de l'analyse du stockage, enregistrée
+        // sur le disque et refaite au plus une fois par jour
+        let synthese = c.empreintes();
+        let situation = synthese.as_ref().and_then(|s| {
+            let rel = dossier.chemin.strip_prefix(&s.racine).ok()?;
             let noms: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-            disque::placer(n, &noms)
+            disque::situer(&s.arbre, &noms)
         });
         // Un défilement par dossier : en revenant au parent, on retrouve sa position
         let scroll = sub_id(base, hachage(&dossier.chemin));
@@ -137,12 +138,7 @@ impl Contexte for Fichiers {
             let joue = lecture.as_deref() == chemin.to_str();
             // L'empreinte d'un dossier : sa place dans le graphique du stockage
             let puce = match (&situation, e.dossier()) {
-                (Some(p), true) => p.noeud.enfants.iter().position(|n| n.nom == e.nom && n.dossier).map(|k| {
-                    let span = p.arcs.last().copied().unwrap_or((0.0, std::f32::consts::TAU));
-                    let mut arcs = p.arcs.clone();
-                    arcs.push(disque::arc_enfant(p.noeud, span, k));
-                    Puce::Empreinte(arcs, TEINTES[p.teinte.unwrap_or(k) % TEINTES.len()])
-                }),
+                (Some(p), true) => p.enfant(&e.nom).map(|(arcs, teinte)| Puce::Empreinte(arcs, TEINTES[teinte % TEINTES.len()])),
                 _ => None,
             };
             let puce = puce.unwrap_or(Puce::Icone(icone));

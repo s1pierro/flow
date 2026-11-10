@@ -39,7 +39,8 @@ Les contextes existants servent d'exemples, du plus simple au plus complet :
 `aide.rs` (rien à retenir), `radio.rs` (un champ de texte et le clavier),
 `mixeur.rs` (une ressource globale, une animation, deux mises en page selon la place), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
 d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
-par noms et résolu plus tard), `texte.rs` (un contexte à document : lecture,
+par noms et résolu plus tard) — l'analyse se résume dans `Commun::empreintes`, enregistrée
+dans `Flow/empreintes.txt`, que Fichiers lit sans relancer de parcours, `texte.rs` (un contexte à document : lecture,
 enregistrement, brouillons, découpage des lignes dans `src/tampon.rs`), `encre.rs`
 (une zone à gestes élaborés, un document SVG enregistré à chaque trait).
 
