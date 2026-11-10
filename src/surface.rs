@@ -7,13 +7,8 @@
 //! - Chaque fenêtre a une seule barre, en bas : l'icône et le titre de sa vue, à la
 //!   couleur d'accent, puis la ligne d'état laissée à l'application (en chasse fixe), et
 //!   la poignée dans le coin.
-//! - **Partager** : attraper la pastille + (en haut à gauche de chaque fenêtre, devant
-//!   les pastilles de l'application, qui commencent à `Placee::suite`) et la
-//!   glisser. Au-delà d'un seuil, le partage
-//!   s'engage, côte à côte si le geste est plutôt horizontal, l'une sur l'autre sinon.
-//!   Un aperçu suit le doigt, et la fenêtre se coupe au lâcher. La nouvelle fenêtre
-//!   prend la part de l'aperçu (de bord jusqu'au doigt), avec la même vue ; l'ancienne
-//!   garde le reste.
+//! - **Partager** : le menu de la barre coupe la fenêtre en deux moitiés, côte à côte
+//!   ou l'une sur l'autre ; la nouvelle montre la vue d'accueil (`Surface::scinder`).
 //! - **Redimensionner** : tirer la poignée du coin. Elle déplace le bord droit et le bord
 //!   bas de la fenêtre (les partages les plus proches qui les portent), de 10 à 90 %.
 //!   Elle montre toujours un point, et un tiret le long de chaque bord qu'elle peut
@@ -36,16 +31,14 @@ use crate::widgets::{Cx, Icon};
 pub type FenetreId = u64;
 
 /// Hauteur de la barre et des lignes du menu, en part de la taille des commandes du
-/// thème ; seuil du geste de partage (dp).
+/// thème.
 const BARRE: f32 = 0.75;
 const MENU_LIGNE: f32 = 0.875;
-const SEUIL: f32 = 64.0;
 const MENU_LARGE: f32 = 220.0;
 /// Bornes d'une proportion.
 const MIN: f32 = 0.1;
 const MAX: f32 = 0.9;
 
-const PLUS_ID: Id = id("surface/plus");
 const TITRE_ID: Id = id("surface/titre");
 const POIGNEE_ID: Id = id("surface/poignee");
 const FOND_MENU: Id = id("surface/fond-menu");
@@ -77,7 +70,8 @@ pub struct Placee {
     pub barre: Rect,
     pub titre: Rect,
     pub etat: Rect,
-    /// Où placer la première pastille de l'application : juste après la pastille +.
+    /// Où placer la première pastille de l'application : le coin haut gauche du contenu,
+    /// à la marge du thème.
     pub suite: (f32, f32),
 }
 
@@ -92,20 +86,9 @@ pub enum Changement {
     Vue { id: FenetreId, vue: u32 },
 }
 
-/// Un geste de partage en cours, sur la barre d'une fenêtre.
-#[derive(Clone, Copy, Debug)]
-struct Geste {
-    fenetre: FenetreId,
-    depart: (f32, f32),
-    doigt: (f32, f32),
-    sens: Option<Sens>,
-    vu: bool,
-}
-
 pub struct Surface {
     pub racine: Noeud,
     suivant: FenetreId,
-    geste: Option<Geste>,
     /// La poignée tirée : sa fenêtre, et l'écart du doigt aux bords droit et bas.
     tirage: Option<(FenetreId, f32, f32)>,
     menu: Option<FenetreId>,
@@ -255,7 +238,7 @@ impl Surface {
 
     fn de(racine: Noeud) -> Surface {
         let suivant = racine.max_id() + 1;
-        Surface { racine, suivant, geste: None, tirage: None, menu: None, accueil: 0, rect: Rect::default(), placees: Vec::new(), changements: Vec::new(), modifiee: false }
+        Surface { racine, suivant, tirage: None, menu: None, accueil: 0, rect: Rect::default(), placees: Vec::new(), changements: Vec::new(), modifiee: false }
     }
 
     /// Les fenêtres dans le rectangle `r` : identifiant, vue et cadre.
@@ -425,10 +408,6 @@ impl Surface {
         self.rect = r;
         let cadres = self.disposer(r);
         self.placees.clear();
-        // Le geste de partage se suit dans `dessus`, où la pastille + est déclarée
-        if let Some(g) = &mut self.geste {
-            g.vu = false;
-        }
         let mut tire = false;
         for (id, vue, c) in cadres {
             let k = id as usize;
@@ -441,8 +420,7 @@ impl Surface {
             let poignee = Rect::new((b.right() - bh).max(b.x), b.y, bh.min(b.w), bh);
             let titre = Rect::new(b.x, b.y, (8.0 * d + ic + 6.0 * d + tw + 10.0 * d).min(poignee.x - b.x), bh);
             let etat = Rect::new(titre.right(), b.y, (poignee.x - titre.right()).max(0.0), bh);
-            let h = cx.commande();
-            let suite = (c.x + cx.coin() + h + cx.ecart(), c.y + cx.coin());
+            let suite = (c.x + cx.coin(), c.y + cx.coin());
             let p = Placee { id, vue, cadre: c, contenu: Rect::new(c.x, c.y, c.w, c.h - bh), barre: b, titre, etat, suite };
             self.placees.push(p);
 
@@ -505,65 +483,9 @@ impl Surface {
         self.placees.clone()
     }
 
-    /// La pastille + de chaque fenêtre, l'aperçu du partage et le menu ouvert,
-    /// par-dessus le contenu des fenêtres.
+    /// Le menu ouvert, par-dessus le contenu des fenêtres.
     pub fn dessus(&mut self, cx: &mut Cx, vues: &[(&str, Icon)]) {
         let (d, col) = (cx.dp, cx.couleurs());
-        // La pastille + : on l'attrape et on la glisse pour partager la fenêtre
-        let taille = cx.commande();
-        let mut plus = Vec::new();
-        for p in self.placees.clone() {
-            let c = p.contenu;
-            let r = Rect::new(c.x + cx.coin(), c.y + cx.coin(), taille, taille);
-            let pk = sub_id(PLUS_ID, p.id as usize);
-            if let Some(g) = cx.ui.drag(pk, r) {
-                let geste = self.geste.get_or_insert(Geste { fenetre: p.id, depart: (g.x, g.y), doigt: (g.x, g.y), sens: None, vu: true });
-                if geste.fenetre == p.id {
-                    geste.doigt = (g.x, g.y);
-                    geste.vu = true;
-                    let (dx, dy) = (g.x - geste.depart.0, g.y - geste.depart.1);
-                    if geste.sens.is_none() && dx.hypot(dy) > SEUIL * d {
-                        geste.sens = Some(if dx.abs() > dy.abs() { Sens::Colonnes } else { Sens::Lignes });
-                    }
-                }
-            }
-            plus.push((r, cx.ui.pressed(pk)));
-        }
-        // Le doigt a lâché la pastille : le partage se fait, s'il était engagé
-        if let Some(g) = self.geste.filter(|g| !g.vu) {
-            self.geste = None;
-            if let (Some(sens), Some(p)) = (g.sens, self.placees.iter().find(|p| p.id == g.fenetre)) {
-                let c = p.cadre;
-                let ratio = match sens {
-                    Sens::Colonnes => (g.doigt.0 - c.x) / c.w.max(1.0),
-                    Sens::Lignes => (g.doigt.1 - c.y) / c.h.max(1.0),
-                };
-                self.partager(g.fenetre, sens, ratio);
-            }
-        }
-        if let Some(g) = self.geste {
-            if let (Some(sens), Some(p)) = (g.sens, self.placees.iter().find(|p| p.id == g.fenetre)) {
-                let c = p.cadre;
-                let (part, bord) = match sens {
-                    Sens::Colonnes => {
-                        let x = g.doigt.0.clamp(c.x + c.w * MIN, c.x + c.w * MAX);
-                        (Rect::new(c.x, c.y, x - c.x, c.h), Rect::new(x - d, c.y, 2.0 * d, c.h))
-                    }
-                    Sens::Lignes => {
-                        let y = g.doigt.1.clamp(c.y + c.h * MIN, c.y + c.h * MAX);
-                        (Rect::new(c.x, c.y, c.w, y - c.y), Rect::new(c.x, y - d, c.w, 2.0 * d))
-                    }
-                };
-                cx.dl.rrect(part, 0.0, [col.accent[0], col.accent[1], col.accent[2], 0x40]);
-                cx.dl.rrect(bord, 0.0, col.accent);
-            }
-        }
-        for (r, appui) in plus {
-            let rayon = cx.theme.rayon(r.h);
-            cx.ombre(r, rayon, 8.0);
-            cx.dl.rrect(r, rayon, if appui { col.accent } else { col.surface });
-            cx.icon(r.inset((cx.pad() * 0.6).min(r.w * 0.35)), Icon::Plus, if appui { col.sur_accent } else { col.accent });
-        }
         let Some(p) = self.menu.and_then(|f| self.placees.iter().find(|p| p.id == f).copied()) else {
             self.menu = None;
             return;
@@ -767,26 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn glisser_la_pastille_plus_partage_la_fenetre() {
-        let mut b = Banc::new();
-        // Vers la droite sur la barre : côte à côte, la nouvelle jusqu'au doigt
-        // (la pastille + est en haut à gauche : centre à 14 + 24 des bords)
-        b.glisser((38., 38.), (400., 50.));
-        let p = b.image();
-        assert_eq!(p.len(), 2);
-        assert_eq!(p[0].cadre, Rect::new(0., 0., 400., 800.));
-        assert_eq!(p[0].id, 2);
-        // Vers le bas avec la pastille de droite : l'une sur l'autre
-        b.glisser((438., 38.), (438., 300.));
-        let p = b.image();
-        assert_eq!(p.len(), 3);
-        assert_eq!(p[1].cadre, Rect::new(400., 0., 600., 300.));
-        // Un geste trop court ne partage pas
-        b.glisser((438., 38.), (468., 38.));
-        assert_eq!(b.image().len(), 3);
-    }
-
-    #[test]
     fn le_menu_change_la_vue_et_ferme() {
         let mut b = Banc::new();
         b.s.partager(1, Sens::Colonnes, 0.5);
@@ -846,7 +748,7 @@ mod tests {
         assert_eq!(p[0].titre.x, 0.);
         assert_eq!(p[0].etat.x, p[0].titre.right());
         assert_eq!(p[0].etat.right(), 464.);
-        assert_eq!(p[1].suite, (500. + 14. + 48. + 10., 14.));
+        assert_eq!(p[1].suite, (500. + 14., 14.));
     }
 
     #[test]

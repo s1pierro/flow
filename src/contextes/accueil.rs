@@ -71,9 +71,8 @@ impl Contexte for Accueil {
         cx.dl.rrect(r, 0.0, col.surface);
         let scroll = sub_id(ACCUEIL, p.id as usize);
         let mut b = cx.body(scroll, r, &c.scrolls);
-        // Le titre, à droite de la pastille + de la fenêtre, et les cartes sous elle
-        let haut = cx.coin() + cx.commande();
-        cx.text_at(b.x + haut, b.y + haut / 2.0 + cx.coin() / 2.0, "Contextes", 20.0, col.texte);
+        let haut = (40.0 * d * cx.theme.texte).round();
+        cx.text_at(b.x, b.y + haut / 2.0, "Contextes", 20.0, col.texte);
         b.y += haut + cx.ecart();
         let genres: Vec<&Genre> = GENRES.iter().filter(|g| g.cle != CLE).collect();
         let ecart = cx.ecart().max(8.0 * d);

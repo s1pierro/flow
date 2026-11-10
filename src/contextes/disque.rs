@@ -95,8 +95,7 @@ impl Contexte for VueDisque {
         if let Some((total, libre)) = disque::espace(&racine) {
             let utilise = total.saturating_sub(libre);
             let t = format!("{} utilisés sur {} · {} libres", explorateur::taille(utilise), explorateur::taille(total), explorateur::taille(libre));
-            // À droite de la pastille + du coin de la fenêtre
-            let x0 = r.x + cx.coin() + cx.commande() + cx.ecart();
+            let x0 = r.x + marge;
             cx.clip(Some(r));
             cx.text_at(x0, haut + ligne * 0.35, &t, 14.0, col.texte);
             let barre = Rect::new(x0, haut + ligne * 0.7, (r.right() - marge - x0).max(0.0), 6.0 * d);

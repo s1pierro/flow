@@ -398,7 +398,7 @@ impl App {
                 cx.tabs(id("onglets-aide"), tabs.x, tabs.y, &["Aide"], 0);
                 let mut b = cx.body(id("corps-aide"), body, &c.scrolls);
                 cx.section(&mut b, "FENÊTRES");
-                cx.paragraph(&mut b, "Glissez la pastille + d'une fenêtre pour la partager ; touchez son titre pour choisir son contexte ou la fermer.");
+                cx.paragraph(&mut b, "Touchez le titre d'une fenêtre pour choisir son contexte, la partager en deux ou la fermer.");
                 cx.section(&mut b, "PANNEAU");
                 cx.paragraph(&mut b, "Les pastilles de la barre du bas ouvrent ce panneau : à propos, paramètres de l'application, aide. L'espace de travail s'adapte à la place restante.");
                 cx.paragraph(&mut b, "Glissez la frontière du panneau pour le redimensionner ; un double appui rétablit sa taille.");

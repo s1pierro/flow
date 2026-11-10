@@ -212,8 +212,9 @@ fenêtre) montre les autres contextes en cartes ; toucher une carte envoie un
 `Demande::Ouvrir` pour sa propre fenêtre. Le menu de la barre d'une fenêtre porte, au-dessus de
 « Fermer la fenêtre », deux icônes : partager côte à côte ou l'une sous l'autre
 (`Surface::scinder`, en deux moitiés). La nouvelle fenêtre montre `Surface::accueil`
-avec une instance neuve (`Changement::Nouvelle`), alors que la pastille + glissée
-copie l'instance (`Changement::Partagee`).
+avec une instance neuve (`Changement::Nouvelle`). `Surface::partager` (sans vue
+donnée) copie l'instance (`Changement::Partagee`, `Contexte::dupliquer`) ; plus rien
+ne s'en sert dans l'interface depuis le retrait de la pastille +.
 
 ## Ouvrir un contexte depuis un autre
 

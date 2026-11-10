@@ -79,7 +79,7 @@ impl Contexte for Mixeur {
         let base = sub_id(MIXEUR, p.id as usize);
         let pistes = mixeur().pistes();
         let n = pistes.len() + 1;
-        // L'en-tête : à droite de la pastille + de la fenêtre
+        // L'en-tête, puis les tranches
         let h = cx.commande();
         let haut = h + 2.0 * cx.coin();
         let zone = Rect::new(r.x + cx.coin(), r.y + haut, r.w - 2.0 * cx.coin(), r.h - haut - cx.coin());
@@ -110,7 +110,7 @@ impl Contexte for Mixeur {
 /// La voie d'essai et l'état de la sortie, en haut.
 fn entete(cx: &mut Cx, r: Rect, base: Id) {
     let (d, col, h) = (cx.dp, cx.couleurs(), cx.commande());
-    let x = r.x + 2.0 * cx.coin() + h;
+    let x = r.x + cx.coin();
     let y = r.y + cx.coin();
     let essai = mixage::essai_actif();
     let label = "Voie d'essai";
@@ -259,8 +259,6 @@ fn tranche_generale(cx: &mut Cx, r: Rect, base: Id) {
 fn liste(cx: &mut Cx, c: &mut Commun, r: Rect, base: Id, pistes: &[Piste]) {
     let scroll = sub_id(base, 3);
     let mut b = cx.body(scroll, Rect::new(r.x, r.y, r.w, r.h), &c.scrolls);
-    // La première ligne laisse la pastille + de la fenêtre
-    b.y += cx.commande() + cx.coin();
     let m = mixeur();
     let mut essai = mixage::essai_actif();
     cx.toggle(&mut b, sub_id(scroll, 3), "Voie d'essai (arpège)", &mut essai);

@@ -91,8 +91,7 @@ impl Contexte for Fichiers {
         let etapes = explorateur::ariane(&dossier.chemin, c.racine.as_deref());
         let sep = "  ›  ";
         let largeur: f32 = etapes.iter().map(|(n, _)| cx.measure(n, 15.0)).sum::<f32>() + cx.measure(sep, 15.0) * (etapes.len() as f32 - 1.0);
-        // La pastille + de la fenêtre occupe le coin haut gauche : le fil part à sa droite
-        let x0 = (r.x + cx.coin() + cx.commande() + cx.ecart()).max(b.x);
+        let x0 = b.x;
         let place = b.x + b.w - x0;
         let mut x = x0 + (place - largeur).min(0.0);
         cx.clip(Some(Rect::new(x0, b.y, place.max(0.0), ligne).intersect(&b.rect())));
