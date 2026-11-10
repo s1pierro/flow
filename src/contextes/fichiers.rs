@@ -8,7 +8,7 @@
 //! place dans la synthèse du stockage) ou le badge du type MIME d'un fichier, à
 //! droite le nom, une légende (taille, part du parent ou type) et la date.
 
-use super::{abreger, empreinte, hachage, ligne_fichier, Puce, TEINTES};
+use super::{abreger, empreinte, hachage, TEINTES};
 use crate::contexte::{Commun, Contexte, Demande, Etat, Genre};
 use crate::disque;
 use crate::draw::Rect;
@@ -127,39 +127,43 @@ impl Contexte for Fichiers {
         let lecture = radio::lecteur_fichiers().adresse.clone();
         let ligne = (cx.theme.ligne * d).round();
         let mut aller: Option<PathBuf> = None;
-        let mut b = cx.body(scroll, r, &c.scrolls);
-
-        // Le fil d'Ariane : chaque étape s'ouvre au toucher ; trop long, on voit la fin
+        // Le fil d'Ariane, fixe en haut de la fenêtre : chaque étape s'ouvre au toucher
+        // (c'est par lui qu'on remonte) ; trop long, on voit la fin
+        let pad = 14.0 * d;
+        let bande = Rect::new(r.x, r.y, r.w, (ligne + 8.0 * d).min(r.h));
+        cx.ui.region_add(sub_id(base, 999_997), bande, crate::ui::Sense::Sink);
         let etapes = explorateur::ariane(&dossier.chemin, c.racine.as_deref());
         let sep = "  ›  ";
         let largeur: f32 = etapes.iter().map(|(n, _)| cx.measure(n, 15.0)).sum::<f32>() + cx.measure(sep, 15.0) * (etapes.len() as f32 - 1.0);
-        let x0 = b.x;
-        let place = b.x + b.w - x0;
+        let x0 = bande.x + pad;
+        let place = (bande.right() - pad - x0).max(0.0);
         let mut x = x0 + (place - largeur).min(0.0);
-        cx.clip(Some(Rect::new(x0, b.y, place.max(0.0), ligne).intersect(&b.rect())));
+        let cy = bande.y + 4.0 * d + ligne / 2.0;
+        cx.clip(Some(Rect::new(x0, bande.y, place, bande.h)));
         for (i, (nom, chemin)) in etapes.iter().enumerate() {
             let w = cx.measure(nom, 15.0);
-            let zone = Rect::new(x - 4.0 * d, b.y, w + 8.0 * d, ligne);
+            let zone = Rect::new(x - 4.0 * d, bande.y, w + 8.0 * d, bande.h);
             let derniere = i + 1 == etapes.len();
-            if cx.ui.click(sub_id(base, 1_000_000 + i), zone, Some(b.id())) && !derniere {
+            let k = sub_id(base, 1_000_000 + i);
+            if cx.ui.click(k, zone, None) && !derniere {
                 aller = Some(chemin.clone());
             }
-            cx.text_at(x, b.y + ligne / 2.0, nom, 15.0, if derniere { col.texte } else { col.accent });
+            if cx.ui.pressed(k) && !derniere {
+                cx.dl.rrect(zone.inset(4.0 * d), 6.0 * d, col.puce);
+            }
+            cx.text_at(x, cy, nom, 15.0, if derniere { col.texte } else { col.accent });
             x += w;
             if !derniere {
-                cx.text_at(x, b.y + ligne / 2.0, sep, 15.0, col.pale);
+                cx.text_at(x, cy, sep, 15.0, col.pale);
                 x += cx.measure(sep, 15.0);
             }
         }
-        cx.clip(Some(b.rect()));
-        b.y += ligne;
-        cx.dl.rrect(Rect::new(b.rect().x, b.y, b.rect().w, d.max(1.0)), 0.0, col.ligne);
-
-        if let Some(parent) = dossier.chemin.parent() {
-            if ligne_fichier(cx, &mut b, sub_id(base, 999_999), Puce::Icone(Icon::Haut), "Dossier parent", "", false) {
-                aller = Some(parent.to_path_buf());
-            }
-        }
+        cx.clip(None);
+        cx.dl.rrect(Rect::new(bande.x, bande.bottom() - d.max(1.0), bande.w, d.max(1.0)), 0.0, col.ligne);
+        // Sous le fil, les entrées défilent
+        let corps = Rect::new(r.x, bande.bottom(), r.w, (r.h - bande.h).max(0.0));
+        let mut b = cx.body(scroll, corps, &c.scrolls);
+        b.y -= 8.0 * d;
         if let Some(e) = &dossier.erreur {
             let aide = if e == "Accès refusé" { format!("{e}. Pour parcourir tout le stockage, accordez à Flow l'accès à tous les fichiers dans les réglages d'Android.") } else { format!("{e}.") };
             cx.paragraph(&mut b, &aide);
