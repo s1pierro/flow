@@ -34,6 +34,10 @@ struct Shot {
 /// Où toucher le dessin SVG d'essai pour choisir le groupe tourné.
 const SVG_TAP: (f32, f32) = (700.0, 600.0);
 
+/// Les touchers de l'aperçu `svg-simplifier` : la tache tremblée, « Simplifier »,
+/// un écart de 1, « Courbes ».
+const SIMPLIFIER: [(f32, f32); 4] = [(960.0, 560.0), (242.0, 1023.0), (549.0, 942.0), (835.0, 942.0)];
+
 /// Les touchers de l'aperçu `svg-sommets` : la pilule, la forme, un sommet, puis un
 /// sommet à tirer.
 const SOMMETS: [(f32, f32); 4] = [(210.0, 944.0), (750.0, 445.0), (746.0, 384.0), (746.0, 384.0)];
@@ -62,6 +66,7 @@ fn main() {
         Shot { name: "svg-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "svg-source", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 7 },
         Shot { name: "svg-sommets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 8 },
+        Shot { name: "svg-simplifier", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 10 },
         Shot { name: "argile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
         Shot { name: "argile-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -173,7 +178,26 @@ fn main() {
             // Fichiers sur le projet, trié par taille : un appui long sélectionne, un toucher ajoute
             app.ouvrir_espace(&format!("fenetres = F1:fichiers\n[fenetre 1]\ndossier = {}\ntri = Taille\n", env!("CARGO_MANIFEST_DIR")));
         }
-        if s.name.starts_with("svg") {
+        if s.name == "svg-simplifier" {
+            // Une tache et une vague tracées à main levée (tremblées, très denses)
+            let d = std::env::temp_dir().join("flow-apercu-svg");
+            let _ = std::fs::create_dir_all(&d);
+            let f = d.join("main-levee.svg");
+            let mut tache = String::new();
+            for k in 0..=240 {
+                let a = k as f32 / 240.0 * std::f32::consts::TAU;
+                let r = 70.0 + 12.0 * (3.0 * a).sin() + 0.6 * (k as f32 * 2.3).sin();
+                tache += &format!("{}{:.1} {:.1}", if k == 0 { "M" } else { " L" }, 200.0 + r * a.cos(), 150.0 + r * a.sin());
+            }
+            let mut vague = String::new();
+            for k in 0..=200 {
+                let x = 40.0 + k as f32 * 1.6;
+                let y = 265.0 + 14.0 * (x / 30.0).sin() + 0.5 * (k as f32 * 1.9).sin() + if x > 200.0 { 0.0 } else { (200.0 - x) * 0.1 };
+                vague += &format!("{}{:.1} {:.1}", if k == 0 { "M" } else { " L" }, x, y);
+            }
+            std::fs::write(&f, format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 400 300\" width=\"400\" height=\"300\">\n<g stroke-linecap=\"round\" stroke-linejoin=\"round\">\n<path d=\"{tache} Z\" fill=\"#facc15\" stroke=\"#1e1e25\" stroke-width=\"3\"/>\n<path d=\"{vague}\" fill=\"none\" stroke=\"#2563eb\" stroke-width=\"4\"/>\n</g>\n</svg>\n")).unwrap();
+            app.ouvrir_espace(&format!("fenetres = F1:svg\n[fenetre 1]\ndocument = {}\nsimplifier = 0 0\n", f.display()));
+        } else if s.name.starts_with("svg") {
             // Un dessin d'essai : groupe tourné, chemin à arcs et courbes, dégradé, texte
             let d = std::env::temp_dir().join("flow-apercu-svg");
             let _ = std::fs::remove_dir_all(&d);
@@ -256,6 +280,9 @@ fn main() {
                     let k = (i - 40) as f32;
                     ui.event(Event::Move { id: 0, x: SOMMETS[3].0 + 22.0 * k, y: SOMMETS[3].1 - 6.0 * k }, t)
                 }
+                // La tache, « Simplifier », un écart, « Courbes »
+                (10, 10 | 20 | 30 | 40) if SIMPLIFIER[(i / 10 - 1) as usize].0 > 0.0 => ui.event(Event::Down { id: 0, x: SIMPLIFIER[(i / 10 - 1) as usize].0, y: SIMPLIFIER[(i / 10 - 1) as usize].1 }, t),
+                (10, 11 | 21 | 31 | 41) => ui.event(Event::Up { id: 0 }, t),
                 // Trois traits sur la boule, le dernier en cours (le pinceau se voit)
                 (9, 5 | 20 | 35) => {
                     let k = (i / 15) as f32;

@@ -22,8 +22,15 @@
 //!   s'applique à la sélection, et aux formes qu'on trace ensuite.
 //! - **Une sélection** montre sa boîte, quatre poignées d'angle pour l'agrandir
 //!   (l'angle opposé reste en place) et une poignée ronde au-dessus pour la tourner ;
-//!   et ses actions : Dupliquer, Supprimer, Monter, Descendre, Fin. Les retouches
-//!   s'écrivent dans l'attribut `transform`.
+//!   et ses actions : Dupliquer, Simplifier, Supprimer, Monter, Descendre, Fin. Les
+//!   retouches s'écrivent dans l'attribut `transform`.
+//! - **Simplifier** (une sélection, ou la forme de l'outil Sommets) retire les sommets
+//!   inutiles des chemins, polygones et polylignes qu'elle contient
+//!   (`svg::simplifier`), en aperçu : « Sans perte » d'abord, puis un écart permis
+//!   (en unités du dessin) et « Courbes » pour remplacer les suites de droites par des
+//!   courbes ajustées. Les sommets restants sont montrés, et leur compte ;
+//!   « Appliquer » garde le résultat, « Annuler » (ou toute autre action) y renonce.
+//!   Le dernier réglage est retenu.
 //! - **En haut** : annuler, rétablir (l'historique dure la session), le nom, « Source »
 //!   (le code du dessin dans l'éditeur de texte, coloré ; « Dessin » y revient en le
 //!   relisant, ou dit l'erreur), « Enregistrer ».
@@ -39,7 +46,7 @@ use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
 use crate::gestes::Geste;
 use crate::surface::{FenetreId, Placee};
-use crate::svg::{self, Document, Forme, Matrice, Morceau, Repere, P};
+use crate::svg::{self, Document, Forme, Matrice, Morceau, Repere, Simplification, P};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
@@ -57,6 +64,18 @@ const BROUILLONS: &str = "brouillons";
 const ZOOM: (f32, f32) = (0.02, 50.0);
 const HISTORIQUE: usize = 200;
 const PAPIER: Color = [0xFF, 0xFF, 0xFF, 255];
+/// Les écarts proposés pour « Simplifier », en unités du dessin (0 : sans perte).
+const TOLERANCES: [f32; 7] = [0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0];
+
+/// Une simplification en aperçu : sur quoi, le document d'origine (et écrit, pour
+/// l'historique), et les sommets avant et après.
+#[derive(Clone, Debug)]
+struct Apercu {
+    noeud: usize,
+    origine: Document,
+    avant: String,
+    compte: (usize, usize),
+}
 
 /// Les couleurs proposées (la dernière case est « Aucun »).
 const COULEURS: [Color; 10] = [
@@ -119,6 +138,12 @@ enum Commande {
     RetirerSommet,
     Basculer,
     OuvrirFermer,
+    Simplifier,
+    /// L'écart permis : un indice de `TOLERANCES`.
+    Tolerance(usize),
+    Courbes,
+    Appliquer,
+    Renoncer,
 }
 
 /// Un doigt qui travaille : trace une forme, ou déplace la sélection.
@@ -190,6 +215,10 @@ pub struct Svg {
     pincement: f32,
     /// La source, ouverte dans l'éditeur de texte, et le texte qu'elle avait au départ.
     source: Option<(Texte, String)>,
+    /// La simplification en aperçu, et son réglage (retenu).
+    apercu: Option<Apercu>,
+    tolerance: usize,
+    courbes: bool,
 }
 
 impl Default for Svg {
@@ -224,6 +253,9 @@ impl Default for Svg {
             saisie: Edition::default(),
             pincement: 1.0,
             source: None,
+            apercu: None,
+            tolerance: 0,
+            courbes: false,
         }
     }
 }
@@ -236,6 +268,10 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         nom: Edition::new(e.texte("nom").unwrap_or("")),
         ..Svg::default()
     };
+    if let [t, c] = e.nombres("simplifier")[..] {
+        s.tolerance = (t.max(0.0) as usize).min(TOLERANCES.len() - 1);
+        s.courbes = c != 0.0;
+    }
     if let [x, y, z] = v[..] {
         s.vue = Vue { x, y, zoom: z.clamp(ZOOM.0, ZOOM.1) };
         s.cadrer = false;
@@ -331,6 +367,11 @@ impl Svg {
     }
 
     fn defaire(&mut self, retablir: bool) {
+        // Pendant un aperçu, annuler y renonce seulement
+        if self.apercu.is_some() {
+            self.conclure_simplification(false);
+            return;
+        }
         let (de, vers) = if retablir { (&mut self.futur, &mut self.passe) } else { (&mut self.passe, &mut self.futur) };
         let Some(t) = de.pop() else { return };
         vers.push(self.doc.ecrire());
@@ -457,6 +498,8 @@ impl Svg {
     }
 
     fn enregistrer(&mut self, c: &Commun) -> Result<(), String> {
+        // Ce qu'on voit est ce qu'on enregistre
+        self.conclure_simplification(true);
         let chemin = self.destination(c)?;
         super::texte::ecrire_fichier(&chemin, &self.texte())?;
         self.chemin = Some(chemin);
@@ -477,6 +520,7 @@ impl Svg {
 
     /// Ouvre la source dans l'éditeur de texte.
     fn ouvrir_source(&mut self) {
+        self.conclure_simplification(true);
         let t = self.doc.ecrire();
         self.source = Some((Texte::integre("source.svg", &t), t));
         self.travail = None;
@@ -616,7 +660,22 @@ impl Svg {
     }
 
     fn commander(&mut self, c: Commande) {
+        // Toute autre action renonce à l'aperçu en cours
+        if self.apercu.is_some() && !matches!(c, Commande::Tolerance(_) | Commande::Courbes | Commande::Appliquer | Commande::Renoncer | Commande::Cadrer) {
+            self.conclure_simplification(false);
+        }
         match c {
+            Commande::Simplifier => self.ouvrir_simplification(),
+            Commande::Tolerance(i) => {
+                self.tolerance = i.min(TOLERANCES.len() - 1);
+                self.simplifier_apercu();
+            }
+            Commande::Courbes => {
+                self.courbes = !self.courbes;
+                self.simplifier_apercu();
+            }
+            Commande::Appliquer => self.conclure_simplification(true),
+            Commande::Renoncer => self.conclure_simplification(false),
             Commande::Outil(o) => {
                 self.outil = o;
                 self.sommets.clear();
@@ -689,6 +748,52 @@ impl Svg {
         }
     }
 
+    /// Vrai si la sélection contient de quoi simplifier.
+    fn simplifiable(&self) -> bool {
+        let Some(k) = self.selection else { return false };
+        (0..self.doc.noeuds.len()).any(|n| matches!(self.doc.noeuds[n].nom.as_str(), "path" | "polygon" | "polyline") && self.doc.sous(n, k))
+    }
+
+    /// Le réglage courant de « Simplifier ».
+    fn simplification(&self) -> Simplification {
+        match TOLERANCES[self.tolerance] {
+            0.0 => Simplification::SANS_PERTE,
+            e => Simplification { tolerance: e, courbes: self.courbes },
+        }
+    }
+
+    /// Ouvre l'aperçu de la simplification de la sélection.
+    fn ouvrir_simplification(&mut self) {
+        let Some(k) = self.selection else { return };
+        self.apercu = Some(Apercu { noeud: k, origine: self.doc.clone(), avant: self.doc.ecrire(), compte: (0, 0) });
+        self.travail = None;
+        self.prise = None;
+        self.simplifier_apercu();
+    }
+
+    /// Refait l'aperçu depuis l'original, au réglage courant.
+    fn simplifier_apercu(&mut self) {
+        let s = self.simplification();
+        let Some(a) = &mut self.apercu else { return };
+        let mut d = a.origine.clone();
+        a.compte = d.simplifier(a.noeud, s);
+        self.doc = d;
+        self.retouche();
+    }
+
+    /// Ferme l'aperçu : garde la simplification (retenue pour annuler) ou y renonce.
+    fn conclure_simplification(&mut self, garder: bool) {
+        let Some(a) = self.apercu.take() else { return };
+        if garder && self.doc != a.origine {
+            self.noter(a.avant);
+            self.pointe = None;
+            self.message = Some((format!("Simplifié : de {} à {} sommets", a.compte.0, a.compte.1), false));
+        } else {
+            self.doc = a.origine;
+            self.retouche();
+        }
+    }
+
     /// Emmène un repère du tracé choisi en `p` (dans le dessin), sans le retenir
     /// pour annuler (c'est fait à la fin de la saisie).
     fn emmener(&mut self, r: Repere, p: P) {
@@ -701,6 +806,11 @@ impl Svg {
     /// Un geste sur le dessin.
     fn recevoir(&mut self, g: Geste, c: &mut Commun, k: usize) {
         let tolerance = 10.0 / self.vue.zoom;
+        // Toucher le dessin pendant un aperçu y renonce (naviguer à deux doigts non)
+        if self.apercu.is_some() && matches!(g, Geste::Tap { .. } | Geste::Appui { .. } | Geste::AppuiLong { .. } | Geste::SaisieDebut { .. }) {
+            self.conclure_simplification(false);
+            return;
+        }
         match g {
             Geste::Tap { x, y, .. } | Geste::Appui { x, y, .. } => {
                 let p = self.vers_dessin(x, y);
@@ -919,7 +1029,10 @@ impl Svg {
         if sel.is_none() {
             self.selection = None;
         }
-        if self.outil == Outil::Sommets {
+        if self.apercu.is_some() {
+            self.prise = None;
+            self.montrer_apercu(cx);
+        } else if self.outil == Outil::Sommets {
             self.prise = None;
             if sel.is_some() {
                 self.montrer_sommets(cx);
@@ -1004,6 +1117,25 @@ impl Svg {
 
     /// Le tracé choisi (outil Sommets) : son contour, ses sommets, ses contrôles et
     /// leurs tiges.
+    /// Pendant un aperçu de simplification : les sommets qui restent.
+    fn montrer_apercu(&mut self, cx: &mut Cx) {
+        let Some(k) = self.apercu.as_ref().map(|a| a.noeud) else { return };
+        let (d, col) = (cx.dp, cx.couleurs());
+        let rc = 3.5 * d;
+        for n in 0..self.doc.noeuds.len() {
+            if !matches!(self.doc.noeuds[n].nom.as_str(), "path" | "polygon" | "polyline") || !self.doc.sous(n, k) {
+                continue;
+            }
+            let Some(t) = svg::trace_de(&self.doc.noeuds[n]) else { continue };
+            let m = self.doc.ctm(n);
+            for p in t.iter().filter_map(Morceau::fin) {
+                let q = self.vers_ecran(m.appliquer(p));
+                cx.dl.rrect(Rect::new(q[0] - rc, q[1] - rc, 2.0 * rc, 2.0 * rc), d, col.accent);
+                cx.dl.rrect(Rect::new(q[0] - rc + d, q[1] - rc + d, 2.0 * (rc - d), 2.0 * (rc - d)), d * 0.5, PAPIER);
+            }
+        }
+    }
+
     fn montrer_sommets(&mut self, cx: &mut Cx) {
         let Some((k, t, m)) = self.trace_choisi() else { return };
         let (d, col) = (cx.dp, cx.couleurs());
@@ -1081,7 +1213,21 @@ impl Svg {
             }
         }
         g.push(style);
-        if self.outil == Outil::Sommets {
+        if let Some(a) = &self.apercu {
+            let mut v: Vec<(Commande, String, bool)> = TOLERANCES
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (Commande::Tolerance(i), if *e == 0.0 { "Sans perte".to_string() } else { format!("± {}", svg::nombre(*e).replace('.', ",")) }, i == self.tolerance))
+                .collect();
+            if self.tolerance > 0 {
+                v.push((Commande::Courbes, "Courbes".into(), self.courbes));
+            }
+            g.push(v);
+            g.push(vec![
+                (Commande::Appliquer, format!("Appliquer · de {} à {} sommets", a.compte.0, a.compte.1), true),
+                (Commande::Renoncer, "Annuler".into(), false),
+            ]);
+        } else if self.outil == Outil::Sommets {
             if let Some((_, t, _)) = self.trace_choisi() {
                 let mut v = Vec::new();
                 if let Some(i) = self.pointe.filter(|i| t.get(*i).is_some_and(|m| m.fin().is_some())) {
@@ -1091,17 +1237,24 @@ impl Svg {
                     }
                     v.push((Commande::OuvrirFermer, if svg::est_ferme(&t, i) { "Ouvrir" } else { "Fermer" }.into(), false));
                 }
+                if self.simplifiable() {
+                    v.push((Commande::Simplifier, "Simplifier".into(), false));
+                }
                 v.push((Commande::Fin, "Fin".into(), false));
                 g.push(v);
             }
         } else if self.selection.is_some() {
-            g.push(vec![
-                (Commande::Dupliquer, "Dupliquer".into(), false),
+            let mut v = vec![(Commande::Dupliquer, "Dupliquer".to_string(), false)];
+            if self.simplifiable() {
+                v.push((Commande::Simplifier, "Simplifier".into(), false));
+            }
+            v.extend([
                 (Commande::Supprimer, "Supprimer".into(), false),
                 (Commande::Monter, "Monter".into(), false),
                 (Commande::Descendre, "Descendre".into(), false),
                 (Commande::Fin, "Fin".into(), false),
             ]);
+            g.push(v);
         }
         g
     }
@@ -1279,6 +1432,7 @@ impl Contexte for Svg {
         if self.charge {
             e.mettre("vue", format!("{} {} {}", svg::nombre(self.vue.x), svg::nombre(self.vue.y), self.vue.zoom));
         }
+        e.mettre("simplifier", format!("{} {}", self.tolerance, self.courbes as u8));
     }
 
     fn retour(&mut self, _c: &Commun) {
@@ -1354,6 +1508,10 @@ impl Contexte for Svg {
             return format!("Source · {etat}");
         }
 
+        // L'aperçu suit sa sélection
+        if self.apercu.as_ref().is_some_and(|a| Some(a.noeud) != self.selection) {
+            self.conclure_simplification(false);
+        }
         // La barre du bas, puis le dessin au-dessus
         let (hb, _) = self.barre(cx, Rect::new(r.x, 0.0, r.w, 0.0), k, false);
         let hb = hb.min(corps.h * 0.6);
@@ -1542,6 +1700,45 @@ mod tests {
         v.charger();
         assert!(v.source.is_some());
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn simplifier_en_apercu() {
+        let mut s = pret();
+        s.doc = Document::lire(r##"<svg viewBox="0 0 800 600"><g><path d="M0 0 L50 0 L100 0 L100 0.3 L100 100" fill="none" stroke="#000"/><polyline points="0 200 50 200.05 100 200" fill="none" stroke="#000"/></g><rect width="10" height="10"/></svg>"##).unwrap();
+        s.retouche();
+        toucher(&mut s, (50.0, 0.0));
+        let g = s.selection.unwrap();
+        assert_eq!(s.doc.noeuds[g].nom, "g");
+        assert!(s.commandes().iter().flatten().any(|c| c.0 == Commande::Simplifier));
+        // Sans perte d'abord : seuls les sommets alignés s'en vont
+        s.commander(Commande::Simplifier);
+        assert_eq!(s.apercu.as_ref().unwrap().compte, (8, 6));
+        assert!(s.commandes().iter().flatten().any(|c| c.1 == "Appliquer · de 8 à 6 sommets"));
+        // Un écart de 0,5 : le petit crochet de la polyligne s'en va aussi
+        s.commander(Commande::Tolerance(3));
+        assert_eq!(s.apercu.as_ref().unwrap().compte, (8, 5));
+        // Annuler rend l'original, sans rien noter
+        s.commander(Commande::Renoncer);
+        assert!(s.apercu.is_none() && s.passe.is_empty());
+        assert!(s.doc.ecrire().contains("L50 0"));
+        // Le réglage est retenu ; appliquer se note et s'annule
+        s.commander(Commande::Simplifier);
+        assert_eq!(s.apercu.as_ref().unwrap().compte, (8, 5));
+        s.commander(Commande::Appliquer);
+        assert_eq!(s.passe.len(), 1);
+        let e = s.doc.ecrire();
+        assert!(e.contains("d=\"M0 0 L100 0 L100 100\"") && e.contains("points=\"0,200 100,200\""), "{e}");
+        let mut et = Etat::default();
+        s.ecrire(&mut et);
+        assert_eq!(et.nombres("simplifier"), vec![3.0, 0.0]);
+        s.defaire(false);
+        assert!(s.doc.ecrire().contains("L50 0"));
+        // Une autre action pendant l'aperçu y renonce
+        s.selection = Some(g);
+        s.commander(Commande::Simplifier);
+        s.commander(Commande::Monter);
+        assert!(s.apercu.is_none() && s.doc.ecrire().contains("L50 0"));
     }
 
     #[test]

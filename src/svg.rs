@@ -1643,6 +1643,435 @@ pub fn est_ferme(t: &[Morceau], i: usize) -> bool {
     t[fin - 1] == Morceau::Fermer
 }
 
+// --- La simplification des tracés ------------------------------------------------
+
+/// La tolérance « sans perte » : la moitié de la précision à laquelle `nombre`
+/// écrit (trois décimales). Un sommet qui s'écarte moins que cela du tracé simplifié
+/// ne change rien au fichier qu'on relira.
+pub const SANS_PERTE: f32 = 5e-4;
+
+/// Au-delà de ce virage (en degrés), un sommet est un angle vif : les courbes
+/// ajustées s'y arrêtent au lieu de l'arrondir.
+const ANGLE_VIF: f32 = 60.0;
+
+/// Comment simplifier un tracé.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Simplification {
+    /// L'écart permis entre le tracé simplifié et l'original, dans les unités du
+    /// tracé. `SANS_PERTE` (ou moins) : aucun écart visible.
+    pub tolerance: f32,
+    /// Remplacer les suites de droites (et de courbes) par des courbes de Bézier
+    /// ajustées. Sans effet sans perte.
+    pub courbes: bool,
+}
+
+impl Simplification {
+    pub const SANS_PERTE: Simplification = Simplification { tolerance: SANS_PERTE, courbes: false };
+}
+
+/// Le nombre de sommets d'un tracé.
+pub fn sommets(t: &[Morceau]) -> usize {
+    t.iter().filter(|m| m.fin().is_some()).count()
+}
+
+/// Douglas-Peucker : les indices des points gardés (le premier et le dernier
+/// toujours) pour qu'aucun point retiré ne s'écarte de plus de `tol` du tracé gardé.
+/// L'écart se mesure au segment, pas à la droite : un aller-retour se garde.
+pub fn douglas_peucker(points: &[P], tol: f32) -> Vec<usize> {
+    let n = points.len();
+    if n <= 2 {
+        return (0..n).collect();
+    }
+    let mut garde = vec![false; n];
+    garde[0] = true;
+    garde[n - 1] = true;
+    let mut pile = vec![(0, n - 1)];
+    while let Some((a, b)) = pile.pop() {
+        let mut loin = (0.0f32, 0);
+        for i in a + 1..b {
+            let e = distance_segment(points[i], points[a], points[b]);
+            if e > loin.0 {
+                loin = (e, i);
+            }
+        }
+        if loin.0 > tol {
+            garde[loin.1] = true;
+            pile.push((a, loin.1));
+            pile.push((loin.1, b));
+        }
+    }
+    (0..n).filter(|i| garde[*i]).collect()
+}
+
+/// Simplifie un tracé : retire les morceaux de longueur nulle, redresse les courbes
+/// droites, retire les sommets qui ne s'écartent pas de plus de la tolérance (le
+/// long des suites de droites), et, avec `courbes`, ajuste des courbes de Bézier sur
+/// ces suites en gardant les angles vifs. Les arcs et la fermeture restent ; chaque
+/// sous-chemin garde au moins un segment.
+pub fn simplifier(t: &[Morceau], s: Simplification) -> Vec<Morceau> {
+    let tol = s.tolerance.max(0.0);
+    let courbes = s.courbes && tol > SANS_PERTE;
+    let mut out = Vec::with_capacity(t.len());
+    let mut i = 0;
+    while i < t.len() {
+        let (debut, fin) = sous_chemin(t, i);
+        simplifier_sous_chemin(&t[debut..fin], tol, courbes, &mut out);
+        i = fin;
+    }
+    out
+}
+
+/// Ce qu'une suite de points devient : droites gardées par Douglas-Peucker, ou
+/// courbes ajustées.
+fn suite(points: &[P], tol: f32, courbes: bool, out: &mut Vec<Morceau>) {
+    if points.len() < 2 {
+        return;
+    }
+    let gardes = douglas_peucker(points, tol);
+    if !courbes || gardes.len() <= 2 {
+        out.extend(gardes[1..].iter().map(|k| Morceau::Droite(points[*k])));
+        return;
+    }
+    // Les angles vifs (parmi les sommets gardés) coupent la suite en morceaux lisses.
+    // Le virage se mesure entre des points à quelques tolérances de part et d'autre,
+    // pour ne pas prendre le tremblé pour un angle.
+    let portee = tol * 4.0;
+    let loin = |k: usize, avant: bool| -> P {
+        let mut j = k;
+        loop {
+            let suivant = if avant { j.checked_sub(1) } else { (j + 1 < points.len()).then_some(j + 1) };
+            let Some(s) = suivant else { return points[j] };
+            j = s;
+            if dist(points[j], points[k]) >= portee {
+                return points[j];
+            }
+        }
+    };
+    let mut coupures = vec![0];
+    for &k in &gardes[1..gardes.len() - 1] {
+        let (a, b, c) = (loin(k, true), points[k], loin(k, false));
+        let (u, v) = ((b.0 - a.0, b.1 - a.1), (c.0 - b.0, c.1 - b.1));
+        let cos = (u.0 * v.0 + u.1 * v.1) / (u.0.hypot(u.1) * v.0.hypot(v.1)).max(1e-12);
+        // Deux angles trop proches : le premier suffit
+        if cos < ANGLE_VIF.to_radians().cos() && dist(points[*coupures.last().unwrap()], b) >= portee {
+            coupures.push(k);
+        }
+    }
+    coupures.push(points.len() - 1);
+    coupures.dedup();
+    for w in coupures.windows(2) {
+        let morceau = &points[w[0]..=w[1]];
+        // Ce qui est droit à la tolérance près reste une droite
+        if douglas_peucker(morceau, tol).len() == 2 {
+            out.push(Morceau::Droite(morceau[morceau.len() - 1]));
+        } else {
+            // Un léger lissage d'abord (le tremblé du doigt n'est pas à suivre)
+            let lisse = lisser(morceau);
+            let t1 = tangente(&lisse, tol, false);
+            let t2 = tangente(&lisse, tol, true);
+            ajuster(&lisse, t1, t2, tol, out);
+        }
+    }
+}
+
+fn simplifier_sous_chemin(t: &[Morceau], tol: f32, courbes: bool, out: &mut Vec<Morceau>) {
+    let Some(Morceau::Depart(depart)) = t.first().copied() else {
+        out.extend_from_slice(t);
+        return;
+    };
+    let ferme = t.last() == Some(&Morceau::Fermer);
+    let debut = out.len();
+    out.push(Morceau::Depart(depart));
+    let mut courant = depart;
+    // La suite de points en cours (elle commence au point courant)
+    let mut points = vec![depart];
+    let eps = SANS_PERTE.min(tol.max(1e-6));
+    for m in t[1..].iter().copied() {
+        let m = match m {
+            // Une courbe dont les contrôles sont sur la corde, entre ses bouts, est une droite
+            Morceau::Cubique(c1, c2, p) if distance_segment(c1, courant, p) <= eps && distance_segment(c2, courant, p) <= eps && rang(courant, p, c1) <= rang(courant, p, c2) => Morceau::Droite(p),
+            Morceau::Quadratique(c, p) if distance_segment(c, courant, p) <= eps => Morceau::Droite(p),
+            m => m,
+        };
+        match m {
+            Morceau::Droite(p) => {
+                if dist(p, courant) > eps {
+                    points.push(p);
+                    courant = p;
+                }
+            }
+            Morceau::Cubique(c1, c2, p) if courbes => {
+                // Mise en points, pour être refondue avec ses voisines
+                let n = ((dist(courant, c1) + dist(c1, c2) + dist(c2, p)) / tol.max(1e-3)).sqrt().ceil().clamp(4.0, 64.0) as usize;
+                let a = courant;
+                points.extend((1..=n).map(|k| point_cubique(a, c1, c2, p, k as f32 / n as f32)));
+                courant = p;
+            }
+            Morceau::Quadratique(c, p) if courbes => {
+                let n = ((dist(courant, c) + dist(c, p)) / tol.max(1e-3)).sqrt().ceil().clamp(4.0, 64.0) as usize;
+                let a = courant;
+                points.extend((1..=n).map(|k| {
+                    let u = k as f32 / n as f32;
+                    milieu(milieu(a, c, u), milieu(c, p, u), u)
+                }));
+                courant = p;
+            }
+            Morceau::Fermer => {}
+            m => {
+                // Une courbe, un arc : la suite s'arrête, le morceau reste (sauf s'il est nul)
+                let p = m.fin().unwrap();
+                let nul = match m {
+                    Morceau::Cubique(c1, c2, _) => dist(c1, courant) <= eps && dist(c2, courant) <= eps && dist(p, courant) <= eps,
+                    Morceau::Quadratique(c, _) => dist(c, courant) <= eps && dist(p, courant) <= eps,
+                    _ => dist(p, courant) <= eps,
+                };
+                suite(&points, tol, courbes, out);
+                if !nul {
+                    out.push(m);
+                    courant = p;
+                }
+                points = vec![courant];
+            }
+        }
+    }
+    // Fermé, le dernier sommet qui retombe sur le départ est dit par Z
+    if ferme && points.len() > 2 && dist(*points.last().unwrap(), depart) <= eps {
+        points.pop();
+    }
+    suite(&points, tol, courbes, out);
+    if out.len() == debut + 1 {
+        // Rien ne reste : un point (un trait rond) se garde comme un segment nul
+        out.push(t[1..].iter().find_map(|m| if *m == Morceau::Fermer { None } else { Some(*m) }).unwrap_or(Morceau::Droite(depart)));
+    }
+    if ferme {
+        out.push(Morceau::Fermer);
+    }
+}
+
+/// Deux passes du noyau 1-2-1 ; les bouts restent.
+fn lisser(points: &[P]) -> Vec<P> {
+    let mut p = points.to_vec();
+    for _ in 0..2 {
+        let q = p.clone();
+        for k in 1..q.len().saturating_sub(1) {
+            p[k] = ((q[k - 1].0 + 2.0 * q[k].0 + q[k + 1].0) / 4.0, (q[k - 1].1 + 2.0 * q[k].1 + q[k + 1].1) / 4.0);
+        }
+    }
+    p
+}
+
+/// La position de `c` le long de `a`–`b` (0 en `a`, 1 en `b`).
+fn rang(a: P, b: P, c: P) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    ((c.0 - a.0) * dx + (c.1 - a.1) * dy) / (dx * dx + dy * dy).max(1e-12)
+}
+
+fn point_cubique(a: P, b: P, c: P, d: P, u: f32) -> P {
+    let v = 1.0 - u;
+    let (k0, k1, k2, k3) = (v * v * v, 3.0 * v * v * u, 3.0 * v * u * u, u * u * u);
+    (k0 * a.0 + k1 * b.0 + k2 * c.0 + k3 * d.0, k0 * a.1 + k1 * b.1 + k2 * c.1 + k3 * d.1)
+}
+
+fn unitaire(v: P) -> P {
+    let l = v.0.hypot(v.1);
+    if l < 1e-12 { (0.0, 0.0) } else { (v.0 / l, v.1 / l) }
+}
+
+/// La tangente à un bout (vers l'intérieur) : vers le premier point qui s'en écarte
+/// de plus de la tolérance, pour ne pas suivre le tremblé du doigt.
+fn tangente(points: &[P], tol: f32, fin: bool) -> P {
+    let n = points.len();
+    let bout = if fin { points[n - 1] } else { points[0] };
+    let suivant = |k: usize| if fin { points[n - 1 - k] } else { points[k] };
+    let k = (1..n).find(|k| dist(suivant(*k), bout) > tol * 4.0).unwrap_or(1).min(n - 1);
+    unitaire((suivant(k).0 - bout.0, suivant(k).1 - bout.1))
+}
+
+/// L'ajustement de Schneider (Graphics Gems, 1990) : une cubique dont les tangentes
+/// aux bouts sont données, par moindres carrés, reparamétrée par Newton ; coupée en
+/// deux au point le plus loin tant que l'écart dépasse la tolérance. Puis une passe
+/// de fusion retire les coupures dont les deux voisines tiennent en une courbe.
+fn ajuster(points: &[P], t1: P, t2: P, tol: f32, out: &mut Vec<Morceau>) {
+    let n = points.len();
+    let mut coupures = vec![0, n - 1];
+    couper_ajustement(points, 0, n - 1, t1, t2, tol, &mut coupures, 0);
+    coupures.sort_unstable();
+    coupures.dedup();
+    // La tangente à un bout de [a, b] : celle de la suite à ses bouts, celle du
+    // point de coupure ailleurs
+    let tangentes = |a: usize, b: usize| {
+        let ta = if a == 0 { t1 } else { tangente_en(points, a, tol) };
+        let tb = if b == n - 1 { t2 } else { let c = tangente_en(points, b, tol); (-c.0, -c.1) };
+        (ta, tb)
+    };
+    let mut fusion = true;
+    while fusion && coupures.len() > 2 {
+        fusion = false;
+        // La coupure dont la fusion s'écarte le moins, si elle tient
+        let mut meilleure: Option<(f32, usize)> = None;
+        for i in 1..coupures.len() - 1 {
+            let (a, b) = (coupures[i - 1], coupures[i + 1]);
+            let (ta, tb) = tangentes(a, b);
+            let (_, ecart, _) = cubique_au_mieux(&points[a..=b], ta, tb, tol);
+            if ecart <= tol && meilleure.is_none_or(|m| ecart < m.0) {
+                meilleure = Some((ecart, i));
+            }
+        }
+        if let Some((_, i)) = meilleure {
+            coupures.remove(i);
+            fusion = true;
+        }
+    }
+    for w in coupures.windows(2) {
+        let (ta, tb) = tangentes(w[0], w[1]);
+        let (c, _, _) = cubique_au_mieux(&points[w[0]..=w[1]], ta, tb, tol);
+        out.push(Morceau::Cubique(c[1], c[2], c[3]));
+    }
+}
+
+/// La tangente (vers l'avant) au point `k`, entre des points pris à quelques
+/// tolérances de part et d'autre (les voisins immédiats tremblent).
+fn tangente_en(points: &[P], k: usize, tol: f32) -> P {
+    let n = points.len();
+    let p = points[k];
+    let a = (0..k).rev().find(|j| dist(points[*j], p) >= tol * 4.0).unwrap_or(0);
+    let b = (k + 1..n).find(|j| dist(points[*j], p) >= tol * 4.0).unwrap_or(n - 1);
+    let t = unitaire((points[b].0 - points[a].0, points[b].1 - points[a].1));
+    if t == (0.0, 0.0) && k > 0 { unitaire((p.0 - points[k - 1].0, p.1 - points[k - 1].1)) } else { t }
+}
+
+/// Coupe [a, b] au point le plus loin tant que la meilleure cubique s'en écarte de
+/// plus de la tolérance ; les coupures s'ajoutent à `coupures`.
+#[allow(clippy::too_many_arguments)]
+fn couper_ajustement(points: &[P], a: usize, b: usize, t1: P, t2: P, tol: f32, coupures: &mut Vec<usize>, profondeur: u8) {
+    if b - a < 2 || profondeur >= 24 {
+        return;
+    }
+    let (_, ecart, loin) = cubique_au_mieux(&points[a..=b], t1, t2, tol);
+    if ecart <= tol {
+        return;
+    }
+    // Pas trop près des bouts : un morceau minuscule ne ferait que suivre le tremblé
+    let marge = ((b - a) / 4).max(1);
+    let k = a + loin.clamp(marge, b - a - marge);
+    coupures.push(k);
+    let c = tangente_en(points, k, tol);
+    couper_ajustement(points, a, k, t1, (-c.0, -c.1), tol, coupures, profondeur + 1);
+    couper_ajustement(points, k, b, c, t2, tol, coupures, profondeur + 1);
+}
+
+/// La meilleure cubique sur ces points aux tangentes données : (contrôles, écart,
+/// indice du point le plus loin).
+fn cubique_au_mieux(points: &[P], t1: P, t2: P, tol: f32) -> ([P; 4], f32, usize) {
+    let n = points.len();
+    let (a, b) = (points[0], points[n - 1]);
+    if n == 2 {
+        let d = dist(a, b) / 3.0;
+        return ([a, (a.0 + t1.0 * d, a.1 + t1.1 * d), (b.0 + t2.0 * d, b.1 + t2.1 * d), b], 0.0, 0);
+    }
+    // Paramètres à la longueur de corde
+    let mut u = vec![0.0f32; n];
+    for k in 1..n {
+        u[k] = u[k - 1] + dist(points[k], points[k - 1]);
+    }
+    let total = u[n - 1].max(1e-12);
+    u.iter_mut().for_each(|x| *x /= total);
+    let mut meilleure: Option<([P; 4], f32, usize)> = None;
+    for essai in 0..5 {
+        let c = cubique_ajustee(points, &u, t1, t2);
+        let (ecart, loin) = ecart_max(points, &u, &c);
+        if meilleure.as_ref().is_none_or(|m| ecart < m.1) {
+            meilleure = Some((c, ecart, loin));
+        }
+        if ecart <= tol || essai == 4 {
+            break;
+        }
+        // Newton-Raphson : chaque paramètre glisse vers le point le plus proche
+        for k in 1..n - 1 {
+            u[k] = newton(&c, points[k], u[k]);
+        }
+    }
+    meilleure.unwrap()
+}
+
+/// La cubique aux tangentes `t1`, `t2` qui passe au mieux par les points (aux
+/// paramètres `u`), par moindres carrés sur la longueur des deux contrôles.
+fn cubique_ajustee(points: &[P], u: &[f32], t1: P, t2: P) -> [P; 4] {
+    let n = points.len();
+    let (a, b) = (points[0], points[n - 1]);
+    let (mut c00, mut c01, mut c11, mut x0, mut x1) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for k in 0..n {
+        let t = u[k];
+        let v = 1.0 - t;
+        let (b0, b1, b2, b3) = (v * v * v, 3.0 * t * v * v, 3.0 * t * t * v, t * t * t);
+        let (a1, a2) = ((t1.0 * b1, t1.1 * b1), (t2.0 * b2, t2.1 * b2));
+        c00 += a1.0 * a1.0 + a1.1 * a1.1;
+        c01 += a1.0 * a2.0 + a1.1 * a2.1;
+        c11 += a2.0 * a2.0 + a2.1 * a2.1;
+        let r = (points[k].0 - (a.0 * (b0 + b1) + b.0 * (b2 + b3)), points[k].1 - (a.1 * (b0 + b1) + b.1 * (b2 + b3)));
+        x0 += a1.0 * r.0 + a1.1 * r.1;
+        x1 += a2.0 * r.0 + a2.1 * r.1;
+    }
+    let det = c00 * c11 - c01 * c01;
+    let (mut la, mut lb) = if det.abs() > 1e-12 { ((x0 * c11 - x1 * c01) / det, (c00 * x1 - c01 * x0) / det) } else { (0.0, 0.0) };
+    // Un contrôle à rebours ou collé : l'heuristique du tiers de la corde
+    let corde = dist(a, b);
+    if la < corde * 1e-3 || lb < corde * 1e-3 || la > corde * 3.0 || lb > corde * 3.0 {
+        la = corde / 3.0;
+        lb = corde / 3.0;
+    }
+    [a, (a.0 + t1.0 * la, a.1 + t1.1 * la), (b.0 + t2.0 * lb, b.1 + t2.1 * lb), b]
+}
+
+/// L'écart le plus grand entre les points et la cubique (à leurs paramètres), et
+/// l'indice du point le plus loin.
+fn ecart_max(points: &[P], u: &[f32], c: &[P; 4]) -> (f32, usize) {
+    let mut m = (0.0f32, points.len() / 2);
+    for k in 1..points.len() - 1 {
+        let e = dist(point_cubique(c[0], c[1], c[2], c[3], u[k]), points[k]);
+        if e > m.0 {
+            m = (e, k);
+        }
+    }
+    m
+}
+
+/// Un pas de Newton vers le paramètre de la cubique le plus proche de `p`.
+fn newton(c: &[P; 4], p: P, u: f32) -> f32 {
+    let q = point_cubique(c[0], c[1], c[2], c[3], u);
+    let d1: Vec<P> = (0..3).map(|k| (3.0 * (c[k + 1].0 - c[k].0), 3.0 * (c[k + 1].1 - c[k].1))).collect();
+    let d2: Vec<P> = (0..2).map(|k| (2.0 * (d1[k + 1].0 - d1[k].0), 2.0 * (d1[k + 1].1 - d1[k].1))).collect();
+    let v = 1.0 - u;
+    let q1 = (v * v * d1[0].0 + 2.0 * u * v * d1[1].0 + u * u * d1[2].0, v * v * d1[0].1 + 2.0 * u * v * d1[1].1 + u * u * d1[2].1);
+    let q2 = (v * d2[0].0 + u * d2[1].0, v * d2[0].1 + u * d2[1].1);
+    let num = (q.0 - p.0) * q1.0 + (q.1 - p.1) * q1.1;
+    let den = q1.0 * q1.0 + q1.1 * q1.1 + (q.0 - p.0) * q2.0 + (q.1 - p.1) * q2.1;
+    if den.abs() < 1e-12 { u } else { (u - num / den).clamp(0.0, 1.0) }
+}
+
+impl Document {
+    /// Simplifie les chemins, polygones et polylignes de `k` et de ses descendants
+    /// (la tolérance est dans les unités du document : chacun la ramène aux siennes).
+    /// Rend le nombre de sommets avant et après.
+    pub fn simplifier(&mut self, k: usize, s: Simplification) -> (usize, usize) {
+        let (mut avant, mut apres) = (0, 0);
+        for n in 0..self.noeuds.len() {
+            if !self.sous(n, k) || !matches!(self.noeuds[n].nom.as_str(), "path" | "polygon" | "polyline") {
+                continue;
+            }
+            let Some(t) = trace_de(&self.noeuds[n]) else { continue };
+            let f = self.ctm(n).facteur().max(1e-6);
+            let u = simplifier(&t, Simplification { tolerance: s.tolerance / f, ..s });
+            avant += sommets(&t);
+            apres += sommets(&u);
+            if u != t {
+                self.poser_trace(n, &u);
+            }
+        }
+        (avant, apres)
+    }
+}
+
 // --- Le rendu en formes ----------------------------------------------------------
 
 /// Un texte à dessiner : sa ligne de base (en coordonnées du document), sa taille
@@ -2332,6 +2761,74 @@ mod tests {
         deplacer(&mut t, Repere::Sommet(2), (12.0, 22.0));
         d.poser_trace(e[0], &t);
         assert_eq!(d.noeuds[e[0]].attrs, vec![("d".to_string(), "M0 0 L10 0 L12 22 L0 20 Z".to_string())]);
+    }
+
+    /// L'écart le plus grand entre des points et un tracé (mis en points fins).
+    fn ecart_au_trace(points: &[P], t: &[Morceau]) -> f32 {
+        let c = chemin(&ecrire_trace(t), 100.0);
+        points.iter().map(|p| c.iter().flat_map(|l| l.0.windows(2)).map(|w| distance_segment(*p, w[0], w[1])).fold(f32::MAX, f32::min)).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn simplifier_sans_perte() {
+        let s = |d: &str| ecrire_trace(&simplifier(&lire_trace(d), Simplification::SANS_PERTE));
+        // Les sommets alignés et les doublons s'en vont, un aller-retour reste
+        assert_eq!(s("M0 0 L5 0 L10 0 L10 0 L10 10"), "M0 0 L10 0 L10 10");
+        assert_eq!(s("M0 0 L10 0 L5 0"), "M0 0 L10 0 L5 0");
+        // Un point (trait rond) garde son segment nul
+        assert_eq!(s("M3 3 L3 3"), "M3 3 L3 3");
+        // Une courbe droite devient une droite, une vraie courbe reste
+        assert_eq!(s("M0 0 C2 0 8 0 10 0 L20 0"), "M0 0 L20 0");
+        assert_eq!(s("M0 0 C0 5 10 5 10 0"), "M0 0 C0 5 10 5 10 0");
+        // Fermé : le retour au départ est dit par Z ; les sous-chemins restent séparés
+        assert_eq!(s("M0 0 L10 0 L10 10 L0 0 Z M20 20 L25 20 L30 20"), "M0 0 L10 0 L10 10 Z M20 20 L30 20");
+        // Un arc reste
+        assert_eq!(s("M0 0 L1 0 L2 0 A5 5 0 0 1 12 0"), "M0 0 L2 0 A5 5 0 0 1 12 0");
+    }
+
+    #[test]
+    fn simplifier_avec_perte() {
+        // Un cercle tremblé de 400 points
+        let points: Vec<P> = (0..=400)
+            .map(|k| {
+                let a = k as f32 / 400.0 * std::f32::consts::TAU;
+                let r = 50.0 + 0.2 * (k as f32 * 1.7).sin();
+                (r * a.cos(), r * a.sin())
+            })
+            .collect();
+        let t: Vec<Morceau> = points.iter().enumerate().map(|(k, p)| if k == 0 { Morceau::Depart(*p) } else { Morceau::Droite(*p) }).collect();
+        let droites = simplifier(&t, Simplification { tolerance: 0.5, courbes: false });
+        assert!(sommets(&droites) < 60, "{}", sommets(&droites));
+        assert!(droites.iter().skip(1).all(|m| matches!(m, Morceau::Droite(_))));
+        assert!(ecart_au_trace(&points, &droites) <= 0.51);
+        let lisse = simplifier(&t, Simplification { tolerance: 0.5, courbes: true });
+        assert!(sommets(&lisse) <= 16, "{}", sommets(&lisse));
+        assert!(lisse.iter().skip(1).all(|m| matches!(m, Morceau::Cubique(..))));
+        assert!(ecart_au_trace(&points, &lisse) <= 0.6, "{}", ecart_au_trace(&points, &lisse));
+        // Un carré finement échantillonné garde ses angles et ses côtés droits
+        let mut carre = vec![Morceau::Depart((0.0, 0.0))];
+        for (a, b) in [((0.0, 0.0), (10.0, 0.0)), ((10.0, 0.0), (10.0, 10.0)), ((10.0, 10.0), (0.0, 10.0))] {
+            carre.extend((1..=20).map(|k| Morceau::Droite(milieu(a, b, k as f32 / 20.0))));
+        }
+        assert_eq!(ecrire_trace(&simplifier(&carre, Simplification { tolerance: 0.3, courbes: true })), "M0 0 L10 0 L10 10 L0 10");
+        // Une suite de courbes se refond
+        let c = lire_trace("M0 0 C0 5 5 10 10 10 C15 10 20 5 20 0 C20 -5 25 -10 30 -10");
+        let r = simplifier(&c, Simplification { tolerance: 0.2, courbes: true });
+        assert!(sommets(&r) <= sommets(&c));
+        let fins: Vec<P> = (0..=60).map(|k| point_sur(&c, 1 + (k * 3 / 61), (k * 3 % 61) as f32 / 61.0)).collect();
+        assert!(ecart_au_trace(&fins, &r) <= 0.3);
+    }
+
+    #[test]
+    fn simplifier_un_document() {
+        let mut d = Document::lire(r#"<svg><g transform="scale(10)"><polyline points="0 0 1 0.05 2 0 3 0"/></g><rect width="5" height="5"/><path d="M0 0 L1 0.02 L2 0"/></svg>"#).unwrap();
+        let r = d.racine;
+        // 0,2 de tolérance : l'écart de 0,02 retiré dehors, gardé dans le groupe agrandi
+        assert_eq!(d.simplifier(r, Simplification { tolerance: 0.1, courbes: false }), (7, 6));
+        let e = d.ecrire();
+        assert!(e.contains("points=\"0 0 1 0.05 2 0 3 0\""), "{e}");
+        assert!(e.contains("d=\"M0 0 L2 0\""), "{e}");
+        assert!(e.contains("<rect"), "{e}");
     }
 
     #[test]

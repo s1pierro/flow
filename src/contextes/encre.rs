@@ -15,7 +15,9 @@
 //! Ce qui n'est pas enregistré est mis à l'abri dans un brouillon (`Flow/brouillons/`)
 //! quand la fenêtre se ferme ou que l'application passe en arrière-plan, et retrouvé
 //! au lancement suivant. Chaque trait est un `<path>` fait de segments droits, en
-//! unités qui valent un dp à 100 %. Un SVG venu d'ailleurs s'ouvre en lecture seule :
+//! unités qui valent un dp à 100 %. À la fin de chaque trait, ses sommets inutiles
+//! sont retirés (`svg::simplifier`), sans perte par défaut : aucun ne s'écarte de plus
+//! de la moitié de la précision d'écriture (le dixième d'unité). Un SVG venu d'ailleurs s'ouvre en lecture seule :
 //! Encre n'en montre que les tracés simples qu'il comprend, ne l'écrase jamais, mais
 //! peut en enregistrer une copie dans `Documents/Encre/`.
 
@@ -24,6 +26,7 @@ use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
 use crate::gestes::Geste;
 use crate::surface::{FenetreId, Placee};
+use crate::svg;
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
@@ -51,6 +54,9 @@ pub const COULEURS: [Color; 8] = [
 ];
 const PAPIER: Color = [0xFB, 0xFA, 0xF6, 255];
 const ZOOM: (f32, f32) = (0.1, 12.0);
+/// La simplification des traits, par défaut : sans perte à la précision où ils
+/// s'écrivent (un dixième d'unité), donc 0,05 d'écart au plus.
+pub const SIMPLIFICATION: svg::Simplification = svg::Simplification { tolerance: 0.05, courbes: false };
 /// Le rayon de la gomme, à l'écran, en dp.
 const GOMME: f32 = 12.0;
 
@@ -113,6 +119,8 @@ pub struct Encre {
     /// La feuille et le dp à l'image précédente, pour passer de l'écran au dessin.
     zone: Rect,
     dp: f32,
+    /// Comment un trait fini est simplifié (`SIMPLIFICATION` par défaut).
+    simplification: svg::Simplification,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -148,6 +156,7 @@ fn lire(e: &Etat) -> Encre {
         pincement: 1.0,
         zone: Rect::new(0.0, 0.0, 1.0, 1.0),
         dp: 1.0,
+        simplification: SIMPLIFICATION,
     }
 }
 
@@ -266,6 +275,19 @@ fn distance_segment(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
 }
 
 impl Trait {
+    /// Retire les points inutiles (le premier et le dernier restent ; un point seul
+    /// reste un point).
+    pub fn simplifier(&mut self, s: svg::Simplification) {
+        if self.points.len() < 3 {
+            return;
+        }
+        let t: Vec<svg::Morceau> = self.points.iter().enumerate().map(|(i, p)| if i == 0 { svg::Morceau::Depart(*p) } else { svg::Morceau::Droite(*p) }).collect();
+        let u = svg::simplifier(&t, svg::Simplification { courbes: false, ..s });
+        let points: Vec<(f32, f32)> = u.iter().filter_map(svg::Morceau::fin).collect();
+        // Un trait revenu sur place se garde en point
+        self.points = if points.len() == 2 && points[0] == points[1] { vec![points[0]] } else { points };
+    }
+
     fn touche(&self, p: (f32, f32), rayon: f32) -> bool {
         let r = rayon + self.largeur / 2.0;
         match self.points[..] {
@@ -441,7 +463,10 @@ impl Encre {
     /// Termine un trait ou un coup de gomme : il entre dans l'historique.
     fn conclure(&mut self) -> bool {
         if std::mem::take(&mut self.trace) {
-            if let Some(t) = self.traits.last().cloned() {
+            let s = self.simplification;
+            if let Some(t) = self.traits.last_mut() {
+                t.simplifier(s);
+                let t = t.clone();
                 self.noter(Action::Ajout(t));
             }
             return true;
@@ -840,6 +865,14 @@ mod tests {
         assert!(e.recevoir(Geste::SaisieFin { x: 300.0, y: 100.0, depart: (0.0, 0.0), vecteur: (0.0, 0.0) }));
         // À 100 % et 2 px par dp : de (0, 0) à (100, 0) dans le dessin
         assert_eq!(e.traits[0].points, vec![(0.0, 0.0), (100.0, 0.0)]);
+        // Les points alignés d'un trait droit s'en vont à la fin du trait
+        e.recevoir(Geste::SaisieDebut { x: 100.0, y: 300.0, doigt: (0.0, 0.0) });
+        for k in 1..=20 {
+            e.recevoir(Geste::SaisieDeplace { x: 100.0 + k as f32 * 10.0, y: 300.0 + if k <= 10 { 0.0 } else { (k - 10) as f32 * 10.0 }, doigt: (0.0, 0.0) });
+        }
+        assert!(e.recevoir(Geste::SaisieFin { x: 300.0, y: 400.0, depart: (0.0, 0.0), vecteur: (0.0, 0.0) }));
+        assert_eq!(e.traits[1].points, vec![(0.0, 100.0), (50.0, 100.0), (100.0, 150.0)]);
+        e.traits.pop();
         e.gomme = true;
         assert!(!e.recevoir(Geste::Tap { x: 200.0, y: 500.0, intensite: 0.0, precision: 0.0 }));
         assert!(e.recevoir(Geste::Tap { x: 200.0, y: 110.0, intensite: 0.0, precision: 0.0 }));

@@ -17,10 +17,12 @@ numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
 JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
 quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste), Encre (dessin à
-main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts), SVG (éditeur
+main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts ; chaque trait
+fini est simplifié sans perte), SVG (éditeur
 de dessin vectoriel : ouvre tout SVG, trace rectangles, ellipses, lignes, polygones et textes avec
 fond, trait et épaisseur ; sélection avec poignées pour déplacer, agrandir et tourner ; édition des sommets des chemins (déplacer
-sommets et contrôles, ajouter en touchant le contour, retirer, courber, redresser, ouvrir, fermer) ; dupliquer,
+sommets et contrôles, ajouter en touchant le contour, retirer, courber, redresser, ouvrir, fermer) ; simplifier les chemins
+(sans perte, ou avec un écart permis et des courbes ajustées, en aperçu) ; dupliquer,
 supprimer, monter, descendre ; annuler, rétablir ; la source colorée à côté, synchronisée), Argile
 (sculpture 3D comme de la terre : gonfler, creuser, lisser, aplatir, pincer, tirer, avec symétrie ;
 la forme tourne au doigt, se subdivise pour les détails et s'enregistre en glTF binaire `.glb`),
