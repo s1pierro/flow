@@ -5,7 +5,7 @@ fenêtres, et chaque fenêtre montre un **contexte**, une sous-application, pour
 composer son espace de travail à son goût. Née d'une copie de
 [Rustine](https://github.com/s1pierro/Rustine) 0.8.
 
-**Télécharger :** [flow-0.16.1.apk](https://github.com/s1pierro/flow/releases/download/v0.16.1/flow-0.16.1.apk)
+**Télécharger :** [flow-0.17.apk](https://github.com/s1pierro/flow/releases/download/v0.17/flow-0.17.apk)
 
 Contextes : Accueil (les contextes en cartes, celui des fenêtres nées du menu), Fichiers (les
 entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers), Texte (éditeur aux gestes : glisser sélectionne au curseur déporté, appui choisit un mot, appui long propose
