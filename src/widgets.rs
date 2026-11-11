@@ -143,6 +143,8 @@ pub enum Icon {
     /// Annuler, rétablir : une flèche en demi-tour.
     Annuler,
     Retablir,
+    /// Le dessin vectoriel : une courbe entre deux nœuds, et une poignée.
+    Vecteur,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -423,6 +425,18 @@ impl Cx<'_> {
                 self.dl.line(p(-4.0, 4.0), p(7.0, -7.0), 5.0 * u, color);
                 self.dl.line(p(-8.0, 8.0), p(-5.0, 5.0), 2.0 * u, color);
                 self.dl.line(p(-9.0, 10.5), p(9.0, 10.5), 1.8 * u, color);
+            }
+            Icon::Vecteur => {
+                // Une courbe en S entre deux nœuds carrés, la poignée du premier
+                let c = [p(-8.0, 7.0), p(-6.0, -1.0), p(-1.0, -3.0), p(1.0, 2.0), p(5.0, 5.0), p(8.0, -6.0)];
+                for w in c.windows(2) {
+                    self.dl.line(w[0], w[1], 1.8 * u, color);
+                }
+                self.dl.line(p(-8.0, 7.0), p(-8.0, -6.0), 1.2 * u, color);
+                self.dl.rrect(Rect::new(cx - 9.6 * u, cy - 7.6 * u, 3.2 * u, 3.2 * u), 1.6 * u, color);
+                for (x, y) in [(-8.0, 7.0), (8.0, -6.0)] {
+                    self.dl.rrect(Rect::new(cx + (x - 2.4) * u, cy + (y - 2.4) * u, 4.8 * u, 4.8 * u), 0.8 * u, color);
+                }
             }
             Icon::Gomme => {
                 // La gomme en biais : son corps, et le bout qui efface, plus pâle

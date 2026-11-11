@@ -123,6 +123,9 @@ pub struct Texte {
     /// Un pincement en cours : la taille à son début, puis le caractère sous le
     /// centre des doigts et où il doit rester à l'écran (y), et s'il dure encore.
     pince: Option<(f32, usize, f32, bool)>,
+    /// Intégré à un autre contexte : le nom qui décide de la coloration ; ni en-tête,
+    /// ni fichier, ni brouillon (le contexte hôte s'en charge).
+    integre: Option<String>,
     /// Une poignée de la sélection tenue au doigt : laquelle, le bout qui ne bouge
     /// pas, et l'écart entre le doigt et le bout qu'il tire.
     poignee: Option<(Id, usize, (f32, f32))>,
@@ -314,7 +317,7 @@ impl Texte {
     fn nom_affiche(&self) -> String {
         match &self.chemin {
             Some(p) => p.file_name().map_or(p.display().to_string(), |n| n.to_string_lossy().into_owned()),
-            None if self.nom.texte.trim().is_empty() => "Nouveau document".into(),
+            None if self.nom.texte.trim().is_empty() => self.integre.clone().unwrap_or_else(|| "Nouveau document".into()),
             None => self.nom.texte.trim().to_string(),
         }
     }
@@ -370,6 +373,9 @@ impl Texte {
 
     /// Le nom de fichier qui décide du langage : celui du document, ou le nom saisi.
     fn nom_fichier(&self) -> String {
+        if let Some(n) = &self.integre {
+            return n.clone();
+        }
         match &self.chemin {
             Some(p) => p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()),
             None => self.nom.texte.trim().to_string(),
@@ -399,6 +405,56 @@ impl Texte {
             }
             Err(i) => self.plis.insert(i, l),
         }
+    }
+
+    /// Un éditeur intégré à un autre contexte, sur `texte` ; `nom` décide de la
+    /// coloration (son extension).
+    pub fn integre(nom: &str, texte: &str) -> Texte {
+        Texte { tampon: Tampon::new(texte), charge: true, integre: Some(nom.into()), ..Texte::default() }
+    }
+
+    /// Le texte édité.
+    pub fn contenu(&self) -> String {
+        self.tampon.texte()
+    }
+
+    /// Augmente à chaque modification du texte.
+    pub fn revision(&self) -> u64 {
+        self.tampon.revision
+    }
+
+    /// Remplace tout le texte (son historique repart de zéro).
+    pub fn remplacer_texte(&mut self, texte: &str) {
+        let curseur = self.tampon.curseur;
+        let revision = self.tampon.revision;
+        self.tampon = Tampon::new(texte);
+        self.tampon.revision = revision + 1;
+        self.tampon.curseur = curseur.min(self.tampon.car.len());
+        self.message = None;
+    }
+
+    pub fn peut_annuler(&self) -> bool {
+        self.tampon.peut_annuler()
+    }
+
+    pub fn peut_retablir(&self) -> bool {
+        self.tampon.peut_retablir()
+    }
+
+    /// Annule ou rétablit (pour l'en-tête du contexte hôte).
+    pub fn defaire(&mut self, retablir: bool) {
+        if retablir {
+            self.tampon.retablir();
+        } else {
+            self.tampon.annuler();
+        }
+        self.suivre = true;
+        self.actions = false;
+    }
+
+    /// Un message pour la ligne d'état (une erreur de lecture, par l'hôte).
+    pub fn signaler(&mut self, m: Option<(String, bool)>) {
+        self.message = m;
     }
 
     /// La taille du texte, dans ses bornes.
@@ -508,7 +564,7 @@ impl Contexte for Texte {
     }
 
     fn mettre_a_l_abri(&mut self, c: &Commun) {
-        if !self.charge {
+        if !self.charge || self.integre.is_some() {
             return;
         }
         if !self.modifie {
@@ -563,62 +619,65 @@ impl Contexte for Texte {
         let k = p.id as usize;
         cx.dl.rrect(r, 0.0, col.surface);
         let (h, m, gap) = (cx.commande(), cx.coin(), cx.ecart());
-        let haut = (h + 2.0 * m).min(r.h);
+        let haut = if self.integre.is_some() { 0.0 } else { (h + 2.0 * m).min(r.h) };
 
-        // En haut : le nom du document (ou sa saisie), puis « Enregistrer »
-        let label = "Enregistrer";
-        let wp = cx.pill_width(label);
-        let xp = r.right() - wp - m;
-        let mut x0 = p.suite.0;
-        // À gauche du titre : annuler, rétablir
-        if !self.lecture_seule {
-            for (j, (icone, retablir)) in [(Icon::Annuler, false), (Icon::Retablir, true)].into_iter().enumerate() {
-                let case = Rect::new(x0, r.y + m, h, h);
-                let possible = if retablir { self.tampon.peut_retablir() } else { self.tampon.peut_annuler() };
-                let kb = sub_id(HISTOIRE, k * 2 + j);
-                if cx.ui.click(kb, case, None) && possible {
-                    if retablir {
-                        self.tampon.retablir();
-                    } else {
-                        self.tampon.annuler();
+        // Intégré à un autre contexte (la source d'un SVG), l'éditeur n'a pas d'en-tête
+        if self.integre.is_none() {
+            // En haut : le nom du document (ou sa saisie), puis « Enregistrer »
+            let label = "Enregistrer";
+            let wp = cx.pill_width(label);
+            let xp = r.right() - wp - m;
+            let mut x0 = p.suite.0;
+            // À gauche du titre : annuler, rétablir
+            if !self.lecture_seule {
+                for (j, (icone, retablir)) in [(Icon::Annuler, false), (Icon::Retablir, true)].into_iter().enumerate() {
+                    let case = Rect::new(x0, r.y + m, h, h);
+                    let possible = if retablir { self.tampon.peut_retablir() } else { self.tampon.peut_annuler() };
+                    let kb = sub_id(HISTOIRE, k * 2 + j);
+                    if cx.ui.click(kb, case, None) && possible {
+                        if retablir {
+                            self.tampon.retablir();
+                        } else {
+                            self.tampon.annuler();
+                        }
+                        self.modifie = true;
+                        self.suivre = true;
+                        self.actions = false;
+                        self.message = None;
                     }
-                    self.modifie = true;
-                    self.suivre = true;
-                    self.actions = false;
-                    self.message = None;
+                    if possible && cx.ui.pressed(kb) {
+                        cx.dl.rrect(case.inset(2.0 * d), cx.theme.rayon(case.h - 4.0 * d), col.puce);
+                    }
+                    cx.icon(case.inset(cx.pad() * 0.6), icone, if possible { col.texte } else { col.ligne });
+                    x0 += h;
                 }
-                if possible && cx.ui.pressed(kb) {
-                    cx.dl.rrect(case.inset(2.0 * d), cx.theme.rayon(case.h - 4.0 * d), col.puce);
-                }
-                cx.icon(case.inset(cx.pad() * 0.6), icone, if possible { col.texte } else { col.ligne });
-                x0 += h;
+                x0 += gap;
             }
-            x0 += gap;
+            if xp > x0 + gap && cx.pill(sub_id(ENREGISTRER, k), xp, r.y + m, label, self.modifie) && !self.lecture_seule {
+                self.message = Some(match self.enregistrer(c) {
+                    Ok(()) => (format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())), false),
+                    Err(e) => (e, true),
+                });
+            }
+            let x1 = (xp - gap).max(x0);
+            if let Some(chemin) = &self.chemin {
+                let dossier = chemin.parent().map_or(String::new(), |p| p.display().to_string());
+                cx.clip(Some(Rect::new(x0, r.y, x1 - x0, haut)));
+                let pastille = if self.modifie { " •" } else { "" };
+                cx.text_at(x0, r.y + m + h * 0.32, &format!("{}{pastille}", self.nom_affiche()), 16.0, col.texte);
+                cx.text_at(x0, r.y + m + h * 0.78, &dossier, 12.0, col.pale);
+                cx.clip(None);
+            } else {
+                // Un nouveau document : son nom se saisit ici
+                let pad = 14.0 * d;
+                let zone = Rect::new(x0 - pad, r.y + m - 8.0 * d - (cx.theme.marge * 0.4 * d).round(), x1 - x0 + 2.0 * pad, haut);
+                let corps = sub_id(NOM_CORPS, k);
+                let mut b = cx.body(corps, zone, &c.scrolls);
+                clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom du nouveau document", &mut self.nom, &mut c.clavier);
+                cx.body_end(b, &mut c.scrolls);
+            }
+            cx.dl.rrect(Rect::new(r.x, r.y + haut - d, r.w, d.max(1.0)), 0.0, col.ligne);
         }
-        if xp > x0 + gap && cx.pill(sub_id(ENREGISTRER, k), xp, r.y + m, label, self.modifie) && !self.lecture_seule {
-            self.message = Some(match self.enregistrer(c) {
-                Ok(()) => (format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())), false),
-                Err(e) => (e, true),
-            });
-        }
-        let x1 = (xp - gap).max(x0);
-        if let Some(chemin) = &self.chemin {
-            let dossier = chemin.parent().map_or(String::new(), |p| p.display().to_string());
-            cx.clip(Some(Rect::new(x0, r.y, x1 - x0, haut)));
-            let pastille = if self.modifie { " •" } else { "" };
-            cx.text_at(x0, r.y + m + h * 0.32, &format!("{}{pastille}", self.nom_affiche()), 16.0, col.texte);
-            cx.text_at(x0, r.y + m + h * 0.78, &dossier, 12.0, col.pale);
-            cx.clip(None);
-        } else {
-            // Un nouveau document : son nom se saisit ici
-            let pad = 14.0 * d;
-            let zone = Rect::new(x0 - pad, r.y + m - 8.0 * d - (cx.theme.marge * 0.4 * d).round(), x1 - x0 + 2.0 * pad, haut);
-            let corps = sub_id(NOM_CORPS, k);
-            let mut b = cx.body(corps, zone, &c.scrolls);
-            clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom du nouveau document", &mut self.nom, &mut c.clavier);
-            cx.body_end(b, &mut c.scrolls);
-        }
-        cx.dl.rrect(Rect::new(r.x, r.y + haut - d, r.w, d.max(1.0)), 0.0, col.ligne);
 
         // Le texte, avec à gauche la gouttière : les numéros de ligne et les plis
         let zone = Rect::new(r.x, r.y + haut, r.w, (r.h - haut).max(0.0));

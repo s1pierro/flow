@@ -45,10 +45,14 @@ dans `Flow/empreintes.txt`, que Fichiers lit sans relancer de parcours, `texte.r
 enregistrement, brouillons, découpage des lignes, sélection et historique (annuler, rétablir) dans `src/tampon.rs`,
 une zone à gestes pour éditer : tap, glisser pour sélectionner, appui, appui long, pincement ;
 le presse-papier par `acces::copier` et `acces::presse_papier`), `encre.rs`
-(une zone à gestes élaborés, un document SVG enregistré à la demande), `orchestre.rs`
+(une zone à gestes élaborés, un document SVG enregistré à la demande), `svg.rs` (un
+éditeur de dessin : le document en arbre, son rendu et ses retouches dans `src/svg.rs`,
+des poignées en `cx.ui.drag`, un historique d'instantanés, et un `Texte` intégré pour la
+source — `Texte::integre`, sans en-tête, dont le contexte relaie les frappes), `orchestre.rs`
 (la vue d'un module global, sans état propre).
 
-`texte.rs` est la référence pour un contexte qui édite des fichiers (le futur SVG).
+`texte.rs` est la référence pour un contexte qui édite des fichiers ; `svg.rs` montre
+comment en emprunter un autre (l'éditeur de texte) à l'intérieur du sien.
 
 ## Ajouter un contexte, pas à pas
 
@@ -334,4 +338,5 @@ avec son état exposé dans le contexte Orchestre.
 
 ## À venir
 
-- Un contexte **SVG** complet (formes, sélection), à partir d'`encre.rs`.
+- SVG : édition des sommets d'un chemin, dégradés et motifs rendus fidèlement,
+  sélection de plusieurs formes, entrer dans un groupe.

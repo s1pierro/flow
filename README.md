@@ -17,12 +17,15 @@ numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
 JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
 quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste), Encre (dessin à
-main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts),
+main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts), SVG (éditeur
+de dessin vectoriel : ouvre tout SVG, trace rectangles, ellipses, lignes, polygones et textes avec
+fond, trait et épaisseur ; sélection avec poignées pour déplacer, agrandir et tourner ; dupliquer,
+supprimer, monter, descendre ; annuler, rétablir ; la source colorée à côté, synchronisée),
 Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie surveillée,
 recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`), Aide. Les paramètres de l'application (apparence, clavier,
 gestes) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
-document. Viendra l'édition de SVG.
+document.
 
 Les contextes peuvent recevoir des gestes élaborés, inspirés de
 [tnt.js](https://github.com/s1pierro/tnt.js) : tap, appui et appui long selon la

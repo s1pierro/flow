@@ -31,6 +31,9 @@ struct Shot {
     gestes: u8,
 }
 
+/// Où toucher le dessin SVG d'essai pour choisir le groupe tourné.
+const SVG_TAP: (f32, f32) = (700.0, 600.0);
+
 fn main() {
     let dir = std::env::args().nth(1).expect("dossier de sortie");
     let shots = [
@@ -51,6 +54,9 @@ fn main() {
         Shot { name: "texte-selection", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 3 },
         Shot { name: "fichiers-selection", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 4 },
         Shot { name: "fichiers-nouveau", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 5 },
+        Shot { name: "svg", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 6 },
+        Shot { name: "svg-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "svg-source", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 7 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -160,6 +166,31 @@ fn main() {
             // Fichiers sur le projet, trié par taille : un appui long sélectionne, un toucher ajoute
             app.ouvrir_espace(&format!("fenetres = F1:fichiers\n[fenetre 1]\ndossier = {}\ntri = Taille\n", env!("CARGO_MANIFEST_DIR")));
         }
+        if s.name.starts_with("svg") {
+            // Un dessin d'essai : groupe tourné, chemin à arcs et courbes, dégradé, texte
+            let d = std::env::temp_dir().join("flow-apercu-svg");
+            let _ = std::fs::remove_dir_all(&d);
+            let _ = std::fs::create_dir_all(&d);
+            let f = d.join("essai.svg");
+            std::fs::write(&f, r##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <defs>
+    <linearGradient id="ciel"><stop offset="0" stop-color="#93c5fd"/><stop offset="1" stop-color="#e0f2fe"/></linearGradient>
+  </defs>
+  <rect width="400" height="300" fill="url(#ciel)"/>
+  <circle cx="320" cy="60" r="30" fill="#facc15" stroke="#ea8a0c" stroke-width="4"/>
+  <path d="M0 230 Q 100 160 200 220 T 400 210 L 400 300 L 0 300 Z" fill="#16a34a"/>
+  <g transform="rotate(-8 120 170)" fill="#dc2626" stroke="#1e1e25" stroke-width="3">
+    <rect x="70" y="150" width="100" height="70"/>
+    <polygon points="60,150 120,100 180,150" fill="#9333ea"/>
+  </g>
+  <path d="M250 120 a40 25 0 1 0 80 0 a40 25 0 1 0 -80 0" fill="none" stroke="#2563eb" stroke-width="5" stroke-dasharray="4"/>
+  <text x="200" y="285" font-size="22" text-anchor="middle" fill="#ffffff">Flow · SVG</text>
+</svg>
+"##).unwrap();
+            app.ouvrir_espace(&format!("fenetres = F1:svg\n[fenetre 1]\ndocument = {}\n", f.display()));
+            app.commun.theme.sombre = s.name == "svg-portrait";
+        }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu
             app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
@@ -200,6 +231,11 @@ fn main() {
                 (3, 21) => ui.event(Event::Up { id: 0 }, t),
                 (5, 10) => ui.event(Event::Down { id: 0, x: 1850.0, y: 136.0 }, t),
                 (5, 11) => ui.event(Event::Up { id: 0 }, t),
+                (6, 10) => ui.event(Event::Down { id: 0, x: SVG_TAP.0, y: SVG_TAP.1 }, t),
+                (6, 11) => ui.event(Event::Up { id: 0 }, t),
+                // La pilule « Source »
+                (7, 10) => ui.event(Event::Down { id: 0, x: 1664.0, y: 58.0 }, t),
+                (7, 11) => ui.event(Event::Up { id: 0 }, t),
                 (4, 10) => ui.event(Event::Down { id: 0, x: 700.0, y: 330.0 }, t),
                 (4, 25) => ui.event(Event::Up { id: 0 }, t),
                 (4, 30) => ui.event(Event::Down { id: 0, x: 1100.0, y: 330.0 }, t),

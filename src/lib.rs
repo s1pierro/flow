@@ -30,6 +30,7 @@ pub mod reglages;
 pub mod renderer;
 pub mod shell;
 pub mod surface;
+pub mod svg;
 pub mod syntaxe;
 pub mod tampon;
 pub mod text;

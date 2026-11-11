@@ -159,6 +159,18 @@ impl DrawList {
         self.push([v(b[0] - e, b[1] - e), v(b[2] + e, b[1] - e), v(b[0] - e, b[3] + e), v(b[2] + e, b[3] + e)]);
     }
 
+    /// Bande horizontale d'un pixel de haut, de `x0` à `x1` sur la ligne `y` : lissée
+    /// à ses bouts, nette en haut et en bas pour que les bandes voisines se joignent.
+    /// Le remplissage des formes SVG en est fait.
+    pub fn bande(&mut self, y: f32, x0: f32, x1: f32, color: Color) {
+        let hw = ((x1 - x0) / 2.0).max(0.0);
+        let cx = (x0 + x1) / 2.0;
+        let e = 1.0;
+        let shape = [hw, 1.0e5, 0.0, 0.0];
+        let v = |sx: f32, yy: f32| Vertex { pos: [cx + sx * (hw + e), yy], local: [sx * (hw + e), 0.0], shape, uv: [0.0, 0.0], color };
+        self.push([v(-1.0, y), v(1.0, y), v(-1.0, y + 1.0), v(1.0, y + 1.0)]);
+    }
+
     pub fn glyph(&mut self, r: Rect, uv0: [f32; 2], uv1: [f32; 2], color: Color) {
         let v = |x: f32, y: f32, u: f32, w: f32| Vertex { pos: [x, y], local: [0.0, 0.0], shape: [0.0, 0.0, -1.0, 0.0], uv: [u, w], color };
         self.push([

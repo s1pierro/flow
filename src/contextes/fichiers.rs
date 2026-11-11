@@ -1,7 +1,7 @@
 //! Le contexte Fichiers : un explorateur. Chaque fenêtre a son dossier ouvert et son
 //! choix d'afficher les fichiers cachés. Un dossier s'ouvre au toucher, un fichier
 //! audio se lit dans la piste « Fichier » du mixeur, un fichier texte s'ouvre dans
-//! l'éditeur, un SVG dans Encre : l'un ou l'autre prend la place de l'explorateur
+//! l'éditeur, un SVG dans le contexte SVG : l'un ou l'autre prend la place de l'explorateur
 //! dans la fenêtre.
 //!
 //! Les entrées sont des cartes de 3,5 pour 1 : à gauche l'empreinte d'un dossier (sa
@@ -152,7 +152,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
 
 /// Place des largeurs les unes après les autres, à la ligne quand la place manque :
 /// pour chacune, son abscisse depuis le bord et son rang de ligne.
-fn ranger(largeurs: &[f32], place: f32, ecart: f32) -> Vec<(f32, usize)> {
+pub(super) fn ranger(largeurs: &[f32], place: f32, ecart: f32) -> Vec<(f32, usize)> {
     let (mut x, mut ligne) = (0.0, 0);
     largeurs
         .iter()
@@ -611,7 +611,7 @@ impl Contexte for Fichiers {
                     Nature::Image if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("svg")) => {
                         let mut etat = Etat::default();
                         etat.mettre("document", chemin.display());
-                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::encre::CLE, etat });
+                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::svg::CLE, etat });
                     }
                     _ => {}
                 }
