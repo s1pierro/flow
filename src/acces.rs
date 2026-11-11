@@ -32,6 +32,7 @@ const CALL_VOID_METHOD_A: usize = 63;
 const GET_STATIC_METHOD_ID: usize = 113;
 const CALL_STATIC_OBJECT_METHOD_A: usize = 116;
 const CALL_STATIC_BOOLEAN_METHOD_A: usize = 119;
+const NEW_STRING: usize = 163;
 const GET_STRING_LENGTH: usize = 164;
 const GET_STRING_CHARS: usize = 165;
 const RELEASE_STRING_CHARS: usize = 166;
@@ -91,6 +92,14 @@ impl Jni {
         let c = CString::new(s).ok()?;
         let g: unsafe extern "C" fn(*mut c_void, *const c_char) -> Obj = self.f(NEW_STRING_UTF);
         let o = g(self.env, c.as_ptr());
+        (!self.exception() && !o.is_null()).then_some(o)
+    }
+
+    /// Un texte Java fait depuis l'UTF-16 : les émojis passent intacts.
+    unsafe fn texte16(&self, s: &str) -> Option<Obj> {
+        let u: Vec<u16> = s.encode_utf16().collect();
+        let g: unsafe extern "C" fn(*mut c_void, *const u16, i32) -> Obj = self.f(NEW_STRING);
+        let o = g(self.env, u.as_ptr(), u.len() as i32);
         (!self.exception() && !o.is_null()).then_some(o)
     }
 
@@ -391,7 +400,8 @@ pub fn service(etat: i32, titre: &str, texte: &str) {
 pub fn presse_papier() -> Option<String> {
     let contexte = CONTEXTE.load(std::sync::atomic::Ordering::Relaxed) as Obj;
     if contexte.is_null() {
-        return None;
+        // Hors d'Android (tests, aperçus) : le presse-papier interne
+        return PRESSE.lock().ok().and_then(|p| p.clone());
     }
     unsafe {
         let vm = vm();
@@ -426,6 +436,48 @@ pub fn presse_papier() -> Option<String> {
             detacher(vm);
         }
         texte.filter(|t| !t.is_empty())
+    }
+}
+
+/// Le presse-papier hors d'Android.
+static PRESSE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Met un texte dans le presse-papier d'Android (hors d'Android, dans un
+/// presse-papier interne). Vrai si c'est fait.
+pub fn copier(texte: &str) -> bool {
+    let contexte = CONTEXTE.load(std::sync::atomic::Ordering::Relaxed) as Obj;
+    if contexte.is_null() {
+        if let Ok(mut p) = PRESSE.lock() {
+            *p = Some(texte.to_string());
+        }
+        return true;
+    }
+    unsafe {
+        let vm = vm();
+        let deja = deja_attache(vm);
+        let Some(env) = attacher(vm) else { return false };
+        let j = Jni { env };
+        let push: unsafe extern "C" fn(*mut c_void, i32) -> i32 = j.f(PUSH_LOCAL_FRAME);
+        if push(env, 16) != 0 {
+            j.exception();
+            return false;
+        }
+        let ok = (|| {
+            let kc = j.classe("android/content/Context")?;
+            let service = j.methode(kc, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", false)?;
+            let presse = j.objet(contexte, service, &[j.texte("clipboard")? as Val])?;
+            let kd = j.classe("android/content/ClipData")?;
+            let nouveau = j.methode(kd, "newPlainText", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;", true)?;
+            let clip = j.objet_statique(kd, nouveau, &[j.texte("Flow")? as Val, j.texte16(texte)? as Val])?;
+            let km = j.classe("android/content/ClipboardManager")?;
+            j.rien(presse, j.methode(km, "setPrimaryClip", "(Landroid/content/ClipData;)V", false)?, &[clip as Val]).then_some(())
+        })();
+        let pop: unsafe extern "C" fn(*mut c_void, Obj) -> Obj = j.f(POP_LOCAL_FRAME);
+        pop(env, std::ptr::null_mut());
+        if !deja {
+            detacher(vm);
+        }
+        ok.is_some()
     }
 }
 

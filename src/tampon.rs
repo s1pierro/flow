@@ -13,11 +13,13 @@ pub struct Tampon {
     pub curseur: usize,
     /// Augmente à chaque modification du texte (pour les caches).
     pub revision: u64,
+    /// L'autre bout de la sélection, s'il y en a une : elle va de l'ancre au curseur.
+    pub ancre: Option<usize>,
 }
 
 impl Tampon {
     pub fn new(texte: &str) -> Tampon {
-        Tampon { car: texte.chars().collect(), curseur: 0, revision: 0 }
+        Tampon { car: texte.chars().collect(), curseur: 0, revision: 0, ancre: None }
     }
 
     pub fn texte(&self) -> String {
@@ -37,9 +39,107 @@ impl Tampon {
         (ligne, colonne)
     }
 
-    /// Applique une frappe. Renvoie vrai si le texte a changé.
+    /// La sélection, du premier au dernier caractère (exclu), si elle n'est pas vide.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let n = self.car.len();
+        let (a, b) = (self.ancre?.min(n), self.curseur.min(n));
+        (a != b).then(|| (a.min(b), a.max(b)))
+    }
+
+    pub fn texte_selection(&self) -> Option<String> {
+        self.selection().map(|(a, b)| self.car[a..b].iter().collect())
+    }
+
+    /// Sélectionne de `a` à `b` (le curseur va en `b`).
+    pub fn selectionner(&mut self, a: usize, b: usize) {
+        let n = self.car.len();
+        self.ancre = Some(a.min(n));
+        self.curseur = b.min(n);
+    }
+
+    pub fn tout_selectionner(&mut self) {
+        self.selectionner(0, self.car.len());
+    }
+
+    /// Place le curseur en `i`, sans sélection.
+    pub fn placer(&mut self, i: usize) {
+        self.curseur = i.min(self.car.len());
+        self.ancre = None;
+    }
+
+    /// Le mot autour du caractère `i` : lettres, chiffres et `_` ; sinon une suite
+    /// d'espaces, ou le caractère seul. Vide au bout d'une ligne.
+    pub fn mot_en(&self, i: usize) -> (usize, usize) {
+        let n = self.car.len();
+        let i = i.min(n);
+        let sorte = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c == ' ' || c == '\t' { 1 } else if c == '\n' { 3 } else { 2 };
+        // Au bout d'une ligne (ou du texte), c'est le dernier mot
+        let k = if (i == n || sorte(self.car[i]) == 3) && i > 0 && sorte(self.car[i - 1]) != 3 { i - 1 } else { i };
+        if k >= n || sorte(self.car[k]) == 3 {
+            return (i, i);
+        }
+        let s = sorte(self.car[k]);
+        if s == 2 {
+            return (k, k + 1);
+        }
+        let mut a = k;
+        while a > 0 && sorte(self.car[a - 1]) == s {
+            a -= 1;
+        }
+        let mut b = k + 1;
+        while b < n && sorte(self.car[b]) == s {
+            b += 1;
+        }
+        (a, b)
+    }
+
+    /// Efface la sélection. Vrai s'il y en avait une.
+    pub fn effacer_selection(&mut self) -> bool {
+        let Some((a, b)) = self.selection() else {
+            self.ancre = None;
+            return false;
+        };
+        self.car.drain(a..b);
+        self.curseur = a;
+        self.ancre = None;
+        self.revision += 1;
+        true
+    }
+
+    /// Écrit un texte au curseur, à la place de la sélection s'il y en a une.
+    pub fn inserer(&mut self, texte: &str) -> bool {
+        let efface = self.effacer_selection();
+        self.curseur = self.curseur.min(self.car.len());
+        let v: Vec<char> = texte.chars().filter(|c| *c != '\r').collect();
+        if v.is_empty() {
+            return efface;
+        }
+        let n = v.len();
+        self.car.splice(self.curseur..self.curseur, v);
+        self.curseur += n;
+        self.revision += 1;
+        true
+    }
+
+    /// Applique une frappe. Renvoie vrai si le texte a changé. Une frappe remplace la
+    /// sélection ; Effacer l'efface ; les flèches la quittent par le bord voulu.
     pub fn appliquer(&mut self, f: Frappe) -> bool {
         self.curseur = self.curseur.min(self.car.len());
+        if let Some((a, b)) = self.selection() {
+            match f {
+                Frappe::Gauche | Frappe::Droite => {
+                    self.placer(if f == Frappe::Gauche { a } else { b });
+                    return false;
+                }
+                Frappe::Effacer => return self.effacer_selection(),
+                _ => {
+                    self.effacer_selection();
+                    self.appliquer(f);
+                    return true;
+                }
+            }
+        }
+        self.ancre = None;
         let change = match f {
             Frappe::Car(c) => {
                 self.car.insert(self.curseur, c);
@@ -252,5 +352,37 @@ mod tests {
         assert_eq!(t.revision, 3);
         t.curseur = 0;
         assert!(!t.appliquer(Frappe::Effacer));
+    }
+
+    #[test]
+    fn la_selection_se_remplace_et_s_efface() {
+        let mut t = Tampon::new("un deux_3 trois, fin\nsuite");
+        assert_eq!(t.mot_en(4), (3, 9));
+        // Sur une espace, les espaces ; au bout d'une ligne, le mot qui la finit
+        assert_eq!(t.mot_en(9), (9, 10));
+        assert_eq!(t.mot_en(15), (15, 16));
+        assert_eq!(t.mot_en(1), (0, 2));
+        assert_eq!(t.mot_en(2), (2, 3));
+        assert_eq!(t.mot_en(20), (17, 20));
+        let (a, b) = t.mot_en(4);
+        t.selectionner(b, a);
+        assert_eq!(t.texte_selection().as_deref(), Some("deux_3"));
+        assert!(t.appliquer(Frappe::Car('X')));
+        assert_eq!(t.texte(), "un X trois, fin\nsuite");
+        assert_eq!((t.curseur, t.ancre), (4, None));
+        t.selectionner(0, 3);
+        assert!(t.appliquer(Frappe::Effacer));
+        assert_eq!(t.texte(), "X trois, fin\nsuite");
+        t.selectionner(2, 7);
+        assert!(!t.appliquer(Frappe::Droite));
+        assert_eq!((t.curseur, t.selection()), (7, None));
+        t.selectionner(0, 1);
+        assert!(t.inserer("a\r\nb"));
+        assert_eq!(t.texte(), "a\nb trois, fin\nsuite");
+        t.tout_selectionner();
+        assert_eq!(t.selection(), Some((0, t.car.len())));
+        // Une sélection vide n'en est pas une
+        t.selectionner(3, 3);
+        assert_eq!(t.selection(), None);
     }
 }

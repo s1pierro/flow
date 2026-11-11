@@ -22,12 +22,25 @@
 //! - La coloration syntaxique suit l'extension du document (ou du nom saisi) :
 //!   voir `crate::syntaxe` et les dictionnaires de `Flow/syntaxes/`.
 //!
+//! - Le texte est une zone à gestes (`crate::gestes`) :
+//!   - **tap** : place le curseur et ouvre le clavier ;
+//!   - **glisser** : sélectionne, du point de départ au curseur déporté (sans
+//!     glisser plus loin que le départ, c'est déplacer le curseur) ; le texte défile
+//!     quand le curseur passe un bord ;
+//!   - **appui** : sélectionne le mot ;
+//!   - **appui long** : place le curseur et montre Coller, Tout ;
+//!   - **deux doigts** : glisser fait défiler, pincer change la taille du texte ;
+//!   - une sélection montre au-dessus d'elle Copier, Couper, Coller, Tout ;
+//!   - la gouttière fait défiler à un doigt.
+//!
 //! L'espace de travail retient le document, le curseur, le brouillon, le nom d'un
-//! nouveau document et les blocs pliés (`plis`, numéros de ligne à partir de 0).
+//! nouveau document, les blocs pliés (`plis`, numéros de ligne à partir de 0) et la
+//! taille du texte.
 
 use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
+use crate::gestes::Geste;
 use crate::syntaxe::{Bibliotheque, Classe, Plage};
 use std::sync::Arc;
 use crate::surface::{FenetreId, Placee};
@@ -46,10 +59,13 @@ const NOM_CORPS: Id = id("texte/nom-corps");
 const ENREGISTRER: Id = id("texte/enregistrer");
 const GOUTTIERE: Id = id("texte/gouttiere");
 const PLI: Id = id("texte/pli");
+const ACTION: Id = id("texte/action");
 /// La taille des numéros de ligne.
 const TAILLE_NUMEROS: f32 = 12.0;
-/// La taille du texte, et la taille de fichier au-delà de laquelle il n'est pas ouvert.
+/// La taille du texte par défaut et ses bornes (au pincement), et la taille de
+/// fichier au-delà de laquelle il n'est pas ouvert.
 const TAILLE: f32 = 15.0;
+const TAILLES: (f32, f32) = (8.0, 40.0);
 const TAILLE_MAX: u64 = 4 * 1024 * 1024;
 /// Le dossier des nouveaux documents, dans le stockage, et celui des brouillons, dans
 /// le dossier de Flow.
@@ -91,6 +107,36 @@ pub struct Texte {
     vue: Option<(u64, usize, Vec<usize>, Vec<usize>)>,
     /// Faire défiler jusqu'au curseur à la prochaine image.
     suivre: bool,
+    /// La taille du texte (0 : par défaut).
+    taille: f32,
+    /// Une saisie (un doigt qui glisse) en cours : le curseur et l'ancre d'avant,
+    /// rendus si elle est annulée.
+    saisie: Option<(usize, Option<usize>)>,
+    /// Montrer les actions (Coller, Tout) même sans sélection : après un appui long.
+    actions: bool,
+    /// Un pincement en cours : la taille à son début, puis le caractère sous le
+    /// centre des doigts et où il doit rester à l'écran (y), et s'il dure encore.
+    pince: Option<(f32, usize, f32, bool)>,
+}
+
+/// Une action sur la sélection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Action {
+    Copier,
+    Couper,
+    Coller,
+    Tout,
+}
+
+impl Action {
+    fn nom(self) -> &'static str {
+        match self {
+            Action::Copier => "Copier",
+            Action::Couper => "Couper",
+            Action::Coller => "Coller",
+            Action::Tout => "Tout",
+        }
+    }
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -99,6 +145,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         brouillon: e.texte("brouillon").map(PathBuf::from),
         curseur_lu: e.nombre("curseur").map_or(0, |n| n.max(0.0) as usize),
         nom: Edition::new(e.texte("nom").unwrap_or("")),
+        taille: e.nombre("taille").map_or(0.0, |t| t as f32),
         plis: {
             let mut v: Vec<usize> = e.nombres("plis").into_iter().map(|n| n.max(0.0) as usize).collect();
             v.sort_unstable();
@@ -345,6 +392,69 @@ impl Texte {
         }
     }
 
+    /// La taille du texte, dans ses bornes.
+    fn taille(&self) -> f32 {
+        if self.taille > 0.0 { self.taille.clamp(TAILLES.0, TAILLES.1) } else { TAILLE }
+    }
+
+    /// Les actions proposées : sur la sélection s'il y en a une, sinon Coller et Tout.
+    fn actions(&self) -> Vec<Action> {
+        let sel = self.tampon.selection().is_some();
+        let mut v = Vec::new();
+        if sel {
+            v.push(Action::Copier);
+            if !self.lecture_seule {
+                v.push(Action::Couper);
+            }
+        }
+        if !self.lecture_seule {
+            v.push(Action::Coller);
+        }
+        v.push(Action::Tout);
+        v
+    }
+
+    /// Fait une action ; le texte d'un message pour la ligne d'état.
+    fn agir(&mut self, a: Action) -> Option<String> {
+        match a {
+            Action::Copier | Action::Couper => {
+                let t = self.tampon.texte_selection()?;
+                if !crate::acces::copier(&t) {
+                    return Some("Le presse-papier n'a pas accepté le texte.".into());
+                }
+                let n = t.chars().count();
+                if a == Action::Couper && !self.lecture_seule {
+                    self.tampon.effacer_selection();
+                    self.modifie = true;
+                } else {
+                    let fin = self.tampon.selection().map_or(self.tampon.curseur, |s| s.1);
+                    self.tampon.placer(fin);
+                }
+                self.actions = false;
+                self.suivre = true;
+                Some(format!("{} : {n} caractère{}", if a == Action::Copier { "Copié" } else { "Coupé" }, if n > 1 { "s" } else { "" }))
+            }
+            Action::Coller => {
+                self.actions = false;
+                if self.lecture_seule {
+                    return None;
+                }
+                let Some(t) = crate::acces::presse_papier() else { return Some("Le presse-papier est vide.".into()) };
+                // Les tabulations et fins de ligne restent, pas les autres caractères de contrôle
+                let t: String = t.replace("\r\n", "\n").chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
+                if self.tampon.inserer(&t) {
+                    self.modifie = true;
+                }
+                self.suivre = true;
+                None
+            }
+            Action::Tout => {
+                self.tampon.tout_selectionner();
+                None
+            }
+        }
+    }
+
     /// Déplie les blocs qui cachent la ligne `l` du texte.
     fn montrer(&mut self, l: usize) {
         let blocs = self.blocs().to_vec();
@@ -379,6 +489,9 @@ impl Contexte for Texte {
         let curseur = if self.charge { self.tampon.curseur } else { self.curseur_lu };
         if curseur > 0 {
             e.mettre("curseur", curseur);
+        }
+        if self.taille > 0.0 && self.taille() != TAILLE {
+            e.mettre("taille", self.taille());
         }
         if !self.plis.is_empty() {
             e.mettre("plis", self.plis.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" "));
@@ -418,6 +531,7 @@ impl Contexte for Texte {
                 self.modifie = true;
                 self.message = None;
             }
+            self.actions = false;
             self.suivre = true;
             true
         } else if cible == sub_id(NOM, k) {
@@ -476,9 +590,11 @@ impl Contexte for Texte {
         let zone = Rect::new(r.x, r.y + haut, r.w, (r.h - haut).max(0.0));
         let champ = sub_id(CHAMP, k);
         let scroll = sub_id(TEXTE, k);
-        let lh = (cx.px(TAILLE) * 1.5).round().max(1.0);
-        let cw = cx.mesure_mono("0", TAILLE).max(1.0);
-        let cn = cx.mesure_mono("0", TAILLE_NUMEROS).max(1.0);
+        let ts = self.taille();
+        let tn = (TAILLE_NUMEROS * ts / TAILLE).clamp(9.0, 24.0);
+        let lh = (cx.px(ts) * 1.5).round().max(1.0);
+        let cw = cx.mesure_mono("0", ts).max(1.0);
+        let cn = cx.mesure_mono("0", tn).max(1.0);
         let marge_haut = 8.0 * d;
         let chiffres = self.tampon.lignes().to_string().len().max(2);
         let fleche = (lh * 0.8).round();
@@ -489,12 +605,34 @@ impl Contexte for Texte {
         let seg_curseur = ligne_de(self.segments(colonnes), curseur);
         let l_curseur = self.coupe.as_ref().unwrap().3[seg_curseur];
         self.montrer(l_curseur);
+        if let Some((sa, sb)) = self.tampon.selection() {
+            // Ni les bouts de la sélection
+            for i in [sa, sb] {
+                let si = ligne_de(self.segments(colonnes), i);
+                let l = self.coupe.as_ref().unwrap().3[si];
+                self.montrer(l);
+            }
+        }
         let vis = self.visibles(colonnes);
         let rang = |seg: usize| vis.partition_point(|&v| v < seg);
         let ligne_curseur = rang(seg_curseur);
         let n = vis.len();
-        // Le curseur reste visible après une frappe
-        if std::mem::take(&mut self.suivre) {
+        let (s, logique) = {
+            let co = self.coupe.as_ref().unwrap();
+            (co.2.clone(), co.3.clone())
+        };
+        let contenu_min = marge_haut + n as f32 * lh + 12.0 * d;
+        // Pendant un pincement, le caractère sous les doigts reste sous les doigts
+        if let Some((_, i, y, dure)) = self.pince {
+            let (_, contenu) = c.scrolls.get(&scroll).copied().unwrap_or((0.0, 0.0));
+            let off = marge_haut + rang(ligne_de(&s, i)) as f32 * lh + lh / 2.0 - (y - zone.y);
+            let contenu = contenu.max(contenu_min);
+            c.scrolls.insert(scroll, (off.clamp(0.0, (contenu - zone.h).max(0.0)), contenu));
+            if !dure {
+                self.pince = None;
+            }
+        } else if std::mem::take(&mut self.suivre) {
+            // Le curseur reste visible après une frappe
             let (off, contenu) = c.scrolls.get(&scroll).copied().unwrap_or((0.0, 0.0));
             let y = marge_haut + ligne_curseur as f32 * lh;
             let mut off = off;
@@ -503,18 +641,12 @@ impl Contexte for Texte {
             } else if y + lh > off + zone.h {
                 off = y + lh - zone.h + marge_haut;
             }
-            let contenu = contenu.max(marge_haut + n as f32 * lh + 12.0 * d);
-            c.scrolls.insert(scroll, (off.max(0.0), contenu));
+            c.scrolls.insert(scroll, (off.max(0.0), contenu.max(contenu_min)));
         }
         let mut b = cx.body(scroll, zone, &c.scrolls);
         let top = b.y;
         let vue = b.rect();
         let xt = b.x + gouttiere;
-        let focus = c.clavier.cible == Some(champ);
-        let (s, logique) = {
-            let co = self.coupe.as_ref().unwrap();
-            (co.2.clone(), co.3.clone())
-        };
         let blocs_ = self.blocs().to_vec();
         let premiere = ((vue.y - top) / lh).floor().max(0.0) as usize;
         let derniere = (((vue.bottom() - top) / lh).ceil().max(0.0) as usize).min(n);
@@ -522,8 +654,93 @@ impl Contexte for Texte {
         let g = Rect::new(vue.x, vue.y, b.x - vue.x + gouttiere - 4.0 * d, vue.h);
         cx.dl.rrect(g, 0.0, col.fond);
         cx.dl.rrect(Rect::new(g.right(), vue.y, d.max(1.0), vue.h), 0.0, col.ligne);
-        cx.ui.region_add(champ, Rect::new(g.right(), zone.y, zone.right() - g.right(), zone.h), Sense::Click { scroll: Some(b.id()) });
-        // Toucher la gouttière plie ou déplie le bloc de la ligne
+        // Le caractère sous un point de l'écran : entre deux caractères pour le curseur,
+        // ou celui que couvre le doigt (`dessous`)
+        let pos = |x: f32, y: f32, dessous: bool| -> usize {
+            let row = ((y - top) / lh).floor().max(0.0) as usize;
+            let seg = vis.get(row.min(n.saturating_sub(1))).copied().unwrap_or(0);
+            let c = (x - xt) / cw;
+            let colonne = if dessous { c.floor() } else { c.round() }.max(0.0) as usize;
+            position_en(&s, seg, colonne)
+        };
+        // Les gestes sur le texte
+        let gestes = cx.ui.gestes(champ, Rect::new(g.right(), zone.y, zone.right() - g.right(), zone.h));
+        let mut ouvrir_clavier = false;
+        for ev in gestes {
+            if matches!(ev, Geste::Tap { .. } | Geste::Appui { .. } | Geste::SaisieDebut { .. }) {
+                self.message = None;
+            }
+            match ev {
+                Geste::Tap { x, y, .. } => {
+                    self.tampon.placer(pos(x, y, false));
+                    self.actions = false;
+                    ouvrir_clavier = true;
+                }
+                Geste::Appui { x, y, .. } => {
+                    let (a, e) = self.tampon.mot_en(pos(x, y, true));
+                    self.tampon.selectionner(a, e);
+                    self.actions = false;
+                }
+                Geste::AppuiLong { x, y, .. } => {
+                    // Dans la sélection, elle reste ; ailleurs, le curseur s'y place
+                    let i = pos(x, y, false);
+                    if !self.tampon.selection().is_some_and(|(a, e)| a <= i && i <= e) {
+                        self.tampon.placer(i);
+                    }
+                    self.actions = true;
+                }
+                Geste::SaisieDebut { x, y, .. } => {
+                    self.saisie = Some((self.tampon.curseur, self.tampon.ancre));
+                    let i = pos(x, y, false);
+                    self.tampon.selectionner(i, i);
+                    self.actions = false;
+                }
+                Geste::SaisieDeplace { x, y, .. } => {
+                    self.tampon.curseur = pos(x, y, false);
+                    // Le texte défile quand le curseur passe un bord
+                    self.suivre = y < vue.y + lh || y > vue.bottom() - lh;
+                }
+                Geste::SaisieFin { x, y, .. } => {
+                    self.saisie = None;
+                    self.tampon.curseur = pos(x, y, false);
+                    if self.tampon.selection().is_none() {
+                        // Une saisie sans étendue a déplacé le curseur
+                        self.tampon.ancre = None;
+                        ouvrir_clavier = true;
+                    }
+                }
+                Geste::SaisieAnnulee { .. } => {
+                    if let Some((cu, an)) = self.saisie.take() {
+                        self.tampon.curseur = cu;
+                        self.tampon.ancre = an;
+                    }
+                }
+                Geste::PincementDebut { centre } => {
+                    self.pince = Some((ts, pos(centre.0, centre.1, true), centre.1, true));
+                    self.actions = false;
+                }
+                Geste::Pincement { echelle, deplacement, .. } => {
+                    if let Some(p) = &mut self.pince {
+                        self.taille = (p.0 * echelle).clamp(TAILLES.0, TAILLES.1);
+                        p.2 += deplacement.1;
+                    }
+                }
+                Geste::PincementFin { .. } => {
+                    if let Some(p) = &mut self.pince {
+                        p.3 = false;
+                    }
+                    // Une taille ronde, au demi-point
+                    self.taille = (self.taille() * 2.0).round() / 2.0;
+                }
+                _ => {}
+            }
+        }
+        if ouvrir_clavier && !self.lecture_seule {
+            c.clavier.ouvrir(champ);
+            self.suivre = true;
+        }
+        let focus = c.clavier.cible == Some(champ);
+        // Toucher la gouttière plie ou déplie le bloc de la ligne ; y glisser fait défiler
         let kg = sub_id(GOUTTIERE, k);
         cx.ui.region_add(kg, g, Sense::Click { scroll: Some(b.id()) });
         let mut basculer = None;
@@ -537,18 +754,32 @@ impl Contexte for Texte {
         let bib = c.syntaxes();
         self.colorer(&bib);
         let plages = self.couleurs.as_ref().map_or(Vec::new(), |c| c.3.clone());
+        let selection = self.tampon.selection();
         // Les pastilles « ··· » des blocs repliés : les toucher déplie
         let mut pastilles = Vec::new();
         let couleur = if self.lecture_seule { col.pale } else { col.texte };
         let l_courante = l_curseur;
+        let fond_sel = [col.accent[0], col.accent[1], col.accent[2], 70];
         for row in premiere..derniere {
             let si = vis[row];
             let (a, e) = s[si];
             let y = top + row as f32 * lh;
             let cy = y + lh / 2.0;
             let t: String = self.tampon.car[a..e].iter().collect();
+            // La sélection, sous le texte ; au-delà du bout de la ligne si elle continue
+            if let Some((sa, sb)) = selection {
+                let (da, de) = (sa.max(a), sb.min(e));
+                let suite = sb > e && sa <= e;
+                if da < de || suite {
+                    let avant: String = self.tampon.car[a..da.min(e)].iter().collect();
+                    let dedans: String = self.tampon.car[da.min(e)..de.max(da.min(e))].iter().collect();
+                    let x0 = xt + cx.mesure_mono(&avant, ts);
+                    let w = cx.mesure_mono(&dedans, ts) + if suite { cw * 0.6 } else { 0.0 };
+                    cx.dl.rrect(Rect::new(x0, y, w, lh), 0.0, fond_sel);
+                }
+            }
             if plages.is_empty() || self.lecture_seule {
-                cx.mono_at(xt, cy, &t, TAILLE, couleur);
+                cx.mono_at(xt, cy, &t, ts, couleur);
             } else {
                 // Par morceaux : le texte ordinaire et les plages colorées
                 let mut pos = a;
@@ -556,8 +787,8 @@ impl Contexte for Texte {
                 let morceau = |cx: &mut Cx, de: usize, a_: usize, teinte: Color, x: &mut f32| {
                     if a_ > de {
                         let m: String = self.tampon.car[de..a_].iter().collect();
-                        cx.mono_at(*x, cy, &m, TAILLE, teinte);
-                        *x += cx.mesure_mono(&m, TAILLE);
+                        cx.mono_at(*x, cy, &m, ts, teinte);
+                        *x += cx.mesure_mono(&m, ts);
                     }
                 };
                 let mut k = plages.partition_point(|p| p.1 <= a);
@@ -575,9 +806,9 @@ impl Contexte for Texte {
             let premiere_du_texte = si == 0 || logique[si - 1] != l;
             if premiere_du_texte {
                 let num = (l + 1).to_string();
-                let wn = cx.mesure_mono(&num, TAILLE_NUMEROS);
+                let wn = cx.mesure_mono(&num, tn);
                 let xn = b.x + chiffres as f32 * cn - wn;
-                cx.mono_at(xn, cy, &num, TAILLE_NUMEROS, if l == l_courante && focus { col.texte } else { col.pale });
+                cx.mono_at(xn, cy, &num, tn, if l == l_courante && focus { col.texte } else { col.pale });
                 if let Some(bl) = blocs_.iter().find(|x| x.0 == l) {
                     let plie = self.plis.binary_search(&l).is_ok() && bl.1 > bl.0 + 1;
                     let f = Rect::new(b.x + chiffres as f32 * cn + 4.0 * d, y + (lh - fleche) / 2.0, fleche, fleche);
@@ -598,12 +829,12 @@ impl Contexte for Texte {
             if derniere_du_texte && self.plis.binary_search(&l).is_ok() {
                 if let Some(bl) = blocs_.iter().find(|x| x.0 == l && x.1 > x.0 + 1) {
                     let texte = format!("··· {}", bl.1 - bl.0 - 1);
-                    let wp = cx.mesure_mono(&texte, TAILLE_NUMEROS) + 12.0 * d;
-                    let pr = Rect::new(xt + cx.mesure_mono(&t, TAILLE) + 8.0 * d, y + lh * 0.15, wp, lh * 0.7);
+                    let wp = cx.mesure_mono(&texte, tn) + 12.0 * d;
+                    let pr = Rect::new(xt + cx.mesure_mono(&t, ts) + 8.0 * d, y + lh * 0.15, wp, lh * 0.7);
                     let kp = sub_id(PLI, k * 1_000_003 + l);
                     pastilles.push((kp, pr, l));
                     cx.dl.rrect(pr, pr.h / 2.0, col.puce);
-                    cx.mono_at(pr.x + 6.0 * d, pr.cy(), &texte, TAILLE_NUMEROS, col.accent);
+                    cx.mono_at(pr.x + 6.0 * d, pr.cy(), &texte, tn, col.accent);
                 }
             }
         }
@@ -612,32 +843,60 @@ impl Contexte for Texte {
                 basculer = Some(l);
             }
         }
-        if let Some((x, y)) = cx.ui.clic_en(champ) {
-            let row = ((y - top) / lh).floor().max(0.0) as usize;
-            let seg = vis.get(row.min(n.saturating_sub(1))).copied().unwrap_or(0);
-            let colonne = ((x - xt) / cw).round().max(0.0) as usize;
-            self.tampon.curseur = position_en(&s, seg, colonne);
-            if !self.lecture_seule {
-                c.clavier.ouvrir(champ);
-                self.suivre = true;
-            }
-        }
         if let Some(l) = basculer {
             self.basculer(l);
         }
         if self.tampon.car.is_empty() && !focus {
-            cx.text_at(xt, top + lh / 2.0, if self.lecture_seule { "" } else { "Touchez pour écrire" }, TAILLE, col.pale);
+            cx.text_at(xt, top + lh / 2.0, if self.lecture_seule { "" } else { "Touchez pour écrire" }, ts, col.pale);
         }
-        if focus {
-            let curseur = self.tampon.curseur;
+        // Le curseur ; avec une sélection, sa poignée (le bout qui bouge)
+        if focus || selection.is_some() || self.saisie.is_some() {
+            let curseur = self.tampon.curseur.min(self.tampon.car.len());
             let l = ligne_de(&s, curseur);
             let avant: String = self.tampon.car[s[l].0..curseur.max(s[l].0)].iter().collect();
-            let x = xt + cx.mesure_mono(&avant, TAILLE);
+            let x = xt + cx.mesure_mono(&avant, ts);
             let y = top + rang(l) as f32 * lh;
-            cx.dl.rrect(Rect::new(x - d, y + lh * 0.15, 2.0 * d, lh * 0.7), d, col.accent);
+            cx.dl.rrect(Rect::new(x - d, y + lh * 0.1, 2.0 * d, lh * 0.8), d, col.accent);
+            if selection.is_some() {
+                let p = 4.0 * d;
+                cx.dl.rrect(Rect::new(x - p, y + lh * 0.9, 2.0 * p, 2.0 * p), p, col.accent);
+            }
         }
         b.y = top + n as f32 * lh;
         cx.body_end(b, &mut c.scrolls);
+
+        // Les actions : au-dessus de la sélection (ou dessous s'il n'y a pas la place),
+        // après un appui long au-dessus du curseur ; pas pendant un geste
+        let montrer = (selection.is_some() || self.actions) && self.saisie.is_none() && self.pince.is_none();
+        if montrer {
+            let debut = selection.map_or(self.tampon.curseur, |x| x.0);
+            let fin = selection.map_or(self.tampon.curseur, |x| x.1);
+            let (la, lf) = (ligne_de(&s, debut), ligne_de(&s, fin));
+            let ya = top + rang(la) as f32 * lh;
+            let yf = top + (rang(lf) + 1) as f32 * lh;
+            let avant: String = self.tampon.car[s[la].0..debut.max(s[la].0)].iter().collect();
+            let xa = xt + cx.mesure_mono(&avant, ts);
+            let actions = self.actions();
+            let largeurs: Vec<f32> = actions.iter().map(|a| cx.pill_width(a.nom())).collect();
+            let large = largeurs.iter().sum::<f32>() + gap * (actions.len() - 1) as f32;
+            let hc = cx.commande();
+            let ecart = 10.0 * d;
+            let y = if ya - hc - ecart >= zone.y { ya - hc - ecart } else { (yf + ecart).min(zone.bottom() - hc - ecart) };
+            let y = y.max(zone.y + ecart.min(zone.h));
+            let mut x = (xa - large / 2.0).clamp(zone.x + m, (zone.right() - m - large).max(zone.x + m));
+            let mut choisie = None;
+            for (i, a) in actions.iter().enumerate() {
+                if cx.pill(sub_id(ACTION, k * 8 + i), x, y, a.nom(), false) {
+                    choisie = Some(*a);
+                }
+                x += largeurs[i] + gap;
+            }
+            if let Some(a) = choisie {
+                if let Some(msg) = self.agir(a) {
+                    self.message = Some((msg, false));
+                }
+            }
+        }
 
         // La ligne d'état
         if let Some((msg, _)) = &self.message {
@@ -765,6 +1024,34 @@ mod tests {
         t.tampon.revision += 1;
         assert!(t.blocs().is_empty());
         assert!(t.plis.is_empty());
+    }
+
+    #[test]
+    fn copier_couper_coller_et_la_taille() {
+        let mut t = Texte::default();
+        t.charger();
+        taper(&mut t, "un deux trois");
+        assert_eq!(t.actions(), vec![Action::Coller, Action::Tout]);
+        let (a, b) = t.tampon.mot_en(4);
+        t.tampon.selectionner(a, b);
+        assert_eq!(t.actions(), vec![Action::Copier, Action::Couper, Action::Coller, Action::Tout]);
+        assert_eq!(t.agir(Action::Couper).as_deref(), Some("Coupé : 4 caractères"));
+        assert_eq!(t.tampon.texte(), "un  trois");
+        t.tampon.placer(t.tampon.car.len());
+        t.agir(Action::Coller);
+        assert_eq!(t.tampon.texte(), "un  troisdeux");
+        // Coller remplace la sélection
+        t.agir(Action::Tout);
+        t.agir(Action::Coller);
+        assert_eq!(t.tampon.texte(), "deux");
+        // Une frappe ferme les actions ; la taille se retient
+        t.actions = true;
+        taper(&mut t, "!");
+        assert!(!t.actions);
+        t.taille = 99.0;
+        let mut e = Etat::default();
+        t.ecrire(&mut e);
+        assert_eq!(e.nombre("taille").map(|x| x as f32), Some(TAILLES.1));
     }
 
     #[test]

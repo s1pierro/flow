@@ -48,6 +48,7 @@ fn main() {
         Shot { name: "texte-code", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte-html", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte-python", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "texte-selection", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 3 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -58,7 +59,9 @@ fn main() {
     println!("nuanceurs compilés et liés");
     let mut text = Text::new();
 
-    for s in shots {
+    // FLOW_APERCU=nom : une seule prise de vue
+    let seule = std::env::var("FLOW_APERCU").ok();
+    for s in shots.into_iter().filter(|s| seule.as_deref().is_none_or(|n| n == s.name)) {
         let (w, h) = (s.w as f32, s.h as f32);
         let screen = Rect::new(0.0, 0.0, w, h);
         let mut app = App::new(s.dp);
@@ -141,6 +144,11 @@ fn main() {
             app.ouvrir_espace(&format!("fenetres = L0.5000(F1:texte,F2:texte)\n[fenetre 1]\ndocument = {}\n[fenetre 2]\ndocument = {}\n", py.display(), md.display()));
             app.commun.theme.sombre = true;
         }
+        if s.name == "texte-selection" {
+            // Un doigt glisse dans le texte : la sélection et ses actions
+            let f = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tampon.rs");
+            app.ouvrir_espace(&format!("fenetres = F1:texte\n[fenetre 1]\ndocument = {f}\ntaille = 17\n"));
+        }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu
             app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
@@ -173,6 +181,12 @@ fn main() {
                     ui.event(Event::Move { id: 0, x: 420.0 + 24.0 * k, y: 700.0 + 9.0 * k - 0.5 * k * k }, t)
                 }
                 (2, 30) => ui.event(Event::Down { id: 0, x: 300.0, y: 500.0 }, t),
+                (3, 10) => ui.event(Event::Down { id: 0, x: 430.0, y: 700.0 }, t),
+                (3, 11..=20) => {
+                    let k = (i - 10) as f32;
+                    ui.event(Event::Move { id: 0, x: 430.0 + 50.0 * k, y: 700.0 + 26.0 * k }, t)
+                }
+                (3, 21) => ui.event(Event::Up { id: 0 }, t),
                 _ => {}
             }
             if i == 30 && s.name == "accueil-menu" {
