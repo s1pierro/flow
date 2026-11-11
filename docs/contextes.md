@@ -38,7 +38,8 @@ barre du bas.
 Les contextes existants servent d'exemples, du plus simple au plus complet :
 `aide.rs` (rien à retenir), `radio.rs` (un champ de texte et le clavier),
 `mixeur.rs` (une ressource globale, une animation, deux mises en page selon la place), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
-d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
+d'ouverture, l'appui long `cx.ui.click_long`, une boîte de dialogue, un état partagé entre
+fenêtres et une opération en arrière-plan : `Commun::fichiers`, `src/operations.rs`), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
 par noms et résolu plus tard) — l'analyse se résume dans `Commun::empreintes`, enregistrée
 dans `Flow/empreintes.txt`, que Fichiers lit sans relancer de parcours, `texte.rs` (un contexte à document : lecture,
 enregistrement, brouillons, découpage des lignes, sélection et historique (annuler, rétablir) dans `src/tampon.rs`,

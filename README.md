@@ -8,7 +8,9 @@ composer son espace de travail à son goût. Née d'une copie de
 **Télécharger :** [flow-0.17.apk](https://github.com/s1pierro/flow/releases/download/v0.17/flow-0.17.apk)
 
 Contextes : Accueil (les contextes en cartes, celui des fenêtres nées du menu), Fichiers (les
-entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers), Texte (éditeur aux gestes : glisser sélectionne au curseur déporté, appui choisit un mot, appui long propose
+entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers ; recherche, tri par nom, date,
+taille ou type ; créer, renommer ; sélection à l'appui long, copier, couper, coller et supprimer, en
+arrière-plan avec avancement), Texte (éditeur aux gestes : glisser sélectionne au curseur déporté, appui choisit un mot, appui long propose
 Coller, deux doigts font défiler et pincer change la taille, Copier/Couper/Coller au-dessus de la sélection, une poignée à chaque bout pour l'ajuster ;
 Annuler et Rétablir à gauche du titre, par mot ou par ligne ;
 numéros de ligne, blocs entre accolades repliables et coloration

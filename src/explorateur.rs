@@ -189,6 +189,67 @@ pub fn trier(l: &mut [Entree]) {
     l.sort_by(|a, b| b.dossier().cmp(&a.dossier()).then_with(|| comparer(&a.nom, &b.nom)));
 }
 
+/// L'ordre des entrées : les dossiers toujours d'abord, puis selon le critère.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tri {
+    /// Par nom, dans l'ordre naturel.
+    #[default]
+    Nom,
+    /// Les plus récents d'abord.
+    Date,
+    /// Les plus gros d'abord (les dossiers, par nom).
+    Taille,
+    /// Par extension, puis par nom.
+    Type,
+}
+
+impl Tri {
+    pub const TOUS: [Tri; 4] = [Tri::Nom, Tri::Date, Tri::Taille, Tri::Type];
+
+    pub fn nom(self) -> &'static str {
+        match self {
+            Tri::Nom => "Nom",
+            Tri::Date => "Date",
+            Tri::Taille => "Taille",
+            Tri::Type => "Type",
+        }
+    }
+
+    pub fn de(nom: &str) -> Option<Tri> {
+        Tri::TOUS.into_iter().find(|t| t.nom().eq_ignore_ascii_case(nom))
+    }
+
+    pub fn suivant(self) -> Tri {
+        let i = Tri::TOUS.iter().position(|t| *t == self).unwrap_or(0);
+        Tri::TOUS[(i + 1) % Tri::TOUS.len()]
+    }
+}
+
+/// Trie selon `tri`, les dossiers d'abord.
+pub fn trier_par(l: &mut [Entree], tri: Tri) {
+    use std::cmp::Ordering;
+    let ext = |n: &str| n.rsplit_once('.').filter(|(a, _)| !a.is_empty()).map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    l.sort_by(|a, b| {
+        let critere = match tri {
+            Tri::Nom => Ordering::Equal,
+            Tri::Date => b.modifie.cmp(&a.modifie),
+            Tri::Taille => b.taille.cmp(&a.taille),
+            Tri::Type => ext(&a.nom).cmp(&ext(&b.nom)),
+        };
+        b.dossier().cmp(&a.dossier()).then(critere).then_with(|| comparer(&a.nom, &b.nom))
+    });
+}
+
+/// Vrai si `nom` contient `motif`, sans tenir compte de la casse ni des accents.
+pub fn correspond(nom: &str, motif: &str) -> bool {
+    let motif: Vec<char> = motif.trim().chars().map(cle).collect();
+    if motif.is_empty() {
+        return true;
+    }
+    let nom: Vec<char> = nom.chars().map(cle).collect();
+    nom.windows(motif.len()).any(|w| w == motif.as_slice())
+}
+
 fn cle(c: char) -> char {
     let c = c.to_lowercase().next().unwrap_or(c);
     match c {
@@ -325,6 +386,32 @@ mod tests {
         assert_eq!(badge("flow-0.11.apk"), "APK");
         assert_eq!(badge("LISEZMOI"), "?");
         assert_eq!(badge("x.markdown"), "MARK");
+    }
+
+    #[test]
+    fn trier_par_date_taille_type_et_chercher() {
+        use std::time::Duration;
+        let t = |s: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+        let mut l = vec![
+            Entree { nom: "b.txt".into(), nature: Nature::Texte, taille: 50, modifie: t(30) },
+            Entree { nom: "a.mp3".into(), nature: Nature::Audio, taille: 900, modifie: t(10) },
+            Entree { nom: "Z".into(), nature: Nature::Dossier, taille: 0, modifie: t(5) },
+            Entree { nom: "c.flac".into(), nature: Nature::Audio, taille: 10, modifie: t(20) },
+        ];
+        let noms = |l: &[Entree]| l.iter().map(|e| e.nom.clone()).collect::<Vec<_>>().join(" ");
+        trier_par(&mut l, Tri::Date);
+        assert_eq!(noms(&l), "Z b.txt c.flac a.mp3");
+        trier_par(&mut l, Tri::Taille);
+        assert_eq!(noms(&l), "Z a.mp3 b.txt c.flac");
+        trier_par(&mut l, Tri::Type);
+        assert_eq!(noms(&l), "Z c.flac a.mp3 b.txt");
+        trier_par(&mut l, Tri::Nom);
+        assert_eq!(noms(&l), "Z a.mp3 b.txt c.flac");
+        assert_eq!(Tri::de("taille"), Some(Tri::Taille));
+        assert_eq!(Tri::Type.suivant(), Tri::Nom);
+        assert!(correspond("Été 2024.JPG", "ete 20"));
+        assert!(correspond("x", "  "));
+        assert!(!correspond("photo", "photos"));
     }
 
     #[test]

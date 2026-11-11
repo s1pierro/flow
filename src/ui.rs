@@ -43,6 +43,9 @@ pub enum Sense {
     /// Le doigt pilote directement la zone (curseur, poignée).
     Drag,
     Scroll,
+    /// Comme `Click`, et l'appui long : tenu sans glisser jusqu'au seuil de l'appui
+    /// des gestes, il est signalé (`appui_long`) et le lâcher n'est plus un clic.
+    Appui { scroll: Option<Id> },
     /// Zone à gestes élaborés : ses doigts vont à son moteur.
     Gestes,
     /// Absorbe le doigt sans rien faire : le fond d'un panneau.
@@ -73,6 +76,9 @@ struct Pointer {
     start: (f32, f32),
     owner: Owner,
     slid: bool,
+    /// L'instant du contact, et si l'appui long a été signalé.
+    debut: f64,
+    long: bool,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -94,6 +100,8 @@ pub struct Ui {
     /// Où chaque clic de l'image s'est levé.
     clic_pos: Vec<(Id, f32, f32)>,
     double_taps: Vec<Id>,
+    /// Les zones `Appui` tenues assez longtemps, à cette image.
+    longs: Vec<Id>,
     last_tap: Option<(Id, f64)>,
     drags: HashMap<Id, Drag>,
     scrolls: HashMap<Id, f32>,
@@ -119,6 +127,7 @@ impl Ui {
             clicks: Vec::new(),
             clic_pos: Vec::new(),
             double_taps: Vec::new(),
+            longs: Vec::new(),
             last_tap: None,
             drags: HashMap::new(),
             scrolls: HashMap::new(),
@@ -151,7 +160,7 @@ impl Ui {
                 let owner = match self.hit(x, y) {
                     None => Owner::Nobody,
                     Some(r) => match r.sense {
-                        Sense::Click { .. } => Owner::Widget(r.id),
+                        Sense::Click { .. } | Sense::Appui { .. } => Owner::Widget(r.id),
                         Sense::Drag => {
                             self.drags.insert(r.id, Drag { x, y, moved: false });
                             Owner::Widget(r.id)
@@ -167,7 +176,7 @@ impl Ui {
                     },
                 };
                 self.pointers.retain(|p| p.id != id);
-                self.pointers.push(Pointer { id, x, y, start: (x, y), owner, slid: false });
+                self.pointers.push(Pointer { id, x, y, start: (x, y), owner, slid: false, debut: t, long: false });
             }
             Event::Move { id, x, y } => self.moved(id, x, y, t),
             Event::Up { id } => {
@@ -210,6 +219,37 @@ impl Ui {
             m.temps(self.maintenant, &r);
         }
         self.recueillir();
+        // Les appuis longs des zones `Appui`
+        for i in 0..self.pointers.len() {
+            let p = self.pointers[i];
+            if self.long_en_attente(&p) && self.maintenant - p.debut >= r.appui as f64 {
+                self.pointers[i].long = true;
+                if let Owner::Widget(w) = p.owner {
+                    self.longs.push(w);
+                }
+                self.agite = true;
+            }
+        }
+    }
+
+    /// Un doigt posé sur une zone `Appui`, sans avoir glissé, dont l'appui long n'est
+    /// pas encore signalé.
+    fn long_en_attente(&self, p: &Pointer) -> bool {
+        match p.owner {
+            Owner::Widget(w) => !p.slid && !p.long && matches!(self.region(w).map(|r| r.sense), Some(Sense::Appui { .. })),
+            _ => false,
+        }
+    }
+
+    /// Vrai une fois, à l'image où la zone `id` a été tenue assez longtemps.
+    pub fn appui_long(&self, id: Id) -> bool {
+        self.longs.contains(&id)
+    }
+
+    /// Zone cliquable qui connaît aussi l'appui long : (clic, appui long).
+    pub fn click_long(&mut self, id: Id, rect: Rect, scroll: Option<Id>) -> (bool, bool) {
+        self.region_add(id, rect, Sense::Appui { scroll });
+        (self.clicked(id), self.appui_long(id))
     }
 
     /// Zone à gestes élaborés : les événements reçus depuis l'image précédente.
@@ -225,7 +265,7 @@ impl Ui {
 
     /// Vrai si un geste en cours change d'état avec le temps : il faut redessiner.
     pub fn gestes_en_attente(&self) -> bool {
-        self.moteurs.values().any(Moteur::en_attente)
+        self.moteurs.values().any(Moteur::en_attente) || self.pointers.iter().any(|p| self.long_en_attente(p))
     }
 
     fn moved(&mut self, id: i32, x: f32, y: f32, t: f64) {
@@ -240,7 +280,7 @@ impl Ui {
         let slid = self.pointers[i].slid;
         match self.pointers[i].owner {
             Owner::Widget(w) => match self.region(w).map(|r| r.sense) {
-                Some(Sense::Click { scroll: Some(s) }) if slid => self.pointers[i].owner = Owner::Scroll(s),
+                Some(Sense::Click { scroll: Some(s) } | Sense::Appui { scroll: Some(s) }) if slid && !self.pointers[i].long => self.pointers[i].owner = Owner::Scroll(s),
                 Some(Sense::Drag) => {
                     self.drags.insert(w, Drag { x, y, moved: slid });
                 }
@@ -270,7 +310,7 @@ impl Ui {
         if matches!(self.region(w).map(|r| r.sense), Some(Sense::Drag)) {
             self.drags.remove(&w);
         }
-        if p.slid {
+        if p.slid || p.long {
             return;
         }
         self.clicks.push(w);
@@ -345,6 +385,7 @@ impl Ui {
         self.clicks.clear();
         self.clic_pos.clear();
         self.double_taps.clear();
+        self.longs.clear();
         // Les événements qu'aucune zone n'a lus sont perdus ; les moteurs des zones
         // disparues aussi, une fois au repos
         self.sorties.clear();
@@ -454,6 +495,45 @@ mod tests {
         u.event(Event::Down { id: 0, x: 500., y: 500. }, 2.0);
         u.event(Event::Move { id: 0, x: 600., y: 500. }, 2.1);
         assert_eq!(u.gestes_actifs()[0].curseur, Some((540., 500.)));
+    }
+
+    #[test]
+    fn l_appui_long_n_est_pas_un_clic() {
+        const CARTE: Id = id("carte");
+        let mut u = Ui::new(1.0);
+        // Chaque image redéclare ses zones
+        let image = |u: &mut Ui| {
+            u.region_add(SCROLL, Rect::new(0., 0., 300., 300.), Sense::Scroll);
+            u.region_add(CARTE, Rect::new(0., 0., 100., 50.), Sense::Appui { scroll: Some(SCROLL) });
+            u.end_frame();
+        };
+        image(&mut u);
+        // Bref : un clic
+        u.event(Event::Down { id: 0, x: 10., y: 10. }, 0.0);
+        u.event(Event::Up { id: 0 }, 0.1);
+        assert!(u.clicked(CARTE) && !u.appui_long(CARTE));
+        image(&mut u);
+        // Tenu : l'appui long, signalé une fois, puis pas de clic au lâcher
+        u.event(Event::Down { id: 0, x: 10., y: 10. }, 1.0);
+        assert!(u.gestes_en_attente());
+        u.horloge(1.2);
+        assert!(!u.appui_long(CARTE));
+        u.horloge(1.6);
+        assert!(u.appui_long(CARTE));
+        assert!(!u.gestes_en_attente());
+        image(&mut u);
+        u.horloge(1.8);
+        assert!(!u.appui_long(CARTE));
+        u.event(Event::Up { id: 0 }, 1.9);
+        assert!(!u.clicked(CARTE));
+        image(&mut u);
+        // Glisser fait défiler, sans appui long
+        u.event(Event::Down { id: 0, x: 10., y: 10. }, 2.0);
+        u.event(Event::Move { id: 0, x: 10., y: 40. }, 2.1);
+        u.horloge(3.0);
+        assert!(!u.appui_long(CARTE));
+        u.event(Event::Up { id: 0 }, 3.1);
+        assert!(!u.clicked(CARTE));
     }
 
     #[test]

@@ -49,6 +49,8 @@ fn main() {
         Shot { name: "texte-html", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte-python", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte-selection", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 3 },
+        Shot { name: "fichiers-selection", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 4 },
+        Shot { name: "fichiers-nouveau", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 5 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -149,6 +151,15 @@ fn main() {
             let f = concat!(env!("CARGO_MANIFEST_DIR"), "/src/tampon.rs");
             app.ouvrir_espace(&format!("fenetres = F1:texte\n[fenetre 1]\ndocument = {f}\ntaille = 17\n"));
         }
+        if s.name == "fichiers-nouveau" {
+            // La boîte « Nouveau », au-dessus de Fichiers, en sombre
+            app.ouvrir_espace(&format!("fenetres = F1:fichiers\n[fenetre 1]\ndossier = {}\n", env!("CARGO_MANIFEST_DIR")));
+            app.commun.theme.sombre = true;
+        }
+        if s.name == "fichiers-selection" {
+            // Fichiers sur le projet, trié par taille : un appui long sélectionne, un toucher ajoute
+            app.ouvrir_espace(&format!("fenetres = F1:fichiers\n[fenetre 1]\ndossier = {}\ntri = Taille\n", env!("CARGO_MANIFEST_DIR")));
+        }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu
             app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
@@ -187,6 +198,12 @@ fn main() {
                     ui.event(Event::Move { id: 0, x: 430.0 + 50.0 * k, y: 700.0 + 26.0 * k }, t)
                 }
                 (3, 21) => ui.event(Event::Up { id: 0 }, t),
+                (5, 10) => ui.event(Event::Down { id: 0, x: 1850.0, y: 136.0 }, t),
+                (5, 11) => ui.event(Event::Up { id: 0 }, t),
+                (4, 10) => ui.event(Event::Down { id: 0, x: 700.0, y: 330.0 }, t),
+                (4, 25) => ui.event(Event::Up { id: 0 }, t),
+                (4, 30) => ui.event(Event::Down { id: 0, x: 1100.0, y: 330.0 }, t),
+                (4, 31) => ui.event(Event::Up { id: 0 }, t),
                 // Puis la poignée de fin descend de quelques lignes, tenue
                 (3, 30) => ui.event(Event::Down { id: 0, x: 360.0, y: 950.0 }, t),
                 (3, 31..=40) => {

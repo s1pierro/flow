@@ -22,6 +22,7 @@ pub mod explorateur;
 pub mod gestes;
 pub mod gles;
 pub mod mixage;
+pub mod operations;
 pub mod orchestre;
 pub mod parametres;
 pub mod radio;

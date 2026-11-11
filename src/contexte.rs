@@ -131,6 +131,9 @@ pub struct Commun {
     /// Les dictionnaires de coloration syntaxique, lus à la première demande et relus
     /// au retour dans l'application.
     pub syntaxes: Option<Arc<crate::syntaxe::Bibliotheque>>,
+    /// Le presse-papier des fichiers et l'opération en cours, communs aux fenêtres
+    /// Fichiers.
+    pub fichiers: crate::operations::Manutention,
 }
 
 impl Default for Commun {
@@ -152,6 +155,7 @@ impl Default for Commun {
             demandes: Vec::new(),
             orchestre: Orchestre::default(),
             syntaxes: None,
+            fichiers: Default::default(),
         }
     }
 }
