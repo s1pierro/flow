@@ -338,5 +338,5 @@ avec son état exposé dans le contexte Orchestre.
 
 ## À venir
 
-- SVG : édition des sommets d'un chemin, dégradés et motifs rendus fidèlement,
+- SVG : dégradés et motifs rendus fidèlement,
   sélection de plusieurs formes, entrer dans un groupe.

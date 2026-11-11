@@ -969,13 +969,14 @@ fn dist(a: P, b: P) -> f32 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
 
-/// Un arc elliptique de `a` à `b` (paramètres SVG), ajouté à `cour` sans son départ.
-#[allow(clippy::too_many_arguments)]
-fn arc(cour: &mut Vec<P>, a: P, b: P, rx: f32, ry: f32, rot: f32, grand: bool, sens: bool, s: f32) {
+/// Le centre d'un arc SVG de `a` à `b` : (centre, rx, ry agrandis s'il le faut,
+/// rotation en radians, angle de départ, balayage). `None` pour un arc dégénéré (un
+/// segment droit).
+#[allow(clippy::type_complexity)]
+fn arc_centre(a: P, b: P, rx: f32, ry: f32, rot: f32, grand: bool, sens: bool) -> Option<(P, f32, f32, f32, f32, f32)> {
     let (mut rx, mut ry) = (rx.abs(), ry.abs());
     if rx < 1e-6 || ry < 1e-6 || dist(a, b) < 1e-6 {
-        cour.push(b);
-        return;
+        return None;
     }
     let phi = rot.to_radians();
     let (sp, cp) = phi.sin_cos();
@@ -1008,6 +1009,17 @@ fn arc(cour: &mut Vec<P>, a: P, b: P, rx: f32, ry: f32, rot: f32, grand: bool, s
     } else if sens && dt < 0.0 {
         dt += tau;
     }
+    Some(((cx, cy), rx, ry, phi, t1, dt))
+}
+
+/// Un arc elliptique de `a` à `b` (paramètres SVG), ajouté à `cour` sans son départ.
+#[allow(clippy::too_many_arguments)]
+fn arc(cour: &mut Vec<P>, a: P, b: P, rx: f32, ry: f32, rot: f32, grand: bool, sens: bool, s: f32) {
+    let Some(((cx, cy), rx, ry, phi, t1, dt)) = arc_centre(a, b, rx, ry, rot, grand, sens) else {
+        cour.push(b);
+        return;
+    };
+    let (sp, cp) = phi.sin_cos();
     let n = segments(dt.abs() * rx.max(ry), s).max(4);
     for j in 1..=n {
         let t = t1 + dt * j as f32 / n as f32;
@@ -1021,6 +1033,37 @@ fn arc(cour: &mut Vec<P>, a: P, b: P, rx: f32, ry: f32, rot: f32, grand: bool, s
     }
 }
 
+/// Un arc SVG en courbes de Bézier cubiques (au plus un quart de tour chacune) :
+/// (contrôle 1, contrôle 2, fin). Un arc dégénéré donne une « courbe » droite.
+#[allow(clippy::too_many_arguments)]
+pub fn arc_cubiques(a: P, b: P, rx: f32, ry: f32, rot: f32, grand: bool, sens: bool) -> Vec<(P, P, P)> {
+    let Some(((cx, cy), rx, ry, phi, t1, dt)) = arc_centre(a, b, rx, ry, rot, grand, sens) else {
+        return vec![(a, b, b)];
+    };
+    let (sp, cp) = phi.sin_cos();
+    let point = |t: f32| {
+        let (st, ct) = t.sin_cos();
+        let (ex, ey) = (rx * ct, ry * st);
+        (cp * ex - sp * ey + cx, sp * ex + cp * ey + cy)
+    };
+    let derivee = |t: f32| {
+        let (st, ct) = t.sin_cos();
+        let (ex, ey) = (-rx * st, ry * ct);
+        (cp * ex - sp * ey, sp * ex + cp * ey)
+    };
+    let n = (dt.abs() / std::f32::consts::FRAC_PI_2 - 1e-3).ceil().max(1.0) as usize;
+    let pas = dt / n as f32;
+    let alpha = 4.0 / 3.0 * (pas / 4.0).tan();
+    (0..n)
+        .map(|j| {
+            let (ta, tb) = (t1 + pas * j as f32, t1 + pas * (j + 1) as f32);
+            let (pa, pb) = (point(ta), if j + 1 == n { b } else { point(tb) });
+            let (da, db) = (derivee(ta), derivee(tb));
+            ((pa.0 + alpha * da.0, pa.1 + alpha * da.1), (pb.0 - alpha * db.0, pb.1 - alpha * db.1), pb)
+        })
+        .collect()
+}
+
 fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32, s: f32) -> Vec<P> {
     let n = segments(std::f32::consts::TAU * rx.max(ry), s).max(12);
     (0..n)
@@ -1029,6 +1072,575 @@ fn ellipse(cx: f32, cy: f32, rx: f32, ry: f32, s: f32) -> Vec<P> {
             (cx + rx * t.cos(), cy + ry * t.sin())
         })
         .collect()
+}
+
+// --- Les tracés éditables ----------------------------------------------------------
+
+/// Un morceau d'un tracé, en coordonnées absolues : chaque morceau sauf `Fermer`
+/// mène à un sommet. Un sous-chemin commence toujours par `Depart`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Morceau {
+    Depart(P),
+    Droite(P),
+    /// Contrôle 1, contrôle 2, fin.
+    Cubique(P, P, P),
+    /// Contrôle, fin.
+    Quadratique(P, P),
+    Arc { rx: f32, ry: f32, rot: f32, grand: bool, sens: bool, fin: P },
+    Fermer,
+}
+
+impl Morceau {
+    /// Le sommet où il mène (aucun pour `Fermer`).
+    pub fn fin(&self) -> Option<P> {
+        match *self {
+            Morceau::Depart(p) | Morceau::Droite(p) | Morceau::Cubique(_, _, p) | Morceau::Quadratique(_, p) | Morceau::Arc { fin: p, .. } => Some(p),
+            Morceau::Fermer => None,
+        }
+    }
+
+    fn fin_mut(&mut self) -> Option<&mut P> {
+        match self {
+            Morceau::Depart(p) | Morceau::Droite(p) | Morceau::Cubique(_, _, p) | Morceau::Quadratique(_, p) | Morceau::Arc { fin: p, .. } => Some(p),
+            Morceau::Fermer => None,
+        }
+    }
+}
+
+/// Ce qu'on peut saisir sur un tracé : le sommet d'un morceau, ou l'un de ses points
+/// de contrôle (0 ou 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Repere {
+    Sommet(usize),
+    Controle(usize, u8),
+}
+
+/// Lit un attribut `d` en morceaux absolus (H et V deviennent des droites, S et T
+/// des courbes pleines). Un chemin mal formé s'arrête à l'erreur.
+pub fn lire_trace(d: &str) -> Vec<Morceau> {
+    let b = d.as_bytes();
+    let mut i = 0;
+    let mut t: Vec<Morceau> = Vec::new();
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    let mut depart = (0.0, 0.0);
+    let mut cmd = b'M';
+    let blanc = |i: &mut usize| {
+        while *i < b.len() && (b[*i].is_ascii_whitespace() || b[*i] == b',') {
+            *i += 1;
+        }
+    };
+    let num = |i: &mut usize| -> Option<f32> {
+        blanc(i);
+        let (v, n) = lire_nombre(&b[*i..])?;
+        *i += n;
+        Some(v)
+    };
+    let drapeau = |i: &mut usize| -> Option<bool> {
+        blanc(i);
+        let c = *b.get(*i)?;
+        if c == b'0' || c == b'1' {
+            *i += 1;
+            Some(c == b'1')
+        } else {
+            None
+        }
+    };
+    loop {
+        blanc(&mut i);
+        if i >= b.len() {
+            break;
+        }
+        if b[i].is_ascii_alphabetic() {
+            cmd = b[i];
+            i += 1;
+            if cmd == b'Z' || cmd == b'z' {
+                if t.last().is_some_and(|m| *m != Morceau::Fermer) {
+                    t.push(Morceau::Fermer);
+                }
+                (x, y) = depart;
+                continue;
+            }
+        } else if cmd == b'Z' || cmd == b'z' {
+            break;
+        }
+        let rel = cmd.is_ascii_lowercase();
+        let (ox, oy) = if rel { (x, y) } else { (0.0, 0.0) };
+        let k = cmd.to_ascii_uppercase();
+        // Un segment sans départ (au début, ou après Z) part du point courant
+        if k != b'M' && (t.is_empty() || t.last() == Some(&Morceau::Fermer)) {
+            t.push(Morceau::Depart((x, y)));
+        }
+        // Le contrôle précédent, pour S et T
+        let reflet = |t: &[Morceau], cubique: bool| match t.last() {
+            Some(Morceau::Cubique(_, c, _)) if cubique => (2.0 * x - c.0, 2.0 * y - c.1),
+            Some(Morceau::Quadratique(c, _)) if !cubique => (2.0 * x - c.0, 2.0 * y - c.1),
+            _ => (x, y),
+        };
+        let ok = (|| -> Option<Morceau> {
+            Some(match k {
+                b'M' => {
+                    let p = (num(&mut i)? + ox, num(&mut i)? + oy);
+                    depart = p;
+                    cmd = if rel { b'l' } else { b'L' };
+                    Morceau::Depart(p)
+                }
+                b'L' => Morceau::Droite((num(&mut i)? + ox, num(&mut i)? + oy)),
+                b'H' => Morceau::Droite((num(&mut i)? + ox, y)),
+                b'V' => Morceau::Droite((x, num(&mut i)? + if rel { y } else { 0.0 })),
+                b'C' => Morceau::Cubique((num(&mut i)? + ox, num(&mut i)? + oy), (num(&mut i)? + ox, num(&mut i)? + oy), (num(&mut i)? + ox, num(&mut i)? + oy)),
+                b'S' => {
+                    let c1 = reflet(&t, true);
+                    Morceau::Cubique(c1, (num(&mut i)? + ox, num(&mut i)? + oy), (num(&mut i)? + ox, num(&mut i)? + oy))
+                }
+                b'Q' => Morceau::Quadratique((num(&mut i)? + ox, num(&mut i)? + oy), (num(&mut i)? + ox, num(&mut i)? + oy)),
+                b'T' => {
+                    let c = reflet(&t, false);
+                    Morceau::Quadratique(c, (num(&mut i)? + ox, num(&mut i)? + oy))
+                }
+                b'A' => {
+                    let (rx, ry, rot) = (num(&mut i)?, num(&mut i)?, num(&mut i)?);
+                    let (grand, sens) = (drapeau(&mut i)?, drapeau(&mut i)?);
+                    Morceau::Arc { rx, ry, rot, grand, sens, fin: (num(&mut i)? + ox, num(&mut i)? + oy) }
+                }
+                _ => return None,
+            })
+        })();
+        let Some(m) = ok else { break };
+        // Un départ qui en suit un autre le remplace
+        if matches!(m, Morceau::Depart(_)) && matches!(t.last(), Some(Morceau::Depart(_))) {
+            t.pop();
+        }
+        (x, y) = m.fin().unwrap();
+        t.push(m);
+    }
+    // Un départ seul à la fin ne trace rien
+    if matches!(t.last(), Some(Morceau::Depart(_))) {
+        t.pop();
+    }
+    t
+}
+
+/// Écrit un tracé en attribut `d`.
+pub fn ecrire_trace(t: &[Morceau]) -> String {
+    let p = |p: P| format!("{} {}", nombre(p.0), nombre(p.1));
+    let morceaux: Vec<String> = t
+        .iter()
+        .map(|m| match *m {
+            Morceau::Depart(a) => format!("M{}", p(a)),
+            Morceau::Droite(a) => format!("L{}", p(a)),
+            Morceau::Cubique(a, b, c) => format!("C{} {} {}", p(a), p(b), p(c)),
+            Morceau::Quadratique(a, b) => format!("Q{} {}", p(a), p(b)),
+            Morceau::Arc { rx, ry, rot, grand, sens, fin } => format!("A{} {} {} {} {} {}", nombre(rx), nombre(ry), nombre(rot), grand as u8, sens as u8, p(fin)),
+            Morceau::Fermer => "Z".into(),
+        })
+        .collect();
+    morceaux.join(" ")
+}
+
+/// Le tracé d'un élément qu'on peut éditer : path, polygon, polyline, line, rect,
+/// circle, ellipse. Les formes simples deviennent des droites, des arcs ou des
+/// courbes (quatre quarts pour une ellipse).
+pub fn trace_de(n: &Noeud) -> Option<Vec<Morceau>> {
+    let nb = |k: &str| n.attr(k).and_then(|v| longueur(v, 0.0)).unwrap_or(0.0);
+    let t = match n.nom.as_str() {
+        "path" => lire_trace(n.attr("d")?),
+        "polygon" | "polyline" => {
+            let v = nombres(n.attr("points")?);
+            let mut t: Vec<Morceau> = v.chunks_exact(2).enumerate().map(|(i, c)| if i == 0 { Morceau::Depart((c[0], c[1])) } else { Morceau::Droite((c[0], c[1])) }).collect();
+            if t.len() < 2 {
+                return None;
+            }
+            if n.nom == "polygon" {
+                t.push(Morceau::Fermer);
+            }
+            t
+        }
+        "line" => vec![Morceau::Depart((nb("x1"), nb("y1"))), Morceau::Droite((nb("x2"), nb("y2")))],
+        "rect" => {
+            let (x, y, w, h) = (nb("x"), nb("y"), nb("width"), nb("height"));
+            if w <= 0.0 || h <= 0.0 {
+                return None;
+            }
+            let (rx, ry) = match (n.attr("rx").and_then(|v| longueur(v, 0.0)), n.attr("ry").and_then(|v| longueur(v, 0.0))) {
+                (Some(a), Some(b)) => (a, b),
+                (Some(a), None) | (None, Some(a)) => (a, a),
+                (None, None) => (0.0, 0.0),
+            };
+            let (rx, ry) = (rx.clamp(0.0, w / 2.0), ry.clamp(0.0, h / 2.0));
+            if rx <= 0.0 || ry <= 0.0 {
+                vec![Morceau::Depart((x, y)), Morceau::Droite((x + w, y)), Morceau::Droite((x + w, y + h)), Morceau::Droite((x, y + h)), Morceau::Fermer]
+            } else {
+                let a = |fin: P| Morceau::Arc { rx, ry, rot: 0.0, grand: false, sens: true, fin };
+                vec![
+                    Morceau::Depart((x + rx, y)),
+                    Morceau::Droite((x + w - rx, y)),
+                    a((x + w, y + ry)),
+                    Morceau::Droite((x + w, y + h - ry)),
+                    a((x + w - rx, y + h)),
+                    Morceau::Droite((x + rx, y + h)),
+                    a((x, y + h - ry)),
+                    Morceau::Droite((x, y + ry)),
+                    a((x + rx, y)),
+                    Morceau::Fermer,
+                ]
+            }
+        }
+        "circle" | "ellipse" => {
+            let (cx, cy) = (nb("cx"), nb("cy"));
+            let (rx, ry) = if n.nom == "circle" { (nb("r"), nb("r")) } else { (nb("rx"), nb("ry")) };
+            if rx <= 0.0 || ry <= 0.0 {
+                return None;
+            }
+            let k = 0.552_284_8;
+            vec![
+                Morceau::Depart((cx + rx, cy)),
+                Morceau::Cubique((cx + rx, cy + k * ry), (cx + k * rx, cy + ry), (cx, cy + ry)),
+                Morceau::Cubique((cx - k * rx, cy + ry), (cx - rx, cy + k * ry), (cx - rx, cy)),
+                Morceau::Cubique((cx - rx, cy - k * ry), (cx - k * rx, cy - ry), (cx, cy - ry)),
+                Morceau::Cubique((cx + k * rx, cy - ry), (cx + rx, cy - k * ry), (cx + rx, cy)),
+                Morceau::Fermer,
+            ]
+        }
+        _ => return None,
+    };
+    (t.len() >= 2).then_some(t)
+}
+
+/// Les attributs de géométrie des formes simples, retirés quand une forme devient un
+/// chemin.
+const GEOMETRIE: [&str; 14] = ["x", "y", "width", "height", "rx", "ry", "cx", "cy", "r", "points", "x1", "y1", "x2", "y2"];
+
+impl Document {
+    /// Donne à `k` le tracé `t`. Un polygone, une polyligne ou une ligne le restent
+    /// tant que le tracé s'y prête ; sinon l'élément devient un `path`.
+    pub fn poser_trace(&mut self, k: usize, t: &[Morceau]) {
+        let droites = t.iter().all(|m| matches!(m, Morceau::Depart(_) | Morceau::Droite(_) | Morceau::Fermer));
+        let departs = t.iter().filter(|m| matches!(m, Morceau::Depart(_))).count();
+        let fermes = t.iter().filter(|m| **m == Morceau::Fermer).count();
+        let points = || t.iter().filter_map(Morceau::fin).map(|p| format!("{},{}", nombre(p.0), nombre(p.1))).collect::<Vec<_>>().join(" ");
+        let nom = self.noeuds[k].nom.clone();
+        match nom.as_str() {
+            "polygon" if droites && departs == 1 && fermes == 1 && t.last() == Some(&Morceau::Fermer) => self.definir(k, "points", Some(&points())),
+            "polyline" if droites && departs == 1 && fermes == 0 => self.definir(k, "points", Some(&points())),
+            "line" if droites && t.len() == 2 && departs == 1 => {
+                let (a, b) = (t[0].fin().unwrap(), t[1].fin().unwrap());
+                for (n, v) in [("x1", a.0), ("y1", a.1), ("x2", b.0), ("y2", b.1)] {
+                    self.definir(k, n, Some(&nombre(v)));
+                }
+            }
+            _ => {
+                if nom != "path" {
+                    let n = &mut self.noeuds[k];
+                    n.attrs.retain(|a| !GEOMETRIE.contains(&a.0.as_str()));
+                    n.nom = "path".into();
+                }
+                self.definir(k, "d", Some(&ecrire_trace(t)));
+            }
+        }
+    }
+
+    /// La transformation qui mène des coordonnées propres de `k` à celles du document.
+    pub fn ctm(&self, k: usize) -> Matrice {
+        self.ctm_parent(k).fois(&transformation(self.noeuds[k].attr("transform").unwrap_or("")))
+    }
+}
+
+fn milieu(a: P, b: P, u: f32) -> P {
+    (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u)
+}
+
+/// Le sous-chemin qui contient le morceau `i` : [début, fin[.
+pub fn sous_chemin(t: &[Morceau], i: usize) -> (usize, usize) {
+    let debut = t[..=i.min(t.len() - 1)].iter().rposition(|m| matches!(m, Morceau::Depart(_))).unwrap_or(0);
+    let fin = t[debut + 1..].iter().position(|m| matches!(m, Morceau::Depart(_))).map_or(t.len(), |j| debut + 1 + j);
+    (debut, fin)
+}
+
+/// Le dernier sommet d'un sous-chemin fermé qui retombe sur son départ : il n'est
+/// pas montré, et suit le départ.
+pub fn jumeau(t: &[Morceau], debut: usize, fin: usize) -> Option<usize> {
+    if fin < debut + 3 || t[fin - 1] != Morceau::Fermer {
+        return None;
+    }
+    let j = fin - 2;
+    (j > debut && dist(t[j].fin()?, t[debut].fin()?) < 1e-3).then_some(j)
+}
+
+/// Où commence le segment `i` : le sommet d'avant (pour `Fermer`, le dernier du
+/// sous-chemin).
+pub fn depart_de(t: &[Morceau], i: usize) -> P {
+    t[..i].iter().rev().find_map(Morceau::fin).unwrap_or((0.0, 0.0))
+}
+
+/// Le point d'un repère.
+pub fn point_de(t: &[Morceau], r: Repere) -> Option<P> {
+    match (r, t.get(r_indice(r))?) {
+        (Repere::Sommet(_), m) => m.fin(),
+        (Repere::Controle(_, 0), Morceau::Cubique(a, _, _)) | (Repere::Controle(_, 1), Morceau::Cubique(_, a, _)) | (Repere::Controle(_, 0), Morceau::Quadratique(a, _)) => Some(*a),
+        _ => None,
+    }
+}
+
+fn r_indice(r: Repere) -> usize {
+    match r {
+        Repere::Sommet(i) | Repere::Controle(i, _) => i,
+    }
+}
+
+/// Les repères à montrer, avec leur point et les sommets auxquels ils se rattachent
+/// (pour les tiges des contrôles). Les jumeaux sont omis.
+pub fn reperes(t: &[Morceau]) -> Vec<(Repere, P, Vec<P>)> {
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let (debut, fin) = sous_chemin(t, i);
+        let jum = jumeau(t, debut, fin);
+        for j in debut..fin {
+            let a = || depart_de(t, j);
+            match t[j] {
+                Morceau::Cubique(c1, c2, p) => {
+                    v.push((Repere::Controle(j, 0), c1, vec![a()]));
+                    v.push((Repere::Controle(j, 1), c2, vec![p]));
+                }
+                Morceau::Quadratique(c, p) => v.push((Repere::Controle(j, 0), c, vec![a(), p])),
+                _ => {}
+            }
+            if let Some(p) = t[j].fin() {
+                if Some(j) != jum {
+                    v.push((Repere::Sommet(j), p, Vec::new()));
+                }
+            }
+        }
+        i = fin;
+    }
+    v
+}
+
+/// Le point du segment `i` (qui finit au sommet `i`, ou ferme le sous-chemin) au
+/// paramètre `u`.
+pub fn point_sur(t: &[Morceau], i: usize, u: f32) -> P {
+    let a = depart_de(t, i);
+    match t[i] {
+        Morceau::Depart(p) => p,
+        Morceau::Droite(p) => milieu(a, p, u),
+        Morceau::Cubique(c1, c2, p) => {
+            let v = 1.0 - u;
+            let (k0, k1, k2, k3) = (v * v * v, 3.0 * v * v * u, 3.0 * v * u * u, u * u * u);
+            (k0 * a.0 + k1 * c1.0 + k2 * c2.0 + k3 * p.0, k0 * a.1 + k1 * c1.1 + k2 * c2.1 + k3 * p.1)
+        }
+        Morceau::Quadratique(c, p) => milieu(milieu(a, c, u), milieu(c, p, u), u),
+        Morceau::Arc { rx, ry, rot, grand, sens, fin } => {
+            let c = arc_cubiques(a, fin, rx, ry, rot, grand, sens);
+            let x = (u * c.len() as f32).min(c.len() as f32 - 1e-4).max(0.0);
+            let (j, w) = (x as usize, x.fract());
+            let depart = if j == 0 { a } else { c[j - 1].2 };
+            let t2 = [Morceau::Depart(depart), Morceau::Cubique(c[j].0, c[j].1, c[j].2)];
+            point_sur(&t2, 1, w)
+        }
+        Morceau::Fermer => milieu(a, t[sous_chemin(t, i).0].fin().unwrap_or(a), u),
+    }
+}
+
+/// Le segment le plus proche de `p` (en coordonnées du tracé, mesurées après `m`),
+/// à moins de `tolerance` : (segment, paramètre).
+pub fn segment_proche(t: &[Morceau], m: &Matrice, p: P, tolerance: f32) -> Option<(usize, f32)> {
+    let mut mieux: Option<(f32, usize, f32)> = None;
+    const N: usize = 32;
+    for i in 0..t.len() {
+        if matches!(t[i], Morceau::Depart(_)) {
+            continue;
+        }
+        let pts: Vec<P> = (0..=N).map(|k| m.appliquer(point_sur(t, i, k as f32 / N as f32))).collect();
+        for k in 0..N {
+            let (a, b) = (pts[k], pts[k + 1]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let l2 = dx * dx + dy * dy;
+            let w = if l2 > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            let d = dist(p, (a.0 + dx * w, a.1 + dy * w));
+            if d < tolerance && mieux.is_none_or(|x| d < x.0) {
+                mieux = Some((d, i, (k as f32 + w) / N as f32));
+            }
+        }
+    }
+    mieux.map(|x| (x.1, x.2))
+}
+
+/// Déplace un repère en `p`. Un sommet emmène ses contrôles (et son jumeau).
+pub fn deplacer(t: &mut [Morceau], r: Repere, p: P) {
+    match r {
+        Repere::Sommet(i) => {
+            let Some(avant) = t[i].fin() else { return };
+            let (dx, dy) = (p.0 - avant.0, p.1 - avant.1);
+            let (debut, fin) = sous_chemin(t, i);
+            let jum = jumeau(t, debut, fin);
+            let mut sommets = vec![i];
+            match jum {
+                Some(j) if i == debut => sommets.push(j),
+                Some(j) if i == j => sommets.push(debut),
+                _ => {}
+            }
+            for s in sommets {
+                if let Some(q) = t[s].fin_mut() {
+                    *q = (q.0 + dx, q.1 + dy);
+                }
+                if let Morceau::Cubique(_, c2, _) = &mut t[s] {
+                    *c2 = (c2.0 + dx, c2.1 + dy);
+                }
+                if let Some(Morceau::Cubique(c1, _, _)) = t.get_mut(s + 1) {
+                    *c1 = (c1.0 + dx, c1.1 + dy);
+                }
+            }
+        }
+        Repere::Controle(i, k) => match (&mut t[i], k) {
+            (Morceau::Cubique(c, _, _), 0) | (Morceau::Cubique(_, c, _), 1) | (Morceau::Quadratique(c, _), 0) => *c = p,
+            _ => {}
+        },
+    }
+}
+
+/// Coupe le segment `i` au paramètre `u` : un sommet de plus, dont l'indice est
+/// renvoyé. La forme ne change pas.
+pub fn couper(t: &mut Vec<Morceau>, i: usize, u: f32) -> Option<usize> {
+    let a = depart_de(t, i);
+    let u = u.clamp(0.01, 0.99);
+    match t[i] {
+        Morceau::Depart(_) => return None,
+        Morceau::Droite(p) => t.splice(i..=i, [Morceau::Droite(milieu(a, p, u)), Morceau::Droite(p)]).for_each(drop),
+        Morceau::Cubique(c1, c2, p) => {
+            let (ab, bc, cd) = (milieu(a, c1, u), milieu(c1, c2, u), milieu(c2, p, u));
+            let (abc, bcd) = (milieu(ab, bc, u), milieu(bc, cd, u));
+            let m = milieu(abc, bcd, u);
+            t.splice(i..=i, [Morceau::Cubique(ab, abc, m), Morceau::Cubique(bcd, cd, p)]).for_each(drop);
+        }
+        Morceau::Quadratique(c, p) => {
+            let (ac, cp) = (milieu(a, c, u), milieu(c, p, u));
+            t.splice(i..=i, [Morceau::Quadratique(ac, milieu(ac, cp, u)), Morceau::Quadratique(cp, p)]).for_each(drop);
+        }
+        Morceau::Arc { rx, ry, rot, grand, sens, fin } => {
+            // En courbes d'abord, puis la bonne est coupée
+            let c = arc_cubiques(a, fin, rx, ry, rot, grand, sens);
+            let x = (u * c.len() as f32).min(c.len() as f32 - 1e-3);
+            let (j, w) = (x as usize, x.fract());
+            t.splice(i..=i, c.iter().map(|q| Morceau::Cubique(q.0, q.1, q.2))).for_each(drop);
+            if w < 0.02 && j > 0 {
+                return Some(i + j - 1);
+            }
+            return couper(t, i + j, w);
+        }
+        Morceau::Fermer => {
+            let d = t[sous_chemin(t, i).0].fin()?;
+            t.insert(i, Morceau::Droite(milieu(a, d, u)));
+        }
+    }
+    Some(i)
+}
+
+/// Retire le sommet `i`. Les deux courbes autour se fondent en une. Un sous-chemin
+/// réduit à un point disparaît. Faux si le tracé deviendrait vide.
+pub fn retirer_sommet(t: &mut Vec<Morceau>, i: usize) -> bool {
+    let (debut, fin) = sous_chemin(t, i);
+    let jum = jumeau(t, debut, fin);
+    let sommets = (debut..fin).filter(|j| t[*j].fin().is_some() && Some(*j) != jum).count();
+    if sommets <= 2 {
+        if fin - debut == t.len() {
+            return false;
+        }
+        t.drain(debut..fin);
+        return true;
+    }
+    // Le jumeau se retire comme son départ
+    let i = if Some(i) == jum { debut } else { i };
+    let fondre = |avant: Morceau, apres: Morceau, p: P| match (avant, apres) {
+        (Morceau::Cubique(c1, _, _), Morceau::Cubique(_, c2, _)) => Morceau::Cubique(c1, c2, p),
+        (_, m) if !matches!(m, Morceau::Depart(_) | Morceau::Fermer) => m,
+        _ => Morceau::Droite(p),
+    };
+    if i == debut {
+        let a1 = t[debut + 1].fin().unwrap();
+        if let Some(j) = jum {
+            // Le dernier segment rejoint directement le deuxième sommet
+            t[j] = fondre(t[j], t[debut + 1], a1);
+        }
+        t[debut] = Morceau::Depart(a1);
+        t.remove(debut + 1);
+        return true;
+    }
+    match t.get(i + 1).copied() {
+        Some(m @ (Morceau::Cubique(..) | Morceau::Droite(_) | Morceau::Quadratique(..) | Morceau::Arc { .. })) if i + 1 < fin => {
+            t[i + 1] = fondre(t[i], m, m.fin().unwrap());
+            t.remove(i);
+        }
+        _ => {
+            t.remove(i);
+        }
+    }
+    true
+}
+
+/// L'indice du segment qui arrive au sommet `i` : le sien, ou pour un départ fermé,
+/// celui de son jumeau ou le `Fermer`.
+pub fn arrivee(t: &[Morceau], i: usize) -> Option<usize> {
+    if !matches!(t[i], Morceau::Depart(_)) {
+        return Some(i);
+    }
+    let (debut, fin) = sous_chemin(t, i);
+    if t[fin - 1] != Morceau::Fermer {
+        return None;
+    }
+    Some(jumeau(t, debut, fin).unwrap_or(fin - 1))
+}
+
+/// Vrai si le segment qui arrive à `i` est droit.
+pub fn droit(t: &[Morceau], i: usize) -> Option<bool> {
+    let s = arrivee(t, i)?;
+    Some(match t[s] {
+        Morceau::Droite(_) => true,
+        Morceau::Fermer => {
+            let (debut, _) = sous_chemin(t, s);
+            jumeau(t, debut, s + 1).is_none()
+        }
+        _ => false,
+    })
+}
+
+/// Le segment qui arrive au sommet `i` devient courbe s'il était droit, droit sinon.
+pub fn basculer(t: &mut Vec<Morceau>, i: usize) -> bool {
+    let Some(s) = arrivee(t, i) else { return false };
+    let a = depart_de(t, s);
+    match t[s] {
+        Morceau::Droite(p) => t[s] = Morceau::Cubique(milieu(a, p, 1.0 / 3.0), milieu(a, p, 2.0 / 3.0), p),
+        Morceau::Fermer => {
+            let d = t[sous_chemin(t, s).0].fin().unwrap();
+            t.insert(s, Morceau::Cubique(milieu(a, d, 1.0 / 3.0), milieu(a, d, 2.0 / 3.0), d));
+        }
+        m => {
+            let p = m.fin().unwrap();
+            let (debut, fin) = sous_chemin(t, s);
+            // Le jumeau redevenu droit est inutile : le Fermer trace la droite
+            if Some(s) == jumeau(t, debut, fin) {
+                t.remove(s);
+            } else {
+                t[s] = Morceau::Droite(p);
+            }
+        }
+    }
+    true
+}
+
+/// Ouvre le sous-chemin du morceau `i` s'il est fermé, le ferme sinon.
+pub fn ouvrir_fermer(t: &mut Vec<Morceau>, i: usize) {
+    let (_, fin) = sous_chemin(t, i);
+    if t[fin - 1] == Morceau::Fermer {
+        t.remove(fin - 1);
+    } else {
+        t.insert(fin, Morceau::Fermer);
+    }
+}
+
+/// Vrai si le sous-chemin du morceau `i` est fermé.
+pub fn est_ferme(t: &[Morceau], i: usize) -> bool {
+    let (_, fin) = sous_chemin(t, i);
+    t[fin - 1] == Morceau::Fermer
 }
 
 // --- Le rendu en formes ----------------------------------------------------------
@@ -1666,4 +2278,114 @@ mod tests {
         let n = d.ajouter(d.racine, "circle", vec![("r".into(), "3".into())]);
         assert_eq!(d.selectionnable(n), n);
     }
+
+    #[test]
+    fn les_traces_se_lisent_et_s_ecrivent() {
+        let t = lire_trace("m10 20 h30 v10 s5 5 10 0 t10 0 a5 5 0 0 1 10 0 z l5 5");
+        assert_eq!(t[0], Morceau::Depart((10.0, 20.0)));
+        assert_eq!(t[1], Morceau::Droite((40.0, 20.0)));
+        assert_eq!(t[2], Morceau::Droite((40.0, 30.0)));
+        // S sans C avant : le premier contrôle est le point courant
+        assert_eq!(t[3], Morceau::Cubique((40.0, 30.0), (45.0, 35.0), (50.0, 30.0)));
+        assert_eq!(t[4], Morceau::Quadratique((50.0, 30.0), (60.0, 30.0)));
+        assert!(matches!(t[5], Morceau::Arc { fin: (70.0, 30.0), sens: true, .. }));
+        assert_eq!(t[6], Morceau::Fermer);
+        // Après Z, le segment repart du départ
+        assert_eq!(&t[7..], &[Morceau::Depart((10.0, 20.0)), Morceau::Droite((15.0, 25.0))]);
+        let d = ecrire_trace(&t);
+        assert_eq!(lire_trace(&d), t);
+        assert!(d.starts_with("M10 20 L40 20 L40 30 C40 30 45 35 50 30 Q50 30 60 30 A5 5 0 0 1 70 30 Z M10 20"));
+        // Le rendu est le même avant et après réécriture
+        let a = chemin("m10 20 h30 v10 s5 5 10 0 t10 0 a5 5 0 0 1 10 0 z", 1.0);
+        let b = chemin(&ecrire_trace(&lire_trace("m10 20 h30 v10 s5 5 10 0 t10 0 a5 5 0 0 1 10 0 z")), 1.0);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a[0].0.iter().zip(&b[0].0) {
+            assert!(dist(*x, *y) < 1e-3);
+        }
+    }
+
+    #[test]
+    fn les_formes_deviennent_des_traces() {
+        let d = Document::lire(r#"<svg><rect x="0" y="0" width="10" height="20"/><circle cx="5" cy="5" r="5"/><polygon points="0,0 10,0 5,8"/><line x1="1" y1="2" x2="3" y2="4"/><rect width="10" height="10" rx="2"/></svg>"#).unwrap();
+        let e: Vec<usize> = d.noeuds[d.racine].enfants.clone();
+        assert_eq!(trace_de(&d.noeuds[e[0]]).unwrap().len(), 5);
+        let c = trace_de(&d.noeuds[e[1]]).unwrap();
+        assert_eq!((c.len(), c[0], c[4].fin()), (6, Morceau::Depart((10.0, 5.0)), Some((10.0, 5.0))));
+        // Le jumeau (le dernier sommet du cercle) ne se montre pas
+        assert_eq!(reperes(&c).iter().filter(|r| matches!(r.0, Repere::Sommet(_))).count(), 4);
+        assert_eq!(trace_de(&d.noeuds[e[2]]).unwrap().last(), Some(&Morceau::Fermer));
+        assert_eq!(trace_de(&d.noeuds[e[3]]).unwrap()[1], Morceau::Droite((3.0, 4.0)));
+        assert_eq!(trace_de(&d.noeuds[e[4]]).unwrap().len(), 10);
+        // Un polygone reste polygone ; une courbe en fait un chemin
+        let mut d = d;
+        let mut t = trace_de(&d.noeuds[e[2]]).unwrap();
+        deplacer(&mut t, Repere::Sommet(2), (5.0, 10.0));
+        d.poser_trace(e[2], &t);
+        assert_eq!(d.noeuds[e[2]].attr("points"), Some("0,0 10,0 5,10"));
+        basculer(&mut t, 1);
+        d.poser_trace(e[2], &t);
+        assert_eq!(d.noeuds[e[2]].nom, "path");
+        assert_eq!(d.noeuds[e[2]].attr("points"), None);
+        assert!(d.noeuds[e[2]].attr("d").unwrap().contains('C'));
+        // Le rectangle devenu chemin perd sa géométrie
+        let mut t = trace_de(&d.noeuds[e[0]]).unwrap();
+        deplacer(&mut t, Repere::Sommet(2), (12.0, 22.0));
+        d.poser_trace(e[0], &t);
+        assert_eq!(d.noeuds[e[0]].attrs, vec![("d".to_string(), "M0 0 L10 0 L12 22 L0 20 Z".to_string())]);
+    }
+
+    #[test]
+    fn retoucher_les_sommets() {
+        // Déplacer le départ d'un cercle emmène son jumeau et les contrôles voisins
+        let n = Noeud { nom: "circle".into(), attrs: vec![("cx".into(), "0".into()), ("cy".into(), "0".into()), ("r".into(), "10".into())], ..Noeud::default() };
+        let mut c = trace_de(&n).unwrap();
+        deplacer(&mut c, Repere::Sommet(0), (12.0, 0.0));
+        assert_eq!(c[4].fin(), Some((12.0, 0.0)));
+        assert!(matches!(c[1], Morceau::Cubique((x, _), _, _) if (x - 12.0).abs() < 1e-4));
+        assert!(matches!(c[4], Morceau::Cubique(_, (x, _), _) if (x - 12.0).abs() < 1e-4));
+        // Couper une courbe garde la forme
+        let avant = point_sur(&c, 1, 0.75);
+        let k = couper(&mut c, 1, 0.5).unwrap();
+        assert_eq!(k, 1);
+        assert_eq!(c.len(), 7);
+        assert!(dist(point_sur(&c, 2, 0.5), avant) < 1e-3);
+        // La retirer refond les deux courbes
+        assert!(retirer_sommet(&mut c, 1));
+        assert_eq!(c.len(), 6);
+        assert!(matches!(c[1], Morceau::Cubique(_, _, p) if dist(p, (0.0, 10.0)) < 1e-3));
+        // Retirer le départ : le deuxième sommet devient départ, le jumeau le rejoint
+        assert!(retirer_sommet(&mut c, 0));
+        assert_eq!(c[0].fin(), Some((0.0, 10.0)));
+        let (d, f) = sous_chemin(&c, 0);
+        assert!(jumeau(&c, d, f).is_some());
+        assert_eq!(reperes(&c).iter().filter(|r| matches!(r.0, Repere::Sommet(_))).count(), 3);
+        // Un polygone : couper le Fermer, basculer, ouvrir
+        let mut t = lire_trace("M0 0 L10 0 L10 10 Z");
+        assert_eq!(segment_proche(&t, &Matrice::IDENTITE, (5.0, 5.2), 1.0).map(|s| s.0), Some(3));
+        assert_eq!(couper(&mut t, 3, 0.5), Some(3));
+        assert_eq!(t[3], Morceau::Droite((5.0, 5.0)));
+        assert_eq!(droit(&t, 0), Some(true));
+        basculer(&mut t, 0);
+        assert!(matches!(t[4], Morceau::Cubique(_, _, (0.0, 0.0))));
+        assert_eq!(droit(&t, 0), Some(false));
+        basculer(&mut t, 0);
+        assert_eq!(ecrire_trace(&t), "M0 0 L10 0 L10 10 L5 5 Z");
+        ouvrir_fermer(&mut t, 2);
+        assert!(!est_ferme(&t, 0));
+        assert_eq!(droit(&t, 0), None);
+        // Trop peu de sommets : refusé s'il ne reste rien
+        let mut l = lire_trace("M0 0 L1 1");
+        assert!(!retirer_sommet(&mut l, 1));
+        let mut l = lire_trace("M0 0 L1 1 M5 5 L6 6 L7 5");
+        assert!(retirer_sommet(&mut l, 1));
+        assert_eq!(ecrire_trace(&l), "M5 5 L6 6 L7 5");
+        // Un arc coupé devient courbes
+        let mut a = lire_trace("M0 0 A10 10 0 0 1 20 0");
+        let m = point_sur(&a, 1, 0.5);
+        assert!(dist(m, (10.0, -10.0)) < 0.05, "{m:?}");
+        couper(&mut a, 1, 0.5).unwrap();
+        assert!(a.iter().skip(1).all(|m| matches!(m, Morceau::Cubique(..))));
+        assert!(a.iter().any(|m| m.fin().is_some_and(|p| dist(p, (10.0, -10.0)) < 0.05)));
+    }
+
 }

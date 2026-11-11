@@ -34,6 +34,10 @@ struct Shot {
 /// Où toucher le dessin SVG d'essai pour choisir le groupe tourné.
 const SVG_TAP: (f32, f32) = (700.0, 600.0);
 
+/// Les touchers de l'aperçu `svg-sommets` : la pilule, la forme, un sommet, puis un
+/// sommet à tirer.
+const SOMMETS: [(f32, f32); 4] = [(210.0, 944.0), (750.0, 445.0), (746.0, 384.0), (746.0, 384.0)];
+
 fn main() {
     let dir = std::env::args().nth(1).expect("dossier de sortie");
     let shots = [
@@ -57,6 +61,7 @@ fn main() {
         Shot { name: "svg", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 6 },
         Shot { name: "svg-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "svg-source", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 7 },
+        Shot { name: "svg-sommets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 8 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -236,6 +241,14 @@ fn main() {
                 // La pilule « Source »
                 (7, 10) => ui.event(Event::Down { id: 0, x: 1664.0, y: 58.0 }, t),
                 (7, 11) => ui.event(Event::Up { id: 0 }, t),
+                // L'outil Sommets, puis le soleil, un de ses sommets, tiré
+                (8, 10 | 20 | 30) => ui.event(Event::Down { id: 0, x: SOMMETS[(i / 10 - 1) as usize].0, y: SOMMETS[(i / 10 - 1) as usize].1 }, t),
+                (8, 11 | 21 | 31) => ui.event(Event::Up { id: 0 }, t),
+                (8, 40) => ui.event(Event::Down { id: 0, x: SOMMETS[3].0, y: SOMMETS[3].1 }, t),
+                (8, 41..=50) => {
+                    let k = (i - 40) as f32;
+                    ui.event(Event::Move { id: 0, x: SOMMETS[3].0 + 22.0 * k, y: SOMMETS[3].1 - 6.0 * k }, t)
+                }
                 (4, 10) => ui.event(Event::Down { id: 0, x: 700.0, y: 330.0 }, t),
                 (4, 25) => ui.event(Event::Up { id: 0 }, t),
                 (4, 30) => ui.event(Event::Down { id: 0, x: 1100.0, y: 330.0 }, t),

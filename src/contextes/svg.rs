@@ -6,6 +6,13 @@
 //! - **Les outils**, en bas : Choisir, Rectangle, Ellipse, Ligne, Polygone, Texte.
 //!   - Choisir : toucher une forme la sélectionne (l'enfant de la racine qui la
 //!     contient : un groupe se prend en entier), glisser depuis une forme la déplace.
+//!   - Sommets : toucher une forme (même dans un groupe) montre ses sommets (carrés)
+//!     et les contrôles de ses courbes (ronds). Toucher un sommet le choisit ;
+//!     glisser depuis un sommet ou un contrôle l'emmène au curseur déporté ; toucher
+//!     le contour ajoute un sommet sans changer la forme. Pour le sommet choisi :
+//!     Retirer (les courbes voisines se fondent), Courber ou Redresser le segment qui
+//!     y arrive, Ouvrir ou Fermer le tracé. Un rectangle, une ellipse… retouchés
+//!     deviennent un `path` ; un polygone le reste tant qu'il est droit.
 //!   - Rectangle, Ellipse, Ligne : glisser trace la forme, du départ du curseur
 //!     déporté jusqu'à lui. Toucher sélectionne, comme Choisir.
 //!   - Polygone : chaque toucher pose un sommet ; toucher le premier, ou « Fermer »,
@@ -32,7 +39,7 @@ use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
 use crate::gestes::Geste;
 use crate::surface::{FenetreId, Placee};
-use crate::svg::{self, Document, Forme, Matrice, P};
+use crate::svg::{self, Document, Forme, Matrice, Morceau, Repere, P};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
@@ -70,6 +77,7 @@ const EPAISSEURS: [f32; 5] = [0.5, 1.0, 2.0, 4.0, 8.0];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outil {
     Choisir,
+    Sommets,
     Rectangle,
     Ellipse,
     Ligne,
@@ -78,11 +86,12 @@ enum Outil {
 }
 
 impl Outil {
-    const TOUS: [Outil; 6] = [Outil::Choisir, Outil::Rectangle, Outil::Ellipse, Outil::Ligne, Outil::Polygone, Outil::Texte];
+    const TOUS: [Outil; 7] = [Outil::Choisir, Outil::Sommets, Outil::Rectangle, Outil::Ellipse, Outil::Ligne, Outil::Polygone, Outil::Texte];
 
     fn nom(self) -> &'static str {
         match self {
             Outil::Choisir => "Choisir",
+            Outil::Sommets => "Sommets",
             Outil::Rectangle => "Rectangle",
             Outil::Ellipse => "Ellipse",
             Outil::Ligne => "Ligne",
@@ -107,6 +116,9 @@ enum Commande {
     Fermer,
     Abandonner,
     Cadrer,
+    RetirerSommet,
+    Basculer,
+    OuvrirFermer,
 }
 
 /// Un doigt qui travaille : trace une forme, ou déplace la sélection.
@@ -114,6 +126,8 @@ enum Commande {
 enum Travail {
     Trace { depart: P, fin: P },
     Deplace { noeud: usize, avant: String, depart: P, instantane: String },
+    /// Un sommet ou un contrôle du tracé choisi, emmené par le curseur.
+    Repere { repere: Repere, instantane: String },
 }
 
 /// Une poignée tenue : laquelle (0 à 3 les angles, 4 la rotation), la
@@ -164,6 +178,8 @@ pub struct Svg {
     trait_: Option<Color>,
     epaisseur: f32,
     selection: Option<usize>,
+    /// Le sommet choisi du tracé (outil Sommets).
+    pointe: Option<usize>,
     travail: Option<Travail>,
     prise: Option<Prise>,
     /// Les sommets d'un polygone en cours.
@@ -200,6 +216,7 @@ impl Default for Svg {
             trait_: Some(COULEURS[0]),
             epaisseur: 2.0,
             selection: None,
+            pointe: None,
             travail: None,
             prise: None,
             sommets: Vec::new(),
@@ -321,10 +338,78 @@ impl Svg {
             self.doc = d;
         }
         self.selection = None;
+        self.pointe = None;
         self.prise = None;
         self.travail = None;
         self.modifie = true;
         self.retouche();
+    }
+
+    /// Le tracé de la forme choisie, s'il s'édite, et sa transformation vers le
+    /// document.
+    fn trace_choisi(&self) -> Option<(usize, Vec<Morceau>, Matrice)> {
+        let k = self.selection?;
+        Some((k, svg::trace_de(&self.doc.noeuds[k])?, self.doc.ctm(k)))
+    }
+
+    /// Le repère du tracé choisi le plus proche de `p` (dans le dessin), à portée de
+    /// doigt.
+    fn repere_proche(&self, p: P) -> Option<Repere> {
+        let (_, t, m) = self.trace_choisi()?;
+        let portee = 18.0 / self.vue.zoom;
+        svg::reperes(&t)
+            .into_iter()
+            .map(|(r, q, _)| {
+                let q = m.appliquer(q);
+                (r, (q.0 - p.0).hypot(q.1 - p.1))
+            })
+            .filter(|x| x.1 < portee)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|x| x.0)
+    }
+
+    /// Retouche le tracé choisi ; `f` dit si elle a eu lieu. Retenu pour annuler.
+    fn modifier_trace(&mut self, f: impl FnOnce(&mut Vec<Morceau>) -> bool) -> bool {
+        let Some((k, mut t, _)) = self.trace_choisi() else { return false };
+        let avant_t = t.clone();
+        if !f(&mut t) || t == avant_t {
+            return false;
+        }
+        let avant = self.doc.ecrire();
+        self.doc.poser_trace(k, &t);
+        self.noter(avant);
+        self.retouche();
+        true
+    }
+
+    /// Un toucher avec l'outil Sommets : choisit un sommet, coupe le contour touché
+    /// (un sommet de plus), ou choisit la forme touchée, même dans un groupe.
+    fn toucher_sommets(&mut self, p: P) {
+        if let Some(r) = self.repere_proche(p) {
+            if let Repere::Sommet(i) = r {
+                self.pointe = Some(i);
+            }
+            return;
+        }
+        let portee = 18.0 / self.vue.zoom;
+        if let Some((_, t, m)) = self.trace_choisi() {
+            if let Some((i, u)) = svg::segment_proche(&t, &m, p, portee * 0.7) {
+                let mut nouveau = None;
+                self.modifier_trace(|t| {
+                    nouveau = svg::couper(t, i, u);
+                    nouveau.is_some()
+                });
+                self.pointe = nouveau;
+                return;
+            }
+        }
+        let doc = self.doc.clone();
+        let formes = self.formes().to_vec();
+        self.pointe = None;
+        self.selection = formes.iter().rev().find(|f| f.touche(p, portee * 0.5) && svg::trace_de(&doc.noeuds[f.noeud]).is_some()).map(|f| f.noeud);
+        if self.selection.is_none() {
+            self.message = Some(("Sommets : touchez un chemin ou une forme simple".into(), false));
+        }
     }
 
     /// Cadre le dessin dans la zone : sa vue (`viewBox`), sinon ce qu'il dessine.
@@ -535,6 +620,31 @@ impl Svg {
             Commande::Outil(o) => {
                 self.outil = o;
                 self.sommets.clear();
+                self.pointe = None;
+                if o == Outil::Sommets && self.trace_choisi().is_none() {
+                    self.selection = None;
+                }
+            }
+            Commande::RetirerSommet => {
+                if let Some(i) = self.pointe.take() {
+                    if !self.modifier_trace(|t| svg::retirer_sommet(t, i)) {
+                        self.message = Some(("Un tracé garde au moins deux sommets : « Supprimer » (outil Choisir) retire la forme.".into(), true));
+                    }
+                }
+            }
+            Commande::Basculer => {
+                if let Some(i) = self.pointe {
+                    // Un départ courbé gagne un sommet jumeau : le sommet choisi reste
+                    self.modifier_trace(|t| svg::basculer(t, i));
+                }
+            }
+            Commande::OuvrirFermer => {
+                if let Some(i) = self.pointe {
+                    self.modifier_trace(|t| {
+                        svg::ouvrir_fermer(t, i);
+                        true
+                    });
+                }
             }
             Commande::Cible(f) => self.cible_fond = f,
             Commande::Couleur(_) | Commande::Epaisseur(_) => self.styler(c),
@@ -569,11 +679,23 @@ impl Svg {
                     }
                 }
             }
-            Commande::Fin => self.selection = None,
+            Commande::Fin => {
+                self.selection = None;
+                self.pointe = None;
+            }
             Commande::Fermer => self.fermer_polygone(),
             Commande::Abandonner => self.sommets.clear(),
             Commande::Cadrer => self.cadrer = true,
         }
+    }
+
+    /// Emmène un repère du tracé choisi en `p` (dans le dessin), sans le retenir
+    /// pour annuler (c'est fait à la fin de la saisie).
+    fn emmener(&mut self, r: Repere, p: P) {
+        let Some((k, mut t, m)) = self.trace_choisi() else { return };
+        svg::deplacer(&mut t, r, m.inverse().appliquer(p));
+        self.doc.poser_trace(k, &t);
+        self.retouche();
     }
 
     /// Un geste sur le dessin.
@@ -593,6 +715,7 @@ impl Svg {
                             self.sommets.push(p);
                         }
                     }
+                    Outil::Sommets => self.toucher_sommets(p),
                     Outil::Texte => {
                         self.texte_en = Some(p);
                         self.saisie = Edition::default();
@@ -609,6 +732,14 @@ impl Svg {
                 let p = self.vers_dessin(x, y);
                 match self.outil {
                     Outil::Rectangle | Outil::Ellipse | Outil::Ligne => self.travail = Some(Travail::Trace { depart: p, fin: p }),
+                    Outil::Sommets => {
+                        if let Some(r) = self.repere_proche(p) {
+                            if let Repere::Sommet(i) = r {
+                                self.pointe = Some(i);
+                            }
+                            self.travail = Some(Travail::Repere { repere: r, instantane: self.doc.ecrire() });
+                        }
+                    }
                     Outil::Choisir => {
                         let doc = self.doc.clone();
                         let f = self.formes().to_vec();
@@ -630,6 +761,10 @@ impl Svg {
                         self.doc.transformer(n, &Matrice::translation(p.0 - d.0, p.1 - d.1), &a);
                         self.retouche();
                     }
+                    Some(Travail::Repere { repere, .. }) => {
+                        let r = *repere;
+                        self.emmener(r, p);
+                    }
                     None => {}
                 }
             }
@@ -644,15 +779,28 @@ impl Svg {
                         }
                         self.retouche();
                     }
+                    Some(Travail::Repere { repere, instantane }) => {
+                        self.emmener(repere, p);
+                        if self.doc.ecrire() != instantane {
+                            self.noter(instantane);
+                        }
+                    }
                     None => {}
                 }
             }
-            Geste::SaisieAnnulee { .. } => {
-                if let Some(Travail::Deplace { noeud, avant, .. }) = self.travail.take() {
+            Geste::SaisieAnnulee { .. } => match self.travail.take() {
+                Some(Travail::Deplace { noeud, avant, .. }) => {
                     self.doc.transformer(noeud, &Matrice::IDENTITE, &avant);
                     self.retouche();
                 }
-            }
+                Some(Travail::Repere { instantane, .. }) => {
+                    if let Ok(d) = Document::lire(&instantane) {
+                        self.doc = d;
+                        self.retouche();
+                    }
+                }
+                _ => {}
+            },
             Geste::PincementDebut { .. } => self.pincement = 1.0,
             Geste::Pincement { echelle, centre, deplacement } => {
                 let k = self.vue.zoom * self.dp;
@@ -754,7 +902,7 @@ impl Svg {
                     cx.dl.rrect(r, rayon, voile);
                 }
             }
-            Some(Travail::Deplace { .. }) | None => {}
+            Some(Travail::Deplace { .. } | Travail::Repere { .. }) | None => {}
         }
         if !self.sommets.is_empty() {
             let pts: Vec<[f32; 2]> = self.sommets.iter().map(|p| self.vers_ecran(*p)).collect();
@@ -771,7 +919,12 @@ impl Svg {
         if sel.is_none() {
             self.selection = None;
         }
-        if let Some(s) = sel {
+        if self.outil == Outil::Sommets {
+            self.prise = None;
+            if sel.is_some() {
+                self.montrer_sommets(cx);
+            }
+        } else if let Some(s) = sel {
             let doc = self.doc.clone();
             let f = self.formes().to_vec();
             if let Some(b) = svg::boite_de(&doc, &f, s) {
@@ -849,6 +1002,58 @@ impl Svg {
         cx.clip(None);
     }
 
+    /// Le tracé choisi (outil Sommets) : son contour, ses sommets, ses contrôles et
+    /// leurs tiges.
+    fn montrer_sommets(&mut self, cx: &mut Cx) {
+        let Some((k, t, m)) = self.trace_choisi() else { return };
+        let (d, col) = (cx.dp, cx.couleurs());
+        let accent = col.accent;
+        let tige = [accent[0], accent[1], accent[2], 150];
+        let formes = self.formes().to_vec();
+        for f in formes.iter().filter(|f| f.noeud == k) {
+            for (v, ferme) in &f.contours {
+                let e: Vec<[f32; 2]> = v.iter().map(|p| self.vers_ecran(*p)).collect();
+                let n = if *ferme { e.len() } else { e.len().saturating_sub(1) };
+                for j in 0..n {
+                    cx.dl.line(e[j], e[(j + 1) % e.len()], 1.5 * d, accent);
+                }
+            }
+        }
+        let tenu = match &self.travail {
+            Some(Travail::Repere { repere, .. }) => Some(*repere),
+            _ => None,
+        };
+        let reperes = svg::reperes(&t);
+        // Les tiges d'abord, puis les contrôles, puis les sommets par-dessus
+        for (_, p, liens) in &reperes {
+            let q = self.vers_ecran(m.appliquer(*p));
+            for l in liens {
+                cx.dl.line(q, self.vers_ecran(m.appliquer(*l)), d.max(1.0), tige);
+            }
+        }
+        for passe in 0..2 {
+            for (r, p, _) in &reperes {
+                let q = self.vers_ecran(m.appliquer(*p));
+                let grand = if tenu == Some(*r) { 1.5 } else { 1.0 };
+                match (r, passe) {
+                    (Repere::Controle(..), 0) => {
+                        let rc = 4.5 * d * grand;
+                        cx.dl.rrect(Rect::new(q[0] - rc, q[1] - rc, 2.0 * rc, 2.0 * rc), rc, accent);
+                        cx.dl.rrect(Rect::new(q[0] - rc * 0.5, q[1] - rc * 0.5, rc, rc), rc, PAPIER);
+                    }
+                    (Repere::Sommet(i), 1) => {
+                        let rc = 5.5 * d * grand;
+                        let choisi = self.pointe == Some(*i);
+                        cx.dl.rrect(Rect::new(q[0] - rc, q[1] - rc, 2.0 * rc, 2.0 * rc), 1.5 * d, accent);
+                        let b = 1.5 * d;
+                        cx.dl.rrect(Rect::new(q[0] - rc + b, q[1] - rc + b, 2.0 * (rc - b), 2.0 * (rc - b)), d, if choisi { accent } else { PAPIER });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Les commandes de la barre du bas, par groupes (chacun sur sa ligne).
     fn commandes(&self) -> Vec<Vec<(Commande, String, bool)>> {
         let mut g = Vec::new();
@@ -876,7 +1081,20 @@ impl Svg {
             }
         }
         g.push(style);
-        if self.selection.is_some() {
+        if self.outil == Outil::Sommets {
+            if let Some((_, t, _)) = self.trace_choisi() {
+                let mut v = Vec::new();
+                if let Some(i) = self.pointe.filter(|i| t.get(*i).is_some_and(|m| m.fin().is_some())) {
+                    v.push((Commande::RetirerSommet, "Retirer le sommet".to_string(), false));
+                    if let Some(droit) = svg::droit(&t, i) {
+                        v.push((Commande::Basculer, if droit { "Courber" } else { "Redresser" }.into(), false));
+                    }
+                    v.push((Commande::OuvrirFermer, if svg::est_ferme(&t, i) { "Ouvrir" } else { "Fermer" }.into(), false));
+                }
+                v.push((Commande::Fin, "Fin".into(), false));
+                g.push(v);
+            }
+        } else if self.selection.is_some() {
             g.push(vec![
                 (Commande::Dupliquer, "Dupliquer".into(), false),
                 (Commande::Supprimer, "Supprimer".into(), false),
@@ -1161,7 +1379,12 @@ impl Contexte for Svg {
             return m.clone();
         }
         let n = self.doc.noeuds[self.doc.racine].enfants.iter().filter(|e| self.doc.noeuds[**e].element()).count();
-        let sel = self.selection.map_or(String::new(), |s| format!(" · <{}> choisi", self.doc.noeuds[s].nom));
+        let sel = match (self.selection, self.outil) {
+            (None, Outil::Sommets) => " · touchez une forme pour voir ses sommets".to_string(),
+            (Some(_), Outil::Sommets) if self.pointe.is_none() => " · touchez un sommet, ou le contour pour en ajouter".to_string(),
+            (Some(s), _) => format!(" · <{}> choisi", self.doc.noeuds[s].nom),
+            (None, _) => String::new(),
+        };
         let etat = if self.modifie { " · non enregistré" } else { "" };
         format!("{} · {n} élément{} · {:.0} %{sel}{etat}", self.nom_affiche(), if n > 1 { "s" } else { "" }, self.vue.zoom * 100.0)
     }
@@ -1320,4 +1543,46 @@ mod tests {
         assert!(v.source.is_some());
         let _ = std::fs::remove_dir_all(d);
     }
+
+    #[test]
+    fn editer_les_sommets() {
+        let mut s = pret();
+        s.doc = Document::lire(r#"<svg viewBox="0 0 800 600"><g transform="translate(100 0)"><rect x="0" y="0" width="100" height="50" fill="red"/></g></svg>"#).unwrap();
+        s.retouche();
+        s.commander(Commande::Outil(Outil::Sommets));
+        // Toucher la forme, dans son groupe, la choisit
+        toucher(&mut s, (150.0, 25.0));
+        let r = s.selection.unwrap();
+        assert_eq!(s.doc.noeuds[r].nom, "rect");
+        // Toucher un angle le pointe ; le glisser le déplace (le groupe est décalé de 100)
+        toucher(&mut s, (201.0, 49.0));
+        assert_eq!(s.pointe, Some(2));
+        glisser(&mut s, (200.0, 50.0), (220.0, 80.0));
+        assert_eq!(s.doc.noeuds[r].nom, "path");
+        assert_eq!(s.doc.noeuds[r].attr("d"), Some("M0 0 L100 0 L120 80 L0 50 Z"));
+        assert_eq!(s.doc.noeuds[r].attr("fill"), Some("red"));
+        assert_eq!(s.passe.len(), 1);
+        // Toucher le contour ajoute un sommet, pointé
+        toucher(&mut s, (150.0, 0.0));
+        assert_eq!(s.pointe, Some(1));
+        assert_eq!(s.doc.noeuds[r].attr("d"), Some("M0 0 L50 0 L100 0 L120 80 L0 50 Z"));
+        // Courber le segment qui y arrive, puis retirer ce sommet
+        assert!(s.commandes().iter().flatten().any(|c| c.1 == "Courber"));
+        s.commander(Commande::Basculer);
+        assert!(s.doc.noeuds[r].attr("d").unwrap().starts_with("M0 0 C"));
+        s.commander(Commande::RetirerSommet);
+        assert_eq!(s.pointe, None);
+        assert_eq!(svg::trace_de(&s.doc.noeuds[r]).unwrap().len(), 5);
+        // Ouvrir le tracé
+        s.pointe = Some(0);
+        s.commander(Commande::OuvrirFermer);
+        assert!(!s.doc.noeuds[r].attr("d").unwrap().ends_with('Z'));
+        // Tout s'annule pas à pas, jusqu'au rectangle
+        while !s.passe.is_empty() {
+            s.defaire(false);
+        }
+        let r = s.doc.noeuds.iter().position(|n| n.nom == "rect").unwrap();
+        assert_eq!(s.doc.noeuds[r].attr("width"), Some("100"));
+    }
+
 }

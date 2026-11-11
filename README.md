@@ -19,7 +19,8 @@ JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en dépo
 quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste), Encre (dessin à
 main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts), SVG (éditeur
 de dessin vectoriel : ouvre tout SVG, trace rectangles, ellipses, lignes, polygones et textes avec
-fond, trait et épaisseur ; sélection avec poignées pour déplacer, agrandir et tourner ; dupliquer,
+fond, trait et épaisseur ; sélection avec poignées pour déplacer, agrandir et tourner ; édition des sommets des chemins (déplacer
+sommets et contrôles, ajouter en touchant le contour, retirer, courber, redresser, ouvrir, fermer) ; dupliquer,
 supprimer, monter, descendre ; annuler, rétablir ; la source colorée à côté, synchronisée),
 Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie surveillée,
 recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`), Aide. Les paramètres de l'application (apparence, clavier,
