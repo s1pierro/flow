@@ -15,11 +15,39 @@ pub struct Tampon {
     pub revision: u64,
     /// L'autre bout de la sélection, s'il y en a une : elle va de l'ancre au curseur.
     pub ancre: Option<usize>,
+    /// L'historique : les modifications qu'on peut annuler, puis celles qu'on peut
+    /// rétablir (la plus récente au bout).
+    passe: Vec<Modif>,
+    futur: Vec<Modif>,
+    /// La prochaine frappe peut-elle se souder à la dernière modification ?
+    souder: bool,
+}
+
+/// L'historique retient au plus ce nombre de modifications.
+const HISTOIRE: usize = 2000;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sorte {
+    Frappe,
+    Effacement,
+    Autre,
+}
+
+/// Une modification : en `pos`, `retire` a laissé la place à `ajoute` ; le curseur
+/// et l'ancre avant et après.
+#[derive(Clone, Debug, PartialEq)]
+struct Modif {
+    pos: usize,
+    retire: Vec<char>,
+    ajoute: Vec<char>,
+    avant: (usize, Option<usize>),
+    apres: (usize, Option<usize>),
+    sorte: Sorte,
 }
 
 impl Tampon {
     pub fn new(texte: &str) -> Tampon {
-        Tampon { car: texte.chars().collect(), curseur: 0, revision: 0, ancre: None }
+        Tampon { car: texte.chars().collect(), ..Tampon::default() }
     }
 
     pub fn texte(&self) -> String {
@@ -93,31 +121,93 @@ impl Tampon {
         (a, b)
     }
 
+    /// Remplace les caractères `a..b` par `nouveau`, le curseur après lui, et le
+    /// retient dans l'historique. Les frappes qui se suivent forment une seule
+    /// modification (jusqu'à la fin d'un mot et ses espaces, ou une fin de ligne), de
+    /// même que les effacements qui se suivent.
+    fn remplacer(&mut self, a: usize, b: usize, nouveau: Vec<char>, sorte: Sorte) {
+        let avant = (self.curseur, self.ancre);
+        let retire: Vec<char> = self.car.splice(a..b, nouveau.iter().copied()).collect();
+        self.curseur = a + nouveau.len();
+        self.ancre = None;
+        self.revision += 1;
+        self.futur.clear();
+        let apres = (self.curseur, None);
+        let souder = std::mem::replace(&mut self.souder, true);
+        if let Some(m) = self.passe.last_mut().filter(|m| souder && m.apres == avant && m.sorte == sorte) {
+            let blanc = |c: Option<&char>| c.is_some_and(|c| c.is_whitespace());
+            let frappe = sorte == Sorte::Frappe && retire.is_empty() && m.pos + m.ajoute.len() == a && !(blanc(m.ajoute.last()) && !blanc(nouveau.first())) && !m.ajoute.contains(&'\n');
+            let effacement = sorte == Sorte::Effacement && nouveau.is_empty() && m.ajoute.is_empty() && b == m.pos;
+            if frappe {
+                m.ajoute.extend(nouveau);
+                m.apres = apres;
+                return;
+            }
+            if effacement {
+                let mut r = retire;
+                r.extend(std::mem::take(&mut m.retire));
+                m.retire = r;
+                m.pos = a;
+                m.apres = apres;
+                return;
+            }
+        }
+        self.passe.push(Modif { pos: a, retire, ajoute: nouveau, avant, apres, sorte });
+        if self.passe.len() > HISTOIRE {
+            self.passe.remove(0);
+        }
+    }
+
+    pub fn peut_annuler(&self) -> bool {
+        !self.passe.is_empty()
+    }
+
+    pub fn peut_retablir(&self) -> bool {
+        !self.futur.is_empty()
+    }
+
+    /// Défait la dernière modification. Vrai s'il y en avait une.
+    pub fn annuler(&mut self) -> bool {
+        let Some(m) = self.passe.pop() else { return false };
+        self.car.splice(m.pos..(m.pos + m.ajoute.len()).min(self.car.len()), m.retire.iter().copied());
+        (self.curseur, self.ancre) = m.avant;
+        self.revision += 1;
+        self.souder = false;
+        self.futur.push(m);
+        true
+    }
+
+    /// Refait la dernière modification annulée. Vrai s'il y en avait une.
+    pub fn retablir(&mut self) -> bool {
+        let Some(m) = self.futur.pop() else { return false };
+        self.car.splice(m.pos..(m.pos + m.retire.len()).min(self.car.len()), m.ajoute.iter().copied());
+        (self.curseur, self.ancre) = m.apres;
+        self.revision += 1;
+        self.souder = false;
+        self.passe.push(m);
+        true
+    }
+
     /// Efface la sélection. Vrai s'il y en avait une.
     pub fn effacer_selection(&mut self) -> bool {
         let Some((a, b)) = self.selection() else {
             self.ancre = None;
             return false;
         };
-        self.car.drain(a..b);
-        self.curseur = a;
-        self.ancre = None;
-        self.revision += 1;
+        self.remplacer(a, b, Vec::new(), Sorte::Autre);
         true
     }
 
     /// Écrit un texte au curseur, à la place de la sélection s'il y en a une.
     pub fn inserer(&mut self, texte: &str) -> bool {
-        let efface = self.effacer_selection();
         self.curseur = self.curseur.min(self.car.len());
+        let (a, b) = self.selection().unwrap_or((self.curseur, self.curseur));
         let v: Vec<char> = texte.chars().filter(|c| *c != '\r').collect();
-        if v.is_empty() {
-            return efface;
+        if v.is_empty() && a == b {
+            self.ancre = None;
+            return false;
         }
-        let n = v.len();
-        self.car.splice(self.curseur..self.curseur, v);
-        self.curseur += n;
-        self.revision += 1;
+        self.remplacer(a, b, v, Sorte::Autre);
         true
     }
 
@@ -132,28 +222,31 @@ impl Tampon {
                     return false;
                 }
                 Frappe::Effacer => return self.effacer_selection(),
+                Frappe::Car(c) => {
+                    // La frappe remplace la sélection : une seule modification, que
+                    // la suite de la frappe prolonge
+                    self.remplacer(a, b, vec![c], Sorte::Frappe);
+                    return true;
+                }
                 _ => {
-                    self.effacer_selection();
-                    self.appliquer(f);
+                    self.remplacer(a, b, vec!['\n'], Sorte::Autre);
                     return true;
                 }
             }
         }
         self.ancre = None;
-        let change = match f {
+        let i = self.curseur;
+        match f {
             Frappe::Car(c) => {
-                self.car.insert(self.curseur, c);
-                self.curseur += 1;
+                self.remplacer(i, i, vec![c], Sorte::Frappe);
                 true
             }
             Frappe::Entree | Frappe::Ligne => {
-                self.car.insert(self.curseur, '\n');
-                self.curseur += 1;
+                self.remplacer(i, i, vec!['\n'], Sorte::Frappe);
                 true
             }
-            Frappe::Effacer if self.curseur > 0 => {
-                self.curseur -= 1;
-                self.car.remove(self.curseur);
+            Frappe::Effacer if i > 0 => {
+                self.remplacer(i - 1, i, Vec::new(), Sorte::Effacement);
                 true
             }
             Frappe::Effacer => false,
@@ -165,11 +258,7 @@ impl Tampon {
                 self.curseur = (self.curseur + 1).min(self.car.len());
                 false
             }
-        };
-        if change {
-            self.revision += 1;
         }
-        change
     }
 }
 
@@ -384,5 +473,57 @@ mod tests {
         // Une sélection vide n'en est pas une
         t.selectionner(3, 3);
         assert_eq!(t.selection(), None);
+    }
+
+    fn taper(t: &mut Tampon, s: &str) {
+        for c in s.chars() {
+            t.appliquer(if c == '\x08' { Frappe::Effacer } else if c == '\n' { Frappe::Entree } else { Frappe::Car(c) });
+        }
+    }
+
+    #[test]
+    fn annuler_et_retablir_par_mots() {
+        let mut t = Tampon::new("");
+        taper(&mut t, "un deux\ntrois");
+        // Les frappes se groupent par mot (avec ses espaces) et par ligne
+        assert!(t.annuler());
+        assert_eq!(t.texte(), "un deux\n");
+        assert!(t.annuler());
+        assert_eq!(t.texte(), "un ");
+        assert!(t.retablir() && t.retablir());
+        assert_eq!(t.texte(), "un deux\ntrois");
+        assert_eq!(t.curseur, 13);
+        assert!(!t.retablir());
+        // Les effacements qui se suivent : un seul pas
+        taper(&mut t, "\x08\x08\x08");
+        assert_eq!(t.texte(), "un deux\ntr");
+        assert!(t.annuler());
+        assert_eq!(t.texte(), "un deux\ntrois");
+        // Remplacer une sélection, puis la frappe qui suit : un seul pas, la
+        // sélection revient
+        t.selectionner(3, 7);
+        taper(&mut t, "quatre");
+        assert_eq!(t.texte(), "un quatre\ntrois");
+        assert!(t.annuler());
+        assert_eq!(t.texte(), "un deux\ntrois");
+        assert_eq!(t.selection(), Some((3, 7)));
+        // Coller, couper
+        t.placer(0);
+        t.inserer("« ");
+        t.selectionner(9, 15);
+        t.effacer_selection();
+        assert_eq!(t.texte(), "« un deux");
+        assert!(t.annuler() && t.annuler());
+        assert_eq!(t.texte(), "un deux\ntrois");
+        // Une nouvelle modification efface ce qu'on pouvait rétablir
+        assert!(t.peut_retablir());
+        taper(&mut t, "x");
+        assert!(!t.peut_retablir());
+        // Après un annuler, la frappe suivante ne se soude pas au pas d'avant
+        t.annuler();
+        taper(&mut t, "y");
+        t.annuler();
+        assert!(!t.texte().contains('y'));
+        assert!(t.peut_annuler());
     }
 }

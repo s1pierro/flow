@@ -33,6 +33,9 @@
 //!   - une sélection montre au-dessus d'elle Copier, Couper, Coller, Tout, et à
 //!     chaque bout une poignée : la tirer déplace ce bout ;
 //!   - la gouttière fait défiler à un doigt.
+//! - À gauche du titre, Annuler et Rétablir : les frappes s'y groupent par mot (et
+//!   ses espaces) ou par ligne, les effacements qui se suivent aussi ; l'historique
+//!   dure le temps de la session (`Tampon::annuler`, `Tampon::retablir`).
 //!
 //! L'espace de travail retient le document, le curseur, le brouillon, le nom d'un
 //! nouveau document, les blocs pliés (`plis`, numéros de ligne à partir de 0) et la
@@ -62,6 +65,7 @@ const GOUTTIERE: Id = id("texte/gouttiere");
 const PLI: Id = id("texte/pli");
 const ACTION: Id = id("texte/action");
 const POIGNEE: Id = id("texte/poignee");
+const HISTOIRE: Id = id("texte/histoire");
 /// La taille des numéros de ligne.
 const TAILLE_NUMEROS: f32 = 12.0;
 /// La taille du texte par défaut et ses bornes (au pincement), et la taille de
@@ -565,7 +569,32 @@ impl Contexte for Texte {
         let label = "Enregistrer";
         let wp = cx.pill_width(label);
         let xp = r.right() - wp - m;
-        let x0 = p.suite.0;
+        let mut x0 = p.suite.0;
+        // À gauche du titre : annuler, rétablir
+        if !self.lecture_seule {
+            for (j, (icone, retablir)) in [(Icon::Annuler, false), (Icon::Retablir, true)].into_iter().enumerate() {
+                let case = Rect::new(x0, r.y + m, h, h);
+                let possible = if retablir { self.tampon.peut_retablir() } else { self.tampon.peut_annuler() };
+                let kb = sub_id(HISTOIRE, k * 2 + j);
+                if cx.ui.click(kb, case, None) && possible {
+                    if retablir {
+                        self.tampon.retablir();
+                    } else {
+                        self.tampon.annuler();
+                    }
+                    self.modifie = true;
+                    self.suivre = true;
+                    self.actions = false;
+                    self.message = None;
+                }
+                if possible && cx.ui.pressed(kb) {
+                    cx.dl.rrect(case.inset(2.0 * d), cx.theme.rayon(case.h - 4.0 * d), col.puce);
+                }
+                cx.icon(case.inset(cx.pad() * 0.6), icone, if possible { col.texte } else { col.ligne });
+                x0 += h;
+            }
+            x0 += gap;
+        }
         if xp > x0 + gap && cx.pill(sub_id(ENREGISTRER, k), xp, r.y + m, label, self.modifie) && !self.lecture_seule {
             self.message = Some(match self.enregistrer(c) {
                 Ok(()) => (format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())), false),

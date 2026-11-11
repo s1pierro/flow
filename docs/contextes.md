@@ -41,7 +41,7 @@ Les contextes existants servent d'exemples, du plus simple au plus complet :
 d'ouverture), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
 par noms et résolu plus tard) — l'analyse se résume dans `Commun::empreintes`, enregistrée
 dans `Flow/empreintes.txt`, que Fichiers lit sans relancer de parcours, `texte.rs` (un contexte à document : lecture,
-enregistrement, brouillons, découpage des lignes et sélection dans `src/tampon.rs`,
+enregistrement, brouillons, découpage des lignes, sélection et historique (annuler, rétablir) dans `src/tampon.rs`,
 une zone à gestes pour éditer : tap, glisser pour sélectionner, appui, appui long, pincement ;
 le presse-papier par `acces::copier` et `acces::presse_papier`), `encre.rs`
 (une zone à gestes élaborés, un document SVG enregistré à la demande), `orchestre.rs`
