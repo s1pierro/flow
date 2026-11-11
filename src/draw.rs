@@ -53,18 +53,44 @@ pub struct Vertex {
     pub color: Color,
 }
 
-/// Tranche de sommets dessinée avec une même zone de découpe.
+/// Tranche de sommets dessinée avec une même zone de découpe, ou une vue 3D
+/// (`vue3d`, un indice dans `DrawList::vues3d`) dessinée à cette place.
 #[derive(Clone, Copy)]
 pub struct Cmd {
     pub first: usize,
     pub count: usize,
     pub clip: Option<Rect>,
+    pub vue3d: Option<usize>,
+}
+
+/// Un maillage à dessiner en 3D : par sommet, position puis normale (6 flottants),
+/// et des triangles. Le moteur de rendu le garde sur la carte graphique tant que
+/// (`id`, `revision`) ne change pas.
+#[derive(Clone, Debug)]
+pub struct Maillage3d {
+    pub id: u64,
+    pub revision: u64,
+    pub sommets: std::sync::Arc<Vec<f32>>,
+    pub indices: std::sync::Arc<Vec<u32>>,
+}
+
+/// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la
+/// rotation de la caméra, en colonnes) éclaire depuis le regard.
+#[derive(Clone, Debug)]
+pub struct Vue3d {
+    pub rect: Rect,
+    pub mvp: [f32; 16],
+    pub vue: [f32; 16],
+    pub maillage: Maillage3d,
+    /// La couleur de la matière, de 0 à 1.
+    pub couleur: [f32; 3],
 }
 
 #[derive(Default)]
 pub struct DrawList {
     pub vertices: Vec<Vertex>,
     pub cmds: Vec<Cmd>,
+    pub vues3d: Vec<Vue3d>,
     clip: Option<Rect>,
 }
 
@@ -72,6 +98,7 @@ impl DrawList {
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.cmds.clear();
+        self.vues3d.clear();
         self.clip = None;
     }
 
@@ -82,8 +109,8 @@ impl DrawList {
     fn push(&mut self, q: [Vertex; 4]) {
         let clip = self.clip;
         match self.cmds.last_mut() {
-            Some(c) if c.clip == clip => c.count += 6,
-            _ => self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip }),
+            Some(c) if c.clip == clip && c.vue3d.is_none() => c.count += 6,
+            _ => self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip, vue3d: None }),
         }
         self.vertices.extend_from_slice(&[q[0], q[1], q[2], q[2], q[1], q[3]]);
     }
@@ -101,6 +128,14 @@ impl DrawList {
             color,
         };
         self.push([corner(-1., -1.), corner(1., -1.), corner(-1., 1.), corner(1., 1.)]);
+    }
+
+    /// Une vue 3D, dessinée à cette place : ce qui suit passe par-dessus. Elle reste
+    /// dans la zone de découpe courante.
+    pub fn vue3d(&mut self, v: Vue3d) {
+        let clip = self.clip;
+        self.vues3d.push(v);
+        self.cmds.push(Cmd { first: self.vertices.len(), count: 0, clip, vue3d: Some(self.vues3d.len() - 1) });
     }
 
     pub fn rrect(&mut self, r: Rect, radius: f32, color: Color) {

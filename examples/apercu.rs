@@ -62,6 +62,8 @@ fn main() {
         Shot { name: "svg-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "svg-source", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 7 },
         Shot { name: "svg-sommets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 8 },
+        Shot { name: "argile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
+        Shot { name: "argile-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
@@ -196,6 +198,11 @@ fn main() {
             app.ouvrir_espace(&format!("fenetres = F1:svg\n[fenetre 1]\ndocument = {}\n", f.display()));
             app.commun.theme.sombre = s.name == "svg-portrait";
         }
+        if s.name.starts_with("argile") {
+            // Une boule fraîche, quelques coups de pinceau (en sombre pour le portrait)
+            app.ouvrir_espace("fenetres = F1:argile\n");
+            app.commun.theme.sombre = s.name == "argile-portrait";
+        }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu
             app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
@@ -249,6 +256,17 @@ fn main() {
                     let k = (i - 40) as f32;
                     ui.event(Event::Move { id: 0, x: SOMMETS[3].0 + 22.0 * k, y: SOMMETS[3].1 - 6.0 * k }, t)
                 }
+                // Trois traits sur la boule, le dernier en cours (le pinceau se voit)
+                (9, 5 | 20 | 35) => {
+                    let k = (i / 15) as f32;
+                    ui.event(Event::Down { id: 0, x: w * (0.40 + 0.04 * k), y: h * (0.36 + 0.05 * k) }, t)
+                }
+                (9, 6..=16 | 21..=31 | 36..=46) => {
+                    let k = (i / 15) as f32;
+                    let j = ((i - 1) % 15) as f32 - 4.0;
+                    ui.event(Event::Move { id: 0, x: w * (0.40 + 0.04 * k) + j * 14.0 * s.dp, y: h * (0.36 + 0.05 * k) - j * 3.0 * s.dp }, t)
+                }
+                (9, 17 | 32) => ui.event(Event::Up { id: 0 }, t),
                 (4, 10) => ui.event(Event::Down { id: 0, x: 700.0, y: 330.0 }, t),
                 (4, 25) => ui.event(Event::Up { id: 0 }, t),
                 (4, 30) => ui.event(Event::Down { id: 0, x: 1100.0, y: 330.0 }, t),

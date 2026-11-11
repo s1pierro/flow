@@ -85,6 +85,7 @@ api!(GlApi {
     glClearColor: fn(f32, f32, f32, f32);
     glClear: fn(u32);
     glDrawArrays: fn(u32, i32, i32);
+    glDrawElements: fn(u32, i32, u32, *const c_void);
     glGetError: fn() -> u32;
     glReadPixels: fn(i32, i32, i32, i32, u32, u32, *mut c_void);
 });

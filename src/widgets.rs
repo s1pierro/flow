@@ -145,6 +145,7 @@ pub enum Icon {
     Retablir,
     /// Le dessin vectoriel : une courbe entre deux nœuds, et une poignée.
     Vecteur,
+    Argile,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -437,6 +438,13 @@ impl Cx<'_> {
                 for (x, y) in [(-8.0, 7.0), (8.0, -6.0)] {
                     self.dl.rrect(Rect::new(cx + (x - 2.4) * u, cy + (y - 2.4) * u, 4.8 * u, 4.8 * u), 0.8 * u, color);
                 }
+            }
+            Icon::Argile => {
+                // Une boule de terre, marquée d'une empreinte de pouce
+                let pi = std::f32::consts::PI;
+                self.dl.secteur(p(0.0, 1.0), 7.2 * u, 9.0 * u, 0.0, 2.0 * pi, 0.0, color);
+                self.dl.secteur(p(2.0, -1.0), 2.6 * u, 4.0 * u, pi * 0.65, pi * 1.75, 0.0, color);
+                self.dl.rrect(Rect::new(cx - 5.4 * u, cy + 2.2 * u, 2.4 * u, 2.4 * u), 1.2 * u, color);
             }
             Icon::Gomme => {
                 // La gomme en biais : son corps, et le bout qui efface, plus pâle

@@ -1,6 +1,8 @@
-//! Tout OpenGL est ici : l'interface, sur tout l'écran.
+//! Tout OpenGL est ici : l'interface, sur tout l'écran, et les vues 3D qu'elle
+//! contient, dessinées à leur place dans la liste (avec leur propre profondeur).
 
-use crate::draw::{Color, DrawList, Rect, Vertex};
+use crate::draw::{Color, DrawList, Rect, Vertex, Vue3d};
+use std::cell::RefCell;
 use crate::gles::GlApi;
 use crate::text::{Text, ATLAS};
 use std::ffi::{c_char, c_void, CString};
@@ -15,6 +17,51 @@ const RED: u32 = 0x1903;
 const BLEND: u32 = 0x0BE2;
 const SCISSOR: u32 = 0x0C11;
 const COLOR_BIT: u32 = 0x4000;
+const DEPTH_BIT: u32 = 0x0100;
+const DEPTH_TEST: u32 = 0x0B71;
+const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
+const UINT: u32 = 0x1405;
+
+const MAILLAGE_VS: &str = "#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_normal;
+uniform mat4 u_mvp;
+uniform mat4 u_vue;
+out vec3 v_n;
+void main() {
+  v_n = mat3(u_vue) * a_normal;
+  gl_Position = u_mvp * vec4(a_pos, 1.0);
+}";
+
+/// Une terre mate : une lumière principale venue d'en haut à gauche du regard, un
+/// peu de contre-jour, un reflet discret et un liseré sur les bords.
+const MAILLAGE_FS: &str = "#version 300 es
+precision highp float;
+in vec3 v_n;
+uniform vec3 u_couleur;
+out vec4 o_color;
+void main() {
+  vec3 n = normalize(v_n);
+  if (!gl_FrontFacing) n = -n;
+  vec3 l = normalize(vec3(-0.45, 0.6, 0.66));
+  float d = max(dot(n, l), 0.0);
+  float fill = max(dot(n, normalize(vec3(0.7, -0.3, 0.4))), 0.0) * 0.22;
+  float rim = pow(1.0 - max(n.z, 0.0), 3.0) * 0.22;
+  float spec = pow(max(dot(n, normalize(l + vec3(0.0, 0.0, 1.0))), 0.0), 36.0) * 0.16;
+  vec3 c = u_couleur * (0.26 + 0.74 * d + fill) + vec3(rim + spec);
+  o_color = vec4(pow(c, vec3(1.0 / 1.1)), 1.0);
+}";
+
+/// Un maillage tenu sur la carte graphique.
+struct Tampon3d {
+    id: u64,
+    revision: u64,
+    vao: u32,
+    vbo: u32,
+    ebo: u32,
+    n: i32,
+}
 
 const UI_VS: &str = "#version 300 es
 precision highp float;
@@ -68,6 +115,11 @@ pub struct Renderer {
     ui_vao: u32,
     ui_vbo: u32,
     atlas: u32,
+    maillage_program: u32,
+    u_mvp: i32,
+    u_vue: i32,
+    u_couleur: i32,
+    tampons: RefCell<Vec<Tampon3d>>,
 }
 
 fn cstr(s: &str) -> CString {
@@ -142,7 +194,12 @@ impl Renderer {
 
             (gl.glBindVertexArray)(0);
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas })
+            let maillage_program = program(&gl, MAILLAGE_VS, MAILLAGE_FS)?;
+            let u_mvp = loc(maillage_program, "u_mvp");
+            let u_vue = loc(maillage_program, "u_vue");
+            let u_couleur = loc(maillage_program, "u_couleur");
+
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, tampons: RefCell::new(Vec::new()) })
         }
     }
 
@@ -153,6 +210,77 @@ impl Renderer {
     /// Rectangle en pixels (origine en haut) vers OpenGL (origine en bas).
     fn gl_rect(r: Rect, h: f32) -> (i32, i32, i32, i32) {
         (r.x.round() as i32, (h - r.bottom()).round() as i32, r.w.round().max(0.0) as i32, r.h.round().max(0.0) as i32)
+    }
+
+    /// Le maillage d'une vue sur la carte graphique, envoyé s'il est nouveau ou a
+    /// changé : (vao, nombre d'indices).
+    unsafe fn tampon(&self, v: &Vue3d) -> (u32, i32) {
+        let gl = &self.gl;
+        let m = &v.maillage;
+        let mut tampons = self.tampons.borrow_mut();
+        let i = match tampons.iter().position(|t| t.id == m.id) {
+            Some(i) => i,
+            None => {
+                let (mut vao, mut vbo, mut ebo) = (0, 0, 0);
+                (gl.glGenVertexArrays)(1, &mut vao);
+                (gl.glGenBuffers)(1, &mut vbo);
+                (gl.glGenBuffers)(1, &mut ebo);
+                (gl.glBindVertexArray)(vao);
+                (gl.glBindBuffer)(ARRAY_BUFFER, vbo);
+                (gl.glBindBuffer)(ELEMENT_ARRAY_BUFFER, ebo);
+                for (k, off) in [(0u32, 0usize), (1, 12)] {
+                    (gl.glEnableVertexAttribArray)(k);
+                    (gl.glVertexAttribPointer)(k, 3, FLOAT, 0, 24, off as *const c_void);
+                }
+                (gl.glBindVertexArray)(0);
+                tampons.push(Tampon3d { id: m.id, revision: u64::MAX, vao, vbo, ebo, n: 0 });
+                tampons.len() - 1
+            }
+        };
+        let t = &mut tampons[i];
+        if t.revision != m.revision {
+            (gl.glBindVertexArray)(t.vao);
+            (gl.glBindBuffer)(ARRAY_BUFFER, t.vbo);
+            (gl.glBufferData)(ARRAY_BUFFER, (m.sommets.len() * 4) as isize, m.sommets.as_ptr() as *const c_void, 0x88E8);
+            (gl.glBindBuffer)(ELEMENT_ARRAY_BUFFER, t.ebo);
+            (gl.glBufferData)(ELEMENT_ARRAY_BUFFER, (m.indices.len() * 4) as isize, m.indices.as_ptr() as *const c_void, 0x88E8);
+            (gl.glBindVertexArray)(0);
+            t.revision = m.revision;
+            t.n = m.indices.len() as i32;
+        }
+        (t.vao, t.n)
+    }
+
+    /// Une vue 3D, dans son rectangle et la zone de découpe ; l'état de l'interface
+    /// est rétabli ensuite.
+    unsafe fn dessiner_vue(&self, w: f32, h: f32, v: &Vue3d, clip: Option<Rect>) {
+        let gl = &self.gl;
+        let r = clip.map_or(v.rect, |c| v.rect.intersect(&c));
+        if r.w < 1.0 || r.h < 1.0 || v.maillage.indices.is_empty() {
+            return;
+        }
+        let (vao, n) = self.tampon(v);
+        let (x, y, cw, ch) = Self::gl_rect(r, h);
+        (gl.glEnable)(SCISSOR);
+        (gl.glScissor)(x, y, cw, ch);
+        let (x, y, vw, vh) = Self::gl_rect(v.rect, h);
+        (gl.glViewport)(x, y, vw, vh);
+        (gl.glEnable)(DEPTH_TEST);
+        (gl.glDisable)(BLEND);
+        (gl.glClear)(DEPTH_BIT);
+        (gl.glUseProgram)(self.maillage_program);
+        (gl.glUniformMatrix4fv)(self.u_mvp, 1, 0, v.mvp.as_ptr());
+        (gl.glUniformMatrix4fv)(self.u_vue, 1, 0, v.vue.as_ptr());
+        (gl.glUniform3f)(self.u_couleur, v.couleur[0], v.couleur[1], v.couleur[2]);
+        (gl.glBindVertexArray)(vao);
+        (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+        // Retour à l'interface
+        (gl.glDisable)(DEPTH_TEST);
+        (gl.glEnable)(BLEND);
+        (gl.glViewport)(0, 0, w as i32, h as i32);
+        (gl.glUseProgram)(self.ui_program);
+        (gl.glBindVertexArray)(self.ui_vao);
+        (gl.glBindBuffer)(ARRAY_BUFFER, self.ui_vbo);
     }
 
     /// Efface l'écran avec la couleur `fond`, puis dessine l'interface.
@@ -180,6 +308,10 @@ impl Renderer {
             (gl.glBindBuffer)(ARRAY_BUFFER, self.ui_vbo);
             (gl.glBufferData)(ARRAY_BUFFER, (dl.vertices.len() * size_of::<Vertex>()) as isize, dl.vertices.as_ptr() as *const c_void, 0x88E0);
             for c in &dl.cmds {
+                if let Some(i) = c.vue3d {
+                    self.dessiner_vue(w, h, &dl.vues3d[i], c.clip);
+                    continue;
+                }
                 match c.clip {
                     Some(r) => {
                         let (x, y, cw, ch) = Self::gl_rect(r, h);

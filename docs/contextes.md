@@ -48,7 +48,11 @@ le presse-papier par `acces::copier` et `acces::presse_papier`), `encre.rs`
 (une zone à gestes élaborés, un document SVG enregistré à la demande), `svg.rs` (un
 éditeur de dessin : le document en arbre, son rendu et ses retouches dans `src/svg.rs`,
 des poignées en `cx.ui.drag`, un historique d'instantanés, et un `Texte` intégré pour la
-source — `Texte::integre`, sans en-tête, dont le contexte relaie les frappes), `orchestre.rs`
+source — `Texte::integre`, sans en-tête, dont le contexte relaie les frappes), `argile.rs`
+(une vue 3D : le maillage et ses pinceaux dans `src/sculpture.rs`, le glTF binaire dans
+`src/glb.rs`, et `DrawList::vue3d`, qui place une vue 3D à son rang dans la liste de dessin :
+le moteur de rendu la dessine avec sa propre profondeur dans son rectangle, et ce qui suit
+passe par-dessus), `orchestre.rs`
 (la vue d'un module global, sans état propre).
 
 `texte.rs` est la référence pour un contexte qui édite des fichiers ; `svg.rs` montre
@@ -338,5 +342,7 @@ avec son état exposé dans le contexte Orchestre.
 
 ## À venir
 
+- Argile : des pinceaux qui affinent la matière là où ils passent (topologie
+  dynamique), la peinture de la terre, des formes de départ autres que la boule.
 - SVG : dégradés et motifs rendus fidèlement,
   sélection de plusieurs formes, entrer dans un groupe.

@@ -613,6 +613,11 @@ impl Contexte for Fichiers {
                         etat.mettre("document", chemin.display());
                         c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::svg::CLE, etat });
                     }
+                    _ if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("glb")) => {
+                        let mut etat = Etat::default();
+                        etat.mettre("document", chemin.display());
+                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::argile::CLE, etat });
+                    }
                     _ => {}
                 }
             }
