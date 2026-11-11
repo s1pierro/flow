@@ -30,7 +30,8 @@
 //!   - **appui** : sélectionne le mot ;
 //!   - **appui long** : place le curseur et montre Coller, Tout ;
 //!   - **deux doigts** : glisser fait défiler, pincer change la taille du texte ;
-//!   - une sélection montre au-dessus d'elle Copier, Couper, Coller, Tout ;
+//!   - une sélection montre au-dessus d'elle Copier, Couper, Coller, Tout, et à
+//!     chaque bout une poignée : la tirer déplace ce bout ;
 //!   - la gouttière fait défiler à un doigt.
 //!
 //! L'espace de travail retient le document, le curseur, le brouillon, le nom d'un
@@ -60,6 +61,7 @@ const ENREGISTRER: Id = id("texte/enregistrer");
 const GOUTTIERE: Id = id("texte/gouttiere");
 const PLI: Id = id("texte/pli");
 const ACTION: Id = id("texte/action");
+const POIGNEE: Id = id("texte/poignee");
 /// La taille des numéros de ligne.
 const TAILLE_NUMEROS: f32 = 12.0;
 /// La taille du texte par défaut et ses bornes (au pincement), et la taille de
@@ -117,6 +119,9 @@ pub struct Texte {
     /// Un pincement en cours : la taille à son début, puis le caractère sous le
     /// centre des doigts et où il doit rester à l'écran (y), et s'il dure encore.
     pince: Option<(f32, usize, f32, bool)>,
+    /// Une poignée de la sélection tenue au doigt : laquelle, le bout qui ne bouge
+    /// pas, et l'écart entre le doigt et le bout qu'il tire.
+    poignee: Option<(Id, usize, (f32, f32))>,
 }
 
 /// Une action sur la sélection.
@@ -849,25 +854,76 @@ impl Contexte for Texte {
         if self.tampon.car.is_empty() && !focus {
             cx.text_at(xt, top + lh / 2.0, if self.lecture_seule { "" } else { "Touchez pour écrire" }, ts, col.pale);
         }
-        // Le curseur ; avec une sélection, sa poignée (le bout qui bouge)
-        if focus || selection.is_some() || self.saisie.is_some() {
+        // Le curseur, sans sélection
+        if (focus && selection.is_none()) || self.saisie.is_some() {
             let curseur = self.tampon.curseur.min(self.tampon.car.len());
             let l = ligne_de(&s, curseur);
             let avant: String = self.tampon.car[s[l].0..curseur.max(s[l].0)].iter().collect();
             let x = xt + cx.mesure_mono(&avant, ts);
             let y = top + rang(l) as f32 * lh;
             cx.dl.rrect(Rect::new(x - d, y + lh * 0.1, 2.0 * d, lh * 0.8), d, col.accent);
-            if selection.is_some() {
-                let p = 4.0 * d;
-                cx.dl.rrect(Rect::new(x - p, y + lh * 0.9, 2.0 * p, 2.0 * p), p, col.accent);
+        }
+        // Les poignées aux deux bouts de la sélection : tirer l'une déplace son bout,
+        // l'autre ne bouge pas (elles peuvent se croiser)
+        if (selection.is_some() || self.poignee.is_some()) && self.saisie.is_none() && self.pince.is_none() {
+            let cur = self.tampon.curseur.min(self.tampon.car.len());
+            let (sa, sb) = selection.unwrap_or((cur, cur));
+            let ids = [sub_id(POIGNEE, k * 2), sub_id(POIGNEE, k * 2 + 1)];
+            let places = match self.poignee {
+                Some((h, fixe, _)) if h == ids[0] => [cur, fixe],
+                Some((_, fixe, _)) => [fixe, cur],
+                None => [sa, sb],
+            };
+            let rayon = 9.0 * d;
+            let mut tenue = None;
+            for (j, &h) in ids.iter().enumerate() {
+                let i = places[j].min(self.tampon.car.len());
+                let l = ligne_de(&s, i);
+                let avant: String = self.tampon.car[s[l].0..i.max(s[l].0)].iter().collect();
+                let x = xt + cx.mesure_mono(&avant, ts);
+                let y = top + rang(l) as f32 * lh;
+                // La tige sur la ligne, la boule dessous ; une large zone à saisir
+                let centre = (x, y + lh + rayon * 0.6);
+                let prise = Rect::new(x - 24.0 * d, y + lh * 0.5, 48.0 * d, lh * 0.5 + rayon * 1.6 + 18.0 * d);
+                if let Some(g) = cx.ui.drag(h, prise) {
+                    tenue = Some((h, j, g, (x, y + lh / 2.0)));
+                }
+                let appui = self.poignee.is_some_and(|p| p.0 == h);
+                let teinte = col.accent;
+                cx.dl.rrect(Rect::new(x - d, y + lh * 0.1, 2.0 * d, lh * 0.9), d, teinte);
+                let r_ = if appui { rayon * 1.25 } else { rayon };
+                cx.dl.rrect(Rect::new(centre.0 - r_, centre.1 - r_, 2.0 * r_, 2.0 * r_), r_, teinte);
             }
+            match tenue {
+                Some((h, j, g, bout)) => {
+                    let (fixe, ecart) = match self.poignee {
+                        Some((p, f, e)) if p == h => (f, e),
+                        _ => (places[1 - j], (g.x - bout.0, g.y - bout.1)),
+                    };
+                    self.poignee = Some((h, fixe, ecart));
+                    let (x, y) = (g.x - ecart.0, g.y - ecart.1);
+                    let i = pos(x, y, false);
+                    self.tampon.selectionner(fixe, i);
+                    self.actions = false;
+                    // Le texte défile quand le bout tiré passe un bord
+                    self.suivre = y < vue.y + lh || y > vue.bottom() - lh;
+                }
+                None => {
+                    if self.poignee.take().is_some() && self.tampon.selection().is_none() {
+                        // Les deux bouts réunis : il n'y a plus qu'un curseur
+                        self.tampon.ancre = None;
+                    }
+                }
+            }
+        } else {
+            self.poignee = None;
         }
         b.y = top + n as f32 * lh;
         cx.body_end(b, &mut c.scrolls);
 
         // Les actions : au-dessus de la sélection (ou dessous s'il n'y a pas la place),
         // après un appui long au-dessus du curseur ; pas pendant un geste
-        let montrer = (selection.is_some() || self.actions) && self.saisie.is_none() && self.pince.is_none();
+        let montrer = (selection.is_some() || self.actions) && self.saisie.is_none() && self.pince.is_none() && self.poignee.is_none();
         if montrer {
             let debut = selection.map_or(self.tampon.curseur, |x| x.0);
             let fin = selection.map_or(self.tampon.curseur, |x| x.1);

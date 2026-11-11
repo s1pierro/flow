@@ -187,6 +187,12 @@ fn main() {
                     ui.event(Event::Move { id: 0, x: 430.0 + 50.0 * k, y: 700.0 + 26.0 * k }, t)
                 }
                 (3, 21) => ui.event(Event::Up { id: 0 }, t),
+                // Puis la poignée de fin descend de quelques lignes, tenue
+                (3, 30) => ui.event(Event::Down { id: 0, x: 360.0, y: 950.0 }, t),
+                (3, 31..=40) => {
+                    let k = (i - 30) as f32;
+                    ui.event(Event::Move { id: 0, x: 360.0 + 30.0 * k, y: 950.0 + 16.0 * k }, t)
+                }
                 _ => {}
             }
             if i == 30 && s.name == "accueil-menu" {

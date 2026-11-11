@@ -9,7 +9,7 @@ composer son espace de travail à son goût. Née d'une copie de
 
 Contextes : Accueil (les contextes en cartes, celui des fenêtres nées du menu), Fichiers (les
 entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers), Texte (éditeur aux gestes : glisser sélectionne au curseur déporté, appui choisit un mot, appui long propose
-Coller, deux doigts font défiler et pincer change la taille, Copier/Couper/Coller au-dessus de la sélection ;
+Coller, deux doigts font défiler et pincer change la taille, Copier/Couper/Coller au-dessus de la sélection, une poignée à chaque bout pour l'ajuster ;
 numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
 JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
