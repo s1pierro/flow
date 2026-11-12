@@ -65,6 +65,21 @@ fn interface(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
     if cx.button(b, sub_id(scroll, 5), "Rétablir l'apparence") {
         *t = Theme::default();
     }
+    barre(cx, b, scroll, c);
+}
+
+/// Les applets de la barre de l'application : lesquels sont montrés.
+fn barre(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
+    cx.section(b, "BARRE");
+    cx.paragraph(b, "Les applets des contextes se rangent dans la barre du bas, à gauche de la batterie : ils pilotent ce qui tourne en arrière-plan. Toucher un applet ouvre son volet.");
+    for (i, g) in crate::applet::disponibles().enumerate() {
+        let avant = crate::applet::montre(c, g.cle);
+        let mut oui = avant;
+        cx.toggle(b, sub_id(scroll, 60 + i), crate::applet::nom(g), &mut oui);
+        if oui != avant {
+            crate::applet::montrer(c, g.cle, oui);
+        }
+    }
 }
 
 fn clavier(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun, essai: &mut Edition) {

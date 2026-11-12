@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub const CLE: &str = "argile";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Argile", legende: "Sculpture 3D : gonfler, creuser, lisser, tirer", icone: Icon::Argile, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Argile", legende: "Sculpture 3D : gonfler, creuser, lisser, tirer", icone: Icon::Argile, ouvrir, applet: None };
 
 const ARGILE: Id = id("argile");
 const NOM: Id = id("argile/nom");

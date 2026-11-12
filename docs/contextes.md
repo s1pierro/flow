@@ -72,7 +72,7 @@ use crate::widgets::{Cx, Icon};
 use std::path::PathBuf;
 
 pub const CLE: &str = "texte";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Texte", legende: "Éditer un texte brut", icone: Icon::Fichier, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Texte", legende: "Éditer un texte brut", icone: Icon::Fichier, ouvrir, applet: None };
 
 const TEXTE: Id = id("texte");
 
@@ -118,7 +118,8 @@ impl Contexte for Texte {
 Dans `src/contextes/mod.rs` : `pub mod texte;`, puis `texte::GENRE` dans `GENRES`.
 Le contexte apparaît alors dans le menu de chaque fenêtre, et en carte dans
 l'Accueil, avec sa `legende` (une phrase courte, sur deux lignes au plus). Le test
-`les_cles_sont_uniques_et_valides` vérifie la clé.
+`les_cles_sont_uniques_et_valides` vérifie la clé. `applet` reste à `None` si le
+contexte n'a pas d'applet dans la barre (voir « Les applets de la barre »).
 
 ### 3. Vérifier
 
@@ -339,6 +340,56 @@ main) ; ce qu'il fait s'inscrit dans un journal en mémoire (`Orchestre::noter`)
 Un contexte n'a rien à faire pour être recensé. Une nouvelle tâche de fond (une
 synchronisation, un nettoyage des brouillons…) s'ajoute dans `Commun::orchestrer`,
 avec son état exposé dans le contexte Orchestre.
+
+## Les applets de la barre
+
+À la façon du tableau de bord de GNOME 2, la barre du bas accueille des **applets** :
+de petits éléments de contrôle ou de suivi qui pilotent ce qui tourne en
+arrière-plan, sans ouvrir de fenêtre. Un contexte en déclare un (ou aucun) dans son
+`Genre` :
+
+```rust
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Radio", /* … */ ouvrir, applet: Some(applet) };
+
+struct AppletRadio;
+
+fn applet() -> Box<dyn crate::applet::Applet> {
+    Box::new(AppletRadio)
+}
+```
+
+L'applet est **unique pour toute l'application**, créé au lancement, qu'une fenêtre
+du contexte soit ouverte ou non : il lit et règle l'état commun (`Commun`, le
+lecteur de la radio, le mixeur…), jamais une instance. Le trait
+`crate::applet::Applet` :
+
+| Méthode | Rôle |
+| --- | --- |
+| `nom()` | Le nom montré dans les paramètres, s'il diffère de celui du contexte (Énergie, pour l'Orchestre) |
+| `largeur(cx, c, h, compact)` | La largeur voulue dans la barre de hauteur `h` ; 0 retire l'applet (rien à montrer pour l'instant). `compact` : la barre manque de place, l'essentiel seulement |
+| `barre(cx, c, r, id, compact)` | Dessine dans la barre : icône, texte court, vumètre… Ses propres commandes prennent des identifiants `sub_id(id, …)` et passent devant le toucher qui ouvre le volet |
+| `hauteur_volet(cx, c, w)` | La hauteur voulue du volet (0 : pas de volet) ; il défile si elle ne tient pas |
+| `volet(cx, c, r, id)` | Dessine le volet ; renvoie vrai pour le refermer |
+| `anime(c)` | Vrai s'il faut redessiner sans événement (un vumètre, un avancement) |
+
+Les applets se rangent à droite de la barre, avant l'heure, dans l'ordre de
+`GENRES`. S'ils ne tiennent pas tous, ils passent en compact, et la priorité va aux
+plus à droite (l'Énergie, près de l'heure) ; ceux qui ne tiennent toujours pas sont
+laissés de côté. Toucher un
+applet ouvre son volet au-dessus de la barre, toucher ailleurs le referme. Un volet
+peut demander à montrer son contexte (`Demande::Montrer { cle }`) : si aucune
+fenêtre ne le montre, la plus grande se scinde pour lui faire place.
+
+Le choix des applets montrés se fait dans les paramètres (Interface, section Barre)
+et s'enregistre dans `interface.txt` : `applets = fichiers radio mixeur orchestre` (vide :
+aucun ; les clés inconnues sont oubliées).
+
+| Applet | Dans la barre | Dans le volet |
+| --- | --- | --- |
+| Fichiers | Seulement pendant une copie, un déplacement ou une suppression : le pourcentage et un filet d'avancement | Le détail, Arrêter, Ouvrir les Fichiers |
+| Radio | Le poste (à l'accent pendant la lecture), le flux en cours, lecture ou arrêt (relance le dernier flux) ; en compact, le poste seul | L'état et le format, le volume de la piste Radio, les flux récents, Ouvrir la Radio |
+| Mixeur | L'icône (pâle si le général est à zéro) et le vumètre stéréo de la sortie | Volume, Muet et Égaliseur (allumé ou non) de chaque piste, volume général, égaliseur de la sortie, Ouvrir le Mixeur |
+| Énergie (Orchestre) | La batterie (rouge sous le seuil bas) et, au choix, le niveau, le temps restant (avant la batterie vide, ou avant la charge complète) ou les deux ; le niveau tant que le temps n'est pas connu, et seul en compact | La courbe du jour, niveau, débit, autonomie, intervalle des relevés, seuil bas, le choix de l'affichage, l'économie, Ouvrir l'Orchestre |
 
 ## À venir
 

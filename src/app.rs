@@ -1,7 +1,8 @@
 //! L'application : l'espace de travail partagé en fenêtres, chacune portant une
 //! instance de contexte (`contexte`, `contextes`), le panneau latéral (paramètres de
 //! l'application, aide, à propos), et en bas de l'écran la barre de l'application :
-//! ses pastilles aplaties (le logo, les paramètres, l'aide), l'heure et la batterie.
+//! ses pastilles aplaties (le logo, les paramètres, l'aide), les applets des contextes
+//! (`applet` : radio, mixeur, énergie…) et l'heure.
 //! Le bas de l'écran est réservé aux gestes du système, mais les appuis y restent
 //! disponibles.
 //!
@@ -57,6 +58,8 @@ pub struct App {
     /// L'onglet ouvert du panneau des paramètres, et son champ d'essai du clavier.
     pub onglet_parametres: usize,
     essai: Edition,
+    /// Les applets de la barre, et le volet ouvert.
+    pub applets: crate::applet::Applets,
 }
 
 impl App {
@@ -70,6 +73,7 @@ impl App {
             end_content: EndContent::Parametres,
             onglet_parametres: 0,
             essai: Edition::default(),
+            applets: crate::applet::Applets::default(),
         }
     }
 
@@ -77,6 +81,7 @@ impl App {
     pub fn animating(&self) -> bool {
         self.shell.animating()
             || self.commun.clavier.anime()
+            || self.applets.anime(&self.commun)
             || self.surface.placees().iter().any(|p| self.fenetres.get(&p.id).is_some_and(|i| i.anime(&self.commun)))
     }
 
@@ -92,7 +97,7 @@ impl App {
 
     /// Les réglages de l'interface à enregistrer : l'apparence et le clavier.
     pub fn reglages(&self) -> Reglages {
-        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes }
+        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes, applets: self.commun.applets.clone() }
     }
 
     /// Applique des réglages relus.
@@ -100,6 +105,7 @@ impl App {
         self.commun.theme = r.theme;
         self.commun.clavier.reglages = r.clavier;
         self.commun.gestes = r.gestes;
+        self.commun.applets = r.applets;
     }
 
     /// L'espace de travail en texte : la disposition et l'état de chaque fenêtre.
@@ -173,6 +179,16 @@ impl App {
                     ancienne.mettre_a_l_abri(&self.commun);
                 }
                 self.surface.changer_vue(depuis, vue);
+            }
+            Demande::Montrer { cle } => {
+                let Some(vue) = contextes::indice(cle) else { return };
+                if self.surface.placees().iter().any(|p| p.vue == vue) {
+                    return;
+                }
+                // La plus grande fenêtre se scinde dans son sens le plus long
+                let Some(p) = self.surface.placees().iter().max_by(|a, b| (a.cadre.w * a.cadre.h).total_cmp(&(b.cadre.w * b.cadre.h))) else { return };
+                let (f, sens) = (p.id, if p.cadre.w >= p.cadre.h { crate::surface::Sens::Colonnes } else { crate::surface::Sens::Lignes });
+                self.surface.scinder(f, sens, vue);
             }
         }
     }
@@ -249,6 +265,7 @@ impl App {
         let hb = cx.commande().min(screen.h / 4.0);
         let barre = Rect::new(screen.x, screen.bottom() - hb, screen.w, hb);
         let screen = Rect::new(screen.x, screen.y, screen.w, screen.h - hb);
+        let haut = screen;
         // Le clavier ouvert prend le bas de l'écran, ou flotte par-dessus ; ses frappes
         // vont au champ qui a le focus
         let (screen, zone_clavier) = self.commun.clavier.reserver(cx, screen);
@@ -287,6 +304,8 @@ impl App {
 
         self.end_panel(cx, &l);
         self.handles(cx, &l, screen);
+        // Le volet d'un applet, par-dessus les fenêtres et les panneaux
+        self.applets.volet(cx, &mut self.commun, haut);
         // Flottant, le clavier déclare ses touches en dernier : elles passent devant tout
         if flottant {
             self.frappes(cx, zone_clavier, dt);
@@ -299,7 +318,7 @@ impl App {
     }
 
     /// La barre de l'application : pastilles aplaties à gauche (le logo, les
-    /// paramètres, l'aide), l'heure et la batterie à droite.
+    /// paramètres, l'aide), à droite les applets et l'heure.
     fn barre(&mut self, cx: &mut Cx, r: Rect) {
         if r.h < 1.0 {
             return;
@@ -319,7 +338,8 @@ impl App {
         if cx.pastille_plate(HELP, case(2.0), Icon::Help, end && content == EndContent::Help) {
             self.toggle_end(EndContent::Help);
         }
-        // À droite : la batterie, puis l'heure tout au bord
+        // À droite : l'heure tout au bord, puis les applets (la batterie en est un :
+        // Énergie, de l'Orchestre)
         let mut x = r.right() - cx.pad();
         if let Some((h, m)) = self.heure {
             let s = format!("{h:02}:{m:02}");
@@ -328,15 +348,8 @@ impl App {
             cx.text_at(x, r.cy(), &s, 15.0, col.texte);
             x -= cx.pad();
         }
-        if let Some((niveau, charge)) = self.commun.orchestre.batterie() {
-            let s = format!("{niveau} %");
-            let w = cx.measure(&s, 13.0);
-            x -= w;
-            cx.text_at(x, r.cy(), &s, 13.0, col.pale);
-            let ic = (r.h * 0.5).round();
-            x -= ic + 4.0 * d;
-            cx.icon(Rect::new(x, r.cy() - ic / 2.0, ic, ic), Icon::Batterie { niveau, charge }, col.texte);
-        }
+        let debut = r.x + 3.0 * r.h + cx.pad();
+        self.applets.barre(cx, &mut self.commun, Rect::new(debut, r.y, (x - debut).max(0.0), r.h));
     }
 
     fn panel_frame(&self, cx: &mut Cx, id: Id, r: Rect, side: Side, landscape: bool) {
@@ -393,7 +406,7 @@ impl App {
                 cx.paragraph(&mut b, &format!("{} contextes : {}.", GENRES.len(), GENRES.iter().map(|g| g.nom).collect::<Vec<_>>().join(", ")));
                 cx.paragraph(&mut b, "Réutilisable à des fins non commerciales, selon la licence PolyForm Noncommercial 1.0.0.");
                 cx.section(&mut b, "BARRE");
-                cx.paragraph(&mut b, "Le centre du bas de l'écran est réservé aux gestes du système, mais les appuis y restent libres : la barre de l'application y range ses pastilles.");
+                cx.paragraph(&mut b, "Le centre du bas de l'écran est réservé aux gestes du système, mais les appuis y restent libres : la barre de l'application y range ses pastilles, et les applets des contextes : la radio, le mixeur, l'avancement d'une copie de fichiers… Toucher un applet ouvre son volet ; les applets montrés se choisissent dans les paramètres (Interface, section Barre).");
                 cx.body_end(b, &mut c.scrolls);
             }
             EndContent::Help => {
@@ -637,5 +650,80 @@ mod tests {
         let mut r = Rig::new();
         r.frames(3);
         assert!(!r.app.animating());
+    }
+
+    #[test]
+    fn un_applet_ouvre_son_volet_et_un_toucher_dehors_le_referme() {
+        let mut r = Rig::new();
+        // Fichiers ne se montre que pendant une opération
+        let zones = r.app.applets.zones().to_vec();
+        assert_eq!(zones.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["radio", "mixeur"]);
+        let z = zones[1].1;
+        assert!(z.right() <= 1920.0 && z.y == 1200.0 - 72.0, "à droite, dans la barre");
+        r.tap(z.cx(), z.cy());
+        assert_eq!(r.app.applets.ouvert, Some("mixeur"));
+        // Un toucher dans le volet le garde ouvert, un toucher ailleurs le referme
+        r.tap(z.cx().min(1920.0 - 200.0), 1200.0 - 72.0 - 40.0);
+        assert_eq!(r.app.applets.ouvert, Some("mixeur"));
+        r.tap(400.0, 300.0);
+        assert_eq!(r.app.applets.ouvert, None);
+        // Toucher l'applet ouvre, le retoucher referme
+        r.tap(z.cx(), z.cy());
+        r.tap(z.cx(), z.cy());
+        assert_eq!(r.app.applets.ouvert, None);
+    }
+
+    #[test]
+    fn les_applets_retires_quittent_la_barre() {
+        let mut r = Rig::new();
+        crate::applet::montrer(&mut r.app.commun, "radio", false);
+        r.frames(1);
+        assert_eq!(r.app.applets.zones().iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["mixeur"]);
+        assert_eq!(r.app.reglages().applets, ["fichiers", "mixeur", "orchestre"]);
+        crate::applet::montrer(&mut r.app.commun, "radio", true);
+        assert_eq!(r.app.commun.applets, ["fichiers", "radio", "mixeur", "orchestre"]);
+    }
+
+    #[test]
+    fn un_applet_montre_son_contexte_dans_une_fenetre_scindee() {
+        let mut r = Rig::new();
+        assert_eq!(r.app.surface.nombre(), 1);
+        r.app.commun.demandes.push(Demande::Montrer { cle: "mixeur" });
+        r.frames(2);
+        assert_eq!(r.app.surface.nombre(), 2);
+        let p = r.app.surface.placees().iter().find(|p| p.vue == vue("mixeur")).unwrap().clone();
+        assert!(r.app.fenetres.get(&p.id).is_some_and(|i| i.cle() == "mixeur"));
+        // Déjà montré : rien ne change
+        r.app.commun.demandes.push(Demande::Montrer { cle: "mixeur" });
+        r.frames(2);
+        assert_eq!(r.app.surface.nombre(), 2);
+    }
+
+    #[test]
+    fn l_applet_energie_montre_le_niveau_ou_le_temps_restant() {
+        use crate::orchestre::AffichageBatterie;
+        let mut r = Rig::new();
+        // Sans relevé (hors d'Android), pas de batterie dans la barre
+        assert!(!r.app.applets.zones().iter().any(|(k, _)| *k == "orchestre"));
+        // Une heure de décharge, de 80 à 70 % : 10 %/h, vide dans 7 h
+        r.app.commun.orchestre.relever(80, false, 1_000_000);
+        r.app.commun.orchestre.relever(70, false, 1_003_600);
+        r.frames(1);
+        let zones = r.app.applets.zones().to_vec();
+        assert_eq!(zones.last().map(|(k, _)| *k), Some("orchestre"), "le plus à droite, près de l'heure");
+        let large = |r: &Rig| r.app.applets.zones().iter().find(|(k, _)| *k == "orchestre").unwrap().1.w;
+        let pourcentage = large(&r);
+        r.app.commun.orchestre.reglages.affichage = AffichageBatterie::LesDeux;
+        r.frames(1);
+        assert!(large(&r) > pourcentage, "« 70 % · 7 h 00 » est plus long que « 70 % »");
+        assert_eq!(super::contextes::orchestre::texte_energie(&r.app.commun).as_deref(), Some("70 % · 7 h 00"));
+        r.app.commun.orchestre.reglages.affichage = AffichageBatterie::Temps;
+        assert_eq!(super::contextes::orchestre::texte_energie(&r.app.commun).as_deref(), Some("7 h 00"));
+        // En charge sans assez de recul : le niveau remplace le temps
+        r.app.commun.orchestre.relever(71, true, 1_003_700);
+        assert_eq!(super::contextes::orchestre::texte_energie(&r.app.commun).as_deref(), Some("71 %"));
+        let z = r.app.applets.zones().iter().find(|(k, _)| *k == "orchestre").unwrap().1;
+        r.tap(z.cx(), z.cy());
+        assert_eq!(r.app.applets.ouvert, Some("orchestre"));
     }
 }

@@ -14,7 +14,7 @@ use crate::widgets::{Body, Cx, Icon};
 use std::sync::atomic::Ordering;
 
 pub const CLE: &str = "orchestre";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Orchestre", legende: "Empreintes, batterie, contextes : l'état de Flow", icone: Icon::Orchestre, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Orchestre", legende: "Empreintes, batterie, contextes : l'état de Flow", icone: Icon::Orchestre, ouvrir, applet: Some(applet) };
 
 const ORCHESTRE: Id = id("orchestre");
 /// La durée montrée par la courbe de la batterie.
@@ -218,5 +218,86 @@ fn journal(cx: &mut Cx, b: &mut Body, c: &Commun) {
     for (t, texte) in c.orchestre.journal.iter().rev().take(JOURNAL) {
         let (h, m) = crate::android::heure_de(*t);
         cx.paragraph(b, &format!("{h:02}:{m:02}  {texte}"));
+    }
+}
+
+// --- L'applet de la barre : Énergie ------------------------------------------
+
+/// L'applet Énergie : dans la barre, la batterie et, au choix, son niveau, le temps
+/// restant (avant la batterie vide, ou avant la charge complète) ou les deux ; dans
+/// le volet, la courbe du jour, le débit, l'autonomie et les réglages de l'énergie.
+struct AppletEnergie;
+
+fn applet() -> Box<dyn crate::applet::Applet> {
+    Box::new(AppletEnergie)
+}
+
+/// Le texte de la barre, selon le réglage ; le temps restant n'est montré que s'il est
+/// connu (le niveau le remplace sinon). En compact, « les deux » se réduit au niveau.
+#[cfg(test)]
+pub(crate) fn texte_energie(c: &Commun) -> Option<String> {
+    texte_energie_en(c, false)
+}
+
+fn texte_energie_en(c: &Commun, compact: bool) -> Option<String> {
+    use crate::orchestre::AffichageBatterie as A;
+    let o = &c.orchestre;
+    let (niveau, _) = o.batterie()?;
+    let temps = o.autonomie().map(|h| duree(((h * 3600.0) as u64).max(60)));
+    Some(match (o.reglages.affichage, temps) {
+        (A::Temps, Some(t)) => t,
+        (A::LesDeux, Some(t)) if !compact => format!("{niveau} % · {t}"),
+        _ => format!("{niveau} %"),
+    })
+}
+
+impl crate::applet::Applet for AppletEnergie {
+    fn nom(&self) -> Option<&'static str> {
+        Some("Énergie")
+    }
+
+    fn largeur(&mut self, cx: &mut Cx, c: &Commun, h: f32, compact: bool) -> f32 {
+        texte_energie_en(c, compact).map_or(0.0, |t| h * 0.6 + 4.0 * cx.dp + cx.measure(&t, 13.0) + cx.pad() * 0.5)
+    }
+
+    fn barre(&mut self, cx: &mut Cx, c: &mut Commun, r: Rect, _id: Id, compact: bool) {
+        let (d, col) = (cx.dp, cx.couleurs());
+        let (Some((niveau, charge)), Some(t)) = (c.orchestre.batterie(), texte_energie_en(c, compact)) else { return };
+        let ic = (r.h * 0.5).round();
+        let x = r.x + cx.pad() * 0.25;
+        cx.icon(Rect::new(x + (r.h * 0.6 - ic) / 2.0, r.cy() - ic / 2.0, ic, ic), Icon::Batterie { niveau, charge }, if c.orchestre.basse() { ROUGE } else { col.texte });
+        cx.text_at(x + r.h * 0.6 + 4.0 * d, r.cy(), &t, 13.0, if c.orchestre.basse() { ROUGE } else { col.pale });
+    }
+
+    fn hauteur_volet(&mut self, cx: &mut Cx, c: &Commun, _w: f32) -> f32 {
+        let d = cx.dp;
+        let ligne = (cx.theme.ligne * d).round();
+        let section = (20.0 + 18.0 * cx.theme.texte) * d;
+        let curseur = (64.0 * d * cx.theme.texte.max(1.0)).round();
+        let courbe = if c.orchestre.batterie().is_some() { cx.ecart() + 96.0 * d + 18.0 * d + 4.0 * ligne } else { 3.0 * 22.0 * d * cx.theme.texte + 8.0 * d };
+        8.0 * d + 2.0 * section + courbe + 3.0 * curseur + 4.0 * ligne + cx.commande() + 2.0 * (cx.theme.marge * d).round() + 20.0 * d
+    }
+
+    fn volet(&mut self, cx: &mut Cx, c: &mut Commun, r: Rect, id: Id) -> bool {
+        use crate::orchestre::AffichageBatterie;
+        let scroll = sub_id(id, 0);
+        let mut b = cx.body(scroll, r, &c.scrolls);
+        // La batterie, comme dans l'Orchestre : courbe, niveau, débit, autonomie,
+        // intervalle des relevés et seuil bas
+        batterie(cx, &mut b, scroll, c, disque::maintenant());
+        cx.section(&mut b, "DANS LA BARRE");
+        let reglages = &mut c.orchestre.reglages;
+        for (i, a) in AffichageBatterie::TOUS.into_iter().enumerate() {
+            if cx.row(&mut b, sub_id(scroll, 40 + i), a.nom(), None, reglages.affichage == a) {
+                reglages.affichage = a;
+            }
+        }
+        cx.toggle(&mut b, sub_id(scroll, 44), "Économiser si la batterie est basse", &mut reglages.economie);
+        let ouvrir = cx.button(&mut b, sub_id(scroll, 45), "Ouvrir l'Orchestre");
+        if ouvrir {
+            c.demandes.push(crate::contexte::Demande::Montrer { cle: CLE });
+        }
+        cx.body_end(b, &mut c.scrolls);
+        ouvrir
     }
 }

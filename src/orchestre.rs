@@ -45,11 +45,48 @@ pub struct ReglagesOrchestre {
     pub seuil_batterie: f32,
     /// Batterie basse et hors charge : pas d'analyse automatique du stockage.
     pub economie: bool,
+    /// Ce que l'applet Énergie montre dans la barre.
+    pub affichage: AffichageBatterie,
+}
+
+/// Ce que l'applet Énergie montre de la batterie, dans la barre.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum AffichageBatterie {
+    /// Le niveau, en %.
+    #[default]
+    Pourcentage,
+    /// Le temps restant : avant la batterie vide, ou avant la charge complète ; le
+    /// niveau tant qu'il n'est pas connu.
+    Temps,
+    /// Le niveau et le temps restant.
+    LesDeux,
+}
+
+impl AffichageBatterie {
+    pub const TOUS: [AffichageBatterie; 3] = [AffichageBatterie::Pourcentage, AffichageBatterie::Temps, AffichageBatterie::LesDeux];
+
+    /// Le mot du fichier de réglages.
+    pub fn cle(self) -> &'static str {
+        match self {
+            AffichageBatterie::Pourcentage => "pourcentage",
+            AffichageBatterie::Temps => "temps",
+            AffichageBatterie::LesDeux => "les deux",
+        }
+    }
+
+    /// Le nom montré dans l'interface.
+    pub fn nom(self) -> &'static str {
+        match self {
+            AffichageBatterie::Pourcentage => "Pourcentage",
+            AffichageBatterie::Temps => "Temps restant",
+            AffichageBatterie::LesDeux => "Les deux",
+        }
+    }
 }
 
 impl Default for ReglagesOrchestre {
     fn default() -> Self {
-        ReglagesOrchestre { empreintes_auto: true, empreintes_heures: 24.0, batterie_minutes: 1.0, seuil_batterie: 15.0, economie: true }
+        ReglagesOrchestre { empreintes_auto: true, empreintes_heures: 24.0, batterie_minutes: 1.0, seuil_batterie: 15.0, economie: true, affichage: AffichageBatterie::Pourcentage }
     }
 }
 
@@ -82,6 +119,8 @@ impl ReglagesOrchestre {
         s += &format!("seuil_batterie = {}\n", self.seuil_batterie);
         s += "# economie : batterie basse et hors charge, pas d'analyse automatique (oui/non)\n";
         s += &format!("economie = {}\n", oui(self.economie));
+        s += "# batterie_affichage : ce que la barre montre de la batterie (pourcentage, temps, les deux)\n";
+        s += &format!("batterie_affichage = {}\n", self.affichage.cle());
         s
     }
 
@@ -106,6 +145,7 @@ impl ReglagesOrchestre {
                 "batterie_minutes" => r.batterie_minutes = nombre.unwrap_or(r.batterie_minutes),
                 "seuil_batterie" => r.seuil_batterie = nombre.unwrap_or(r.seuil_batterie),
                 "economie" => r.economie = oui.unwrap_or(r.economie),
+                "batterie_affichage" => r.affichage = AffichageBatterie::TOUS.into_iter().find(|a| a.cle() == v).unwrap_or(r.affichage),
                 _ => {}
             }
         }
@@ -320,8 +360,12 @@ mod tests {
 
     #[test]
     fn les_reglages_se_lisent_et_s_ecrivent() {
-        let r = ReglagesOrchestre { empreintes_auto: false, empreintes_heures: 6.0, batterie_minutes: 5.0, seuil_batterie: 20.0, economie: false };
+        let r = ReglagesOrchestre { empreintes_auto: false, empreintes_heures: 6.0, batterie_minutes: 5.0, seuil_batterie: 20.0, economie: false, affichage: AffichageBatterie::Temps };
         assert_eq!(ReglagesOrchestre::lire(&r.ecrire()), r);
+        let mut r2 = r;
+        r2.affichage = AffichageBatterie::LesDeux;
+        assert_eq!(ReglagesOrchestre::lire(&r2.ecrire()), r2);
+        assert_eq!(ReglagesOrchestre::lire("batterie_affichage = Temps").affichage, AffichageBatterie::Temps);
         // Bornes, valeurs absentes ou illisibles
         let l = ReglagesOrchestre::lire("empreintes_heures = 900\nseuil_batterie = rien\n# economie = non\n");
         assert_eq!(l.empreintes_heures, 168.0);

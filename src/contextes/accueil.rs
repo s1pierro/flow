@@ -11,7 +11,7 @@ use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 
 pub const CLE: &str = "accueil";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Accueil", legende: "Les contextes disponibles", icone: Icon::Maison, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Accueil", legende: "Les contextes disponibles", icone: Icon::Maison, ouvrir, applet: None };
 
 const ACCUEIL: Id = id("accueil");
 /// Largeur visée d'une carte : le nombre de colonnes en découle.

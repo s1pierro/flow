@@ -16,7 +16,8 @@ Annuler et Rétablir à gauche du titre, par mot ou par ligne ;
 numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
 JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
-quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste), Encre (dessin à
+quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste,
+un égaliseur paramétrique à cinq bandes par piste et sur la sortie, réglé en tirant les poignées de sa courbe), Encre (dessin à
 main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts ; chaque trait
 fini est simplifié sans perte), SVG (éditeur
 de dessin vectoriel : ouvre tout SVG, trace rectangles, ellipses, lignes, polygones et textes avec
@@ -33,6 +34,13 @@ gestes) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, ave
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document.
 
+La barre du bas accueille les **applets** des contextes, à la façon du tableau de
+bord de GNOME 2 : ils pilotent ce qui tourne en arrière-plan sans ouvrir de fenêtre.
+Radio (le flux en cours, lecture ou arrêt), Mixeur (le vumètre de la sortie),
+Fichiers (l'avancement d'une copie) et Énergie (la batterie : niveau, temps restant
+avant la batterie vide ou la charge complète, ou les deux, au choix) ; toucher un applet ouvre son volet (volumes,
+flux récents, Arrêter…). Les applets montrés se choisissent dans les paramètres.
+
 Les contextes peuvent recevoir des gestes élaborés, inspirés de
 [tnt.js](https://github.com/s1pierro/tnt.js) : tap, appui et appui long selon la
 durée, saisie avec un curseur déporté au bout d'une barre (le doigt ne cache plus ce
@@ -40,9 +48,11 @@ qu'il désigne), pincement à deux doigts.
 
 Package `fr.s1pierro.flow`. Dans `Flow/` à la racine du stockage :
 
-- `interface.txt` : l'apparence, le clavier et les gestes ;
+- `interface.txt` : l'apparence, le clavier, les gestes et les applets de la barre ;
 - `espace.txt` : les fenêtres, leur contexte et leur état, retrouvés au lancement
   suivant ;
+- `mixeur.txt` : les réglages du mixeur (volume général, et pour chaque piste volume,
+  balance, bascules) et ses égaliseurs, retrouvés au lancement suivant ;
 - `brouillons/` : les modifications non enregistrées des documents, mises à l'abri.
 - `empreintes.txt` : la synthèse de l'analyse du stockage (les dossiers et leurs
   tailles), qui donne les empreintes des dossiers dans Fichiers sans tout parcourir

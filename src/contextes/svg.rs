@@ -53,7 +53,7 @@ use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
 
 pub const CLE: &str = "svg";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "SVG", legende: "Dessin vectoriel : formes, sélection, source", icone: Icon::Vecteur, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "SVG", legende: "Dessin vectoriel : formes, sélection, source", icone: Icon::Vecteur, ouvrir, applet: None };
 
 const SVG: Id = id("svg");
 const NOM: Id = id("svg/nom");

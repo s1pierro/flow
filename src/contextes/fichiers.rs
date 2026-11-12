@@ -38,7 +38,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 pub const CLE: &str = "fichiers";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Fichiers", legende: "Parcourir le stockage, ouvrir les documents", icone: Icon::Dossier, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Fichiers", legende: "Parcourir le stockage, ouvrir les documents", icone: Icon::Dossier, ouvrir, applet: Some(applet) };
 
 const FICHIERS: Id = id("fichiers");
 const RECHERCHE: Id = id("fichiers/recherche");
@@ -808,5 +808,75 @@ mod tests {
         f.ecrire(&mut e);
         assert_eq!(e.texte("tri"), Some("Date"));
         let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+// --- L'applet de la barre -------------------------------------------------------
+
+/// L'applet Fichiers : il n'apparaît que pendant une copie, un déplacement ou une
+/// suppression ; dans la barre, l'avancement en pourcentage ; dans le volet, le détail
+/// et le bouton Arrêter.
+struct AppletFichiers;
+
+fn applet() -> Box<dyn crate::applet::Applet> {
+    Box::new(AppletFichiers)
+}
+
+impl crate::applet::Applet for AppletFichiers {
+    fn largeur(&mut self, cx: &mut Cx, c: &Commun, h: f32, compact: bool) -> f32 {
+        if c.fichiers.occupe() {
+            h * 0.8 + if compact { 0.0 } else { cx.measure("100 %", 13.0) + cx.pad() * 0.5 }
+        } else {
+            0.0
+        }
+    }
+
+    fn barre(&mut self, cx: &mut Cx, c: &mut Commun, r: Rect, _id: Id, compact: bool) {
+        let (d, col) = (cx.dp, cx.couleurs());
+        let Some(t) = c.fichiers.travail.clone() else { return };
+        let ic = (r.h * 0.5).round();
+        cx.icon(Rect::new(r.x + (r.h * 0.8 - ic) / 2.0, r.cy() - ic / 2.0, ic, ic), Icon::Dossier, col.texte);
+        if !compact {
+            cx.text_at(r.x + r.h * 0.8, r.cy(), &format!("{:.0} %", t.part() * 100.0), 13.0, col.texte);
+        }
+        // L'avancement, en filet sous l'applet
+        let e = 3.0 * d;
+        let fond = Rect::new(r.x + 4.0 * d, r.bottom() - e - 4.0 * d, r.w - 8.0 * d, e);
+        cx.dl.rrect(fond, e / 2.0, col.ligne);
+        cx.dl.rrect(Rect::new(fond.x, fond.y, (fond.w * t.part()).max(e), e), e / 2.0, col.accent);
+    }
+
+    fn hauteur_volet(&mut self, cx: &mut Cx, _c: &Commun, _w: f32) -> f32 {
+        let d = cx.dp;
+        let section = (20.0 + 18.0 * cx.theme.texte) * d;
+        8.0 * d + section + 22.0 * d * cx.theme.texte + 8.0 * d + 16.0 * d + 2.0 * (cx.commande() + 2.0 * (cx.theme.marge * d).round()) + 20.0 * d
+    }
+
+    fn volet(&mut self, cx: &mut Cx, c: &mut Commun, r: Rect, id: Id) -> bool {
+        let Some(t) = c.fichiers.travail.clone() else { return true };
+        let (d, col) = (cx.dp, cx.couleurs());
+        let scroll = sub_id(id, 0);
+        let mut b = cx.body(scroll, r, &c.scrolls);
+        cx.section(&mut b, "OPÉRATION EN COURS");
+        cx.paragraph(&mut b, &t.libelle());
+        let e = 6.0 * d;
+        let fond = Rect::new(b.x, b.y, b.w, e);
+        cx.dl.rrect(fond, e / 2.0, col.ligne);
+        cx.dl.rrect(Rect::new(fond.x, fond.y, (fond.w * t.part()).max(e), e), e / 2.0, col.accent);
+        b.y += e + 10.0 * d;
+        let annulee = t.annule.load(std::sync::atomic::Ordering::Relaxed);
+        if cx.button(&mut b, sub_id(scroll, 1), if annulee { "Arrêt demandé…" } else { "Arrêter" }) {
+            t.annule.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let ouvrir = cx.button(&mut b, sub_id(scroll, 2), "Ouvrir les Fichiers");
+        if ouvrir {
+            c.demandes.push(crate::contexte::Demande::Montrer { cle: CLE });
+        }
+        cx.body_end(b, &mut c.scrolls);
+        ouvrir
+    }
+
+    fn anime(&self, c: &Commun) -> bool {
+        c.fichiers.occupe()
     }
 }

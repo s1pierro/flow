@@ -55,6 +55,8 @@ fn main() {
         Shot { name: "telephone", w: 2400, h: 1080, dp: 2.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mixeur", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mixeur-etroit", w: 1200, h: 1920, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "mixeur-eq", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "mixeur-eq-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 1 },
         Shot { name: "texte-code", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "texte-html", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -71,6 +73,8 @@ fn main() {
         Shot { name: "argile-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "applets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "applets-telephone", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
     ];
     let mut egl = Egl::new(true).expect("EGL");
@@ -123,7 +127,50 @@ fn main() {
             mixeur().regler("Radio", Reglage { gain: 0.65, balance: -0.3, ..Reglage::default() });
             mixeur().regler("Fichier", Reglage { muet: true, ..Reglage::default() });
             mixeur().regler("Essai", Reglage { gain: 0.4, prioritaire: true, ..Reglage::default() });
-            app.ouvrir_espace("fenetres = F1:mixeur\n");
+            // Des égaliseurs : la radio plus chaude, la sortie un peu creusée
+            let mut eq = flow::egaliseur::Egaliseur::default();
+            eq.bandes[0].gain = 4.0;
+            eq.bandes[2] = flow::egaliseur::Bande { frequence: 1800.0, gain: -3.5, q: 1.4 };
+            eq.bandes[4].gain = 2.5;
+            mixeur().regler("Radio", Reglage { gain: 0.65, balance: -0.3, eq, ..Reglage::default() });
+            let mut sortie = flow::egaliseur::Egaliseur::default();
+            sortie.bandes[1].gain = -2.0;
+            sortie.bandes[3] = flow::egaliseur::Bande { frequence: 5000.0, gain: 3.0, q: 0.8 };
+            mixeur().regler_egaliseur(&sortie);
+            match s.name {
+                "mixeur-eq" => app.ouvrir_espace("fenetres = F1:mixeur\n[fenetre 1]\neq = Radio\nbande = 2\n"),
+                "mixeur-eq-portrait" => app.ouvrir_espace("fenetres = F1:mixeur\n[fenetre 1]\neq_sortie = oui\nbande = 3\n"),
+                _ => app.ouvrir_espace("fenetres = F1:mixeur\n"),
+            }
+        }
+        if s.name.starts_with("applets") {
+            // La barre avec ses applets : une copie en cours, des pistes, des radios
+            // écoutées ; le volet du mixeur (tablette) ou de la radio (téléphone) ouvert
+            use flow::mixage::{mixeur, Reglage};
+            use flow::operations::{Avancement, Sorte};
+            use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+            mixeur().regler("Radio", Reglage { gain: 0.65, ..Reglage::default() });
+            mixeur().regler("Fichier", Reglage { muet: true, ..Reglage::default() });
+            app.commun.historique.liste = vec!["https://icecast.radiofrance.fr/fip-midfi.mp3".into(), "https://stream.radioparadise.com/aac-128".into(), "https://direct.franceculture.fr/live/franceculture-midfi.mp3".into()];
+            app.commun.fichiers.travail = Some(std::sync::Arc::new(Avancement {
+                sorte: Sorte::Copier,
+                total: 840_000_000,
+                fait: AtomicU64::new(512_000_000),
+                octets: true,
+                elements: AtomicUsize::new(3),
+                fini: AtomicBool::new(false),
+                annule: AtomicBool::new(false),
+                erreur: std::sync::Mutex::new(None),
+            }));
+            app.heure = Some((14, 32));
+            // Une journée de batterie : décharge, une charge à midi, puis décharge
+            let t = flow::disque::maintenant();
+            let o = &mut app.commun.orchestre;
+            for (age, niveau, charge) in [(20.0, 92, false), (16.0, 71, false), (12.0, 48, false), (11.5, 47, true), (10.0, 88, true), (9.6, 96, false), (6.0, 80, false), (3.0, 69, false), (0.0, 58, false)] {
+                o.relever(niveau, charge, t - (age * 3600.0) as u64);
+            }
+            o.reglages.affichage = flow::orchestre::AffichageBatterie::LesDeux;
+            app.applets.ouvert = Some(if s.name == "applets" { "orchestre" } else { "radio" });
         }
         if s.gestes > 0 {
             // Le dessin s'enregistre : pas dans le projet

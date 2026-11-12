@@ -6,7 +6,7 @@ use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 
 pub const CLE: &str = "aide";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Aide", legende: "Le mode d'emploi de Flow", icone: Icon::Help, ouvrir };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Aide", legende: "Le mode d'emploi de Flow", icone: Icon::Help, ouvrir, applet: None };
 
 const AIDE: Id = id("aide-fenetre");
 

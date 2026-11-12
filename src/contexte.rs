@@ -37,6 +37,9 @@ pub struct Genre {
     /// Crée une instance à partir de son état enregistré (vide pour une fenêtre
     /// nouvelle). Les valeurs absentes ou illisibles prennent leur valeur par défaut.
     pub ouvrir: fn(&Etat) -> Box<dyn Contexte>,
+    /// Son applet dans la barre de l'application (`applet`), s'il en a un : un seul pour
+    /// toute l'application, créé au lancement.
+    pub applet: Option<fn() -> Box<dyn crate::applet::Applet>>,
 }
 
 /// L'instance d'un contexte, dans une fenêtre.
@@ -95,6 +98,9 @@ pub enum Demande {
     /// (par exemple l'éditeur de texte, depuis l'explorateur). Si une fenêtre édite
     /// déjà ce document (`etat` : `document`), rien ne s'ouvre.
     Ouvrir { depuis: FenetreId, cle: &'static str, etat: Etat },
+    /// Montrer un contexte (depuis un applet) : rien si une fenêtre le montre déjà,
+    /// sinon la plus grande fenêtre se scinde pour lui faire place.
+    Montrer { cle: &'static str },
 }
 
 /// Ce que partagent toutes les fenêtres.
@@ -134,6 +140,11 @@ pub struct Commun {
     /// Le presse-papier des fichiers et l'opération en cours, communs aux fenêtres
     /// Fichiers.
     pub fichiers: crate::operations::Manutention,
+    /// Les applets montrés dans la barre (clés des contextes), réglés dans les
+    /// paramètres.
+    pub applets: Vec<String>,
+    /// Le dernier texte de `mixeur.txt` lu ou écrit : il ne se réécrit que s'il change.
+    pub(crate) mixeur_ecrit: Option<String>,
 }
 
 impl Default for Commun {
@@ -156,6 +167,8 @@ impl Default for Commun {
             orchestre: Orchestre::default(),
             syntaxes: None,
             fichiers: Default::default(),
+            applets: crate::applet::par_defaut(),
+            mixeur_ecrit: None,
         }
     }
 }
@@ -271,6 +284,12 @@ impl Commun {
                 let lus = std::fs::read_to_string(d.join(crate::orchestre::BATTERIE)).map_or(Vec::new(), |t| crate::orchestre::Orchestre::lire_releves(&t));
                 self.orchestre.reprendre(lus, maintenant);
                 self.empreintes_lues = false;
+                // Les réglages du mixeur
+                let t = std::fs::read_to_string(d.join(crate::mixage::FICHIER)).ok();
+                if let Some(t) = &t {
+                    crate::mixage::mixeur().lire_reglages(t);
+                }
+                self.mixeur_ecrit = t;
             }
         }
         self.suivre_analyse();
@@ -302,6 +321,16 @@ impl Commun {
                     crate::android::log(&format!("réglages de l'orchestre non enregistrés : {e}"));
                     self.orchestre.ecrits = Some(texte);
                 }
+            }
+        }
+        // Les réglages du mixeur, s'ils ont changé
+        if ecrire {
+            let texte = crate::mixage::mixeur().ecrire_reglages();
+            if self.mixeur_ecrit.as_deref() != Some(texte.as_str()) {
+                if let Err(e) = ecrire_fichier(&d.join(crate::mixage::FICHIER), &texte) {
+                    crate::android::log(&format!("réglages du mixeur non enregistrés : {e}"));
+                }
+                self.mixeur_ecrit = Some(texte);
             }
         }
         if std::mem::take(&mut self.orchestre.batterie_a_ecrire) {

@@ -1,7 +1,8 @@
 //! Réglages de l'interface, dans un fichier texte qu'on peut ouvrir et modifier à la
 //! main : une valeur par ligne, `clé = valeur`, des commentaires après `#`.
 //!
-//! Seule l'interface y figure : l'apparence (`Theme`), le clavier virtuel et les gestes. Les
+//! Seule l'interface y figure : l'apparence (`Theme`), le clavier virtuel, les gestes
+//! et les applets de la barre. Les
 //! fenêtres et leur contenu sont dans le fichier de l'espace de travail (`espace`).
 //! Une clé inconnue, absente ou mal écrite garde sa valeur par défaut, et les nombres
 //! sont ramenés dans leurs bornes : un fichier abîmé ne casse rien. Le fichier est
@@ -15,11 +16,19 @@ use std::path::PathBuf;
 /// Le nom du fichier, dans le dossier de l'application.
 pub const NOM: &str = "interface.txt";
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Reglages {
     pub theme: Theme,
     pub clavier: ReglagesClavier,
     pub gestes: ReglagesGestes,
+    /// Les applets montrés dans la barre : les clés de leurs contextes.
+    pub applets: Vec<String>,
+}
+
+impl Default for Reglages {
+    fn default() -> Reglages {
+        Reglages { theme: Theme::default(), clavier: ReglagesClavier::default(), gestes: ReglagesGestes::default(), applets: crate::applet::par_defaut() }
+    }
 }
 
 /// Les paires `clé = valeur` d'un texte, sans les commentaires ni les lignes vides.
@@ -77,6 +86,11 @@ impl Reglages {
                 "gestes_appui" => g.appui = nombre(&v).map_or(g.appui, |x| x / 1000.0),
                 "gestes_appui_long" => g.appui_long = nombre(&v).map_or(g.appui_long, |x| x / 1000.0),
                 "gestes_retour" => g.retour = oui(&v).unwrap_or(g.retour),
+                "applets" => {
+                    let voulus: Vec<String> = v.split(|ch: char| ch.is_whitespace() || ch == ',').filter(|k| !k.is_empty()).map(str::to_lowercase).collect();
+                    // Les clés inconnues sont oubliées ; l'ordre est celui des contextes
+                    r.applets = crate::applet::disponibles().map(|g| g.cle.to_string()).filter(|k| voulus.contains(k)).collect();
+                }
                 _ => {}
             }
         }
@@ -133,7 +147,10 @@ impl Reglages {
         s += "# Gestes : durée de l'appui long, en ms (au moins l'appui + 200, jusqu'à 4000 ; 1500)\n";
         s += &format!("gestes_appui_long = {:.0}\n\n", g.appui_long * 1000.0);
         s += "# Gestes : montrer le contact, la durée et le curseur déporté : oui ou non\n";
-        s += &format!("gestes_retour = {}\n", if g.retour { "oui" } else { "non" });
+        s += &format!("gestes_retour = {}\n\n", if g.retour { "oui" } else { "non" });
+        let tous: Vec<String> = crate::applet::par_defaut();
+        s += &format!("# Applets de la barre, séparés par des espaces (vide : aucun) : {}\n", tous.join(", "));
+        s += &format!("applets = {}\n", self.applets.join(" "));
         s
     }
 }
@@ -192,8 +209,14 @@ mod tests {
             theme: Theme { commande: 56.0, ligne: 44.0, texte: 1.15, arrondi: 0.3, accent: 4, sombre: true, marge: 0.0, padding: 6.0 },
             clavier: ReglagesClavier { disposition: Disposition::Qwerty, touche: 58.0, appui_long: 0.5, apercu: false, flottant: true, position: (0.25, 0.5) },
             gestes: ReglagesGestes { dist: 80.0, appui: 0.4, appui_long: 1.2, retour: false },
+            applets: vec!["mixeur".into()],
         };
         let lu = Reglages::lire(&r.ecrire());
+        assert_eq!(lu.applets, ["mixeur"]);
+        // Aucun applet, des clés inconnues, un ordre quelconque
+        assert!(Reglages::lire("applets =").applets.is_empty());
+        assert_eq!(Reglages::lire("applets = mixeur, inconnu radio").applets, ["radio", "mixeur"]);
+        assert_eq!(Reglages::lire("").applets, crate::applet::par_defaut());
         assert_eq!(lu.clavier, r.clavier);
         assert_eq!(lu.gestes, r.gestes);
         let t = lu.theme;

@@ -9,6 +9,8 @@
 //! - Une voie prioritaire qui sonne baisse les autres.
 //! - Tout changement de gain glisse sur ~10 ms : ni clic à l'ouverture, ni à la
 //!   fermeture, ni en bougeant un curseur.
+//! - Un égaliseur à cinq bandes (`egaliseur`) par piste, appliqué à chaque voie avant
+//!   son gain, et un sur la sortie, avant le gain général et le limiteur.
 //! - Un limiteur doux évite la saturation quand les voies se cumulent.
 //!
 //! - Le mixeur tient le service de lecture (`Lecture.java`) : tant qu'une voie joue ou
@@ -18,16 +20,24 @@
 //!   qu'un fichier reprend où il en était ; les sources en direct sont prévenues et
 //!   coupent leur flux. Fermer prévient toutes les sources.
 //!
+//! Les réglages (le gain général, l'égaliseur de la sortie, et pour chaque piste gain,
+//! balance, bascules et égaliseur) s'enregistrent dans `Flow/mixeur.txt`
+//! (`ecrire_reglages`, `lire_reglages`), un fichier texte modifiable à la main.
+//!
 //! Le rappel audio n'alloue rien, ne prend aucun verrou et ne fait aucun appel système.
 //! Les voies sont des cases fixes, réservées par compare-and-swap. Un gardien (un
 //! thread) rouvre la sortie si le système la coupe, et la ferme quand plus rien ne joue.
 
 use crate::audio::*;
+use crate::egaliseur::{Egaliseur, Filtre, Partage};
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// Le fichier des réglages, dans le dossier de Flow.
+pub const FICHIER: &str = "mixeur.txt";
 
 /// Nombre de voies simultanées.
 pub const VOIES: usize = 8;
@@ -69,11 +79,13 @@ pub struct Reglage {
     pub solo: bool,
     /// Quand elle sonne, les autres baissent.
     pub prioritaire: bool,
+    /// L'égaliseur de la piste.
+    pub eq: Egaliseur,
 }
 
 impl Default for Reglage {
     fn default() -> Self {
-        Reglage { gain: 0.8, balance: 0.0, muet: false, solo: false, prioritaire: false }
+        Reglage { gain: 0.8, balance: 0.0, muet: false, solo: false, prioritaire: false, eq: Egaliseur::default() }
     }
 }
 
@@ -85,6 +97,8 @@ struct Rt {
     avant: [f32; 2],
     apres: [f32; 2],
     g: [f32; 2],
+    /// L'égaliseur de la voie.
+    eq: Filtre,
 }
 
 struct Case {
@@ -97,6 +111,7 @@ struct Case {
     muet: AtomicBool,
     solo: AtomicBool,
     prioritaire: AtomicBool,
+    eq: Partage,
     crete: [F; 2],
     rt: UnsafeCell<Rt>,
     /// Le nom de la piste : jamais lu par le rappel.
@@ -115,6 +130,7 @@ impl Case {
             muet: AtomicBool::new(false),
             solo: AtomicBool::new(false),
             prioritaire: AtomicBool::new(false),
+            eq: Partage::new(&Egaliseur::default()),
             crete: [F::new(0.0), F::new(0.0)],
             rt: UnsafeCell::new(Rt::default()),
             nom: Mutex::new(String::new()),
@@ -131,6 +147,7 @@ impl Case {
         self.muet.store(r.muet, Ordering::Relaxed);
         self.solo.store(r.solo, Ordering::Relaxed);
         self.prioritaire.store(r.prioritaire, Ordering::Relaxed);
+        self.eq.ecrire(&r.eq);
     }
 }
 
@@ -146,6 +163,9 @@ pub struct Mixeur {
     frequence: AtomicU32,
     coupe: AtomicBool,
     pub general: F2,
+    /// L'égaliseur de la sortie : ses réglages, et son état dans le rappel.
+    eq: Partage,
+    eq_rt: UnsafeCell<Filtre>,
     crete: [F; 2],
     baisse: F,
     /// Une erreur d'ouverture, à montrer.
@@ -207,6 +227,8 @@ pub fn mixeur() -> &'static Mixeur {
         frequence: AtomicU32::new(48_000),
         coupe: AtomicBool::new(false),
         general: F2(F::new(1.0)),
+        eq: Partage::new(&Egaliseur::default()),
+        eq_rt: UnsafeCell::new(Filtre::default()),
         crete: [F::new(0.0), F::new(0.0)],
         baisse: F::new(1.0),
         erreur: Mutex::new(None),
@@ -353,12 +375,13 @@ impl Mixeur {
 
     /// Change les réglages d'une piste, et de ses voies qui jouent.
     pub fn regler(&self, nom: &str, r: Reglage) {
-        {
-            let mut p = self.pistes.lock().unwrap();
-            match p.iter_mut().find(|(n, _)| n == nom) {
-                Some(e) => e.1 = r,
-                None => p.push((nom.to_string(), r)),
-            }
+        let r = Reglage { eq: r.eq.borner(), ..r };
+        // Le verrou des pistes est tenu jusqu'au bout : un seul écrivain pour les
+        // réglages partagés des égaliseurs
+        let mut p = self.pistes.lock().unwrap();
+        match p.iter_mut().find(|(n, _)| n == nom) {
+            Some(e) => e.1 = r,
+            None => p.push((nom.to_string(), r)),
         }
         for c in &self.cases {
             if c.etat.load(Ordering::Acquire) == ACTIVE && *c.nom.lock().unwrap() == nom {
@@ -380,6 +403,98 @@ impl Mixeur {
                 }
             })
             .collect()
+    }
+
+    /// Les réglages du mixeur en texte, pour `mixeur.txt`.
+    pub fn ecrire_reglages(&self) -> String {
+        let oui = |b: bool| if b { "oui" } else { "non" };
+        let mut s = String::new();
+        s += "# Réglages du mixeur de Flow. Fichier modifiable à la main ; l'application le\n";
+        s += "# réécrit quand un réglage change.\n";
+        s += "#\n";
+        s += "# general : le volume général, en % (0 à 100).\n";
+        s += "# egaliseur : allumé (1) ou non (0), puis pour chacune des cinq bandes (étagère\n";
+        s += "#   grave, trois cloches, étagère aiguë) sa fréquence en Hz (20 à 20000), son gain\n";
+        s += "#   en dB (-12 à 12) et sa largeur Q (0.3 à 6).\n";
+        s += "# Chaque piste a sa section [piste Nom] : gain en % (0 à 100), balance (-100 à\n";
+        s += "#   gauche, 100 à droite), muet, solo, prioritaire (oui ou non), egaliseur.\n\n";
+        s += &format!("general = {}\n", (self.general.get() * 100.0).round());
+        s += &format!("egaliseur = {}\n", self.egaliseur().ecrire());
+        for (nom, r) in self.pistes.lock().unwrap().iter() {
+            s += &format!("\n[piste {nom}]\n");
+            s += &format!("gain = {}\n", (r.gain * 100.0).round());
+            s += &format!("balance = {}\n", (r.balance * 100.0).round());
+            s += &format!("muet = {}\nsolo = {}\nprioritaire = {}\n", oui(r.muet), oui(r.solo), oui(r.prioritaire));
+            s += &format!("egaliseur = {}\n", r.eq.ecrire());
+        }
+        s
+    }
+
+    /// Applique des réglages relus de `mixeur.txt`. Ce qui manque ou est illisible garde
+    /// sa valeur ; les pistes nommées sont déclarées.
+    pub fn lire_reglages(&self, t: &str) {
+        let nombre = |v: &str| v.trim_end_matches('%').trim().replace(',', ".").parse::<f32>().ok().filter(|x| x.is_finite());
+        let oui = |v: &str, d: bool| match v.to_lowercase().as_str() {
+            "oui" | "vrai" | "1" | "yes" | "true" => true,
+            "non" | "faux" | "0" | "no" | "false" => false,
+            _ => d,
+        };
+        let mut piste: Option<(String, Reglage)> = None;
+        let finir = |p: Option<(String, Reglage)>| {
+            if let Some((n, r)) = p {
+                self.regler(&n, r);
+            }
+        };
+        for l in t.lines() {
+            let l = l.split('#').next().unwrap_or("").trim();
+            if let Some(nom) = l.strip_prefix("[piste ").and_then(|n| n.strip_suffix(']')) {
+                let nom = nom.trim();
+                finir(piste.take());
+                if !nom.is_empty() {
+                    piste = Some((nom.to_string(), self.reglage(nom)));
+                }
+                continue;
+            }
+            let Some((k, v)) = l.split_once('=') else { continue };
+            let (k, v) = (k.trim().to_lowercase(), v.trim());
+            match &mut piste {
+                None => match k.as_str() {
+                    "general" => {
+                        if let Some(x) = nombre(v) {
+                            self.general.set(x / 100.0);
+                        }
+                    }
+                    "egaliseur" => {
+                        if let Some(e) = Egaliseur::lire(v) {
+                            self.regler_egaliseur(&e);
+                        }
+                    }
+                    _ => {}
+                },
+                Some((_, r)) => match k.as_str() {
+                    "gain" => r.gain = nombre(v).map_or(r.gain, |x| (x / 100.0).clamp(0.0, 1.0)),
+                    "balance" => r.balance = nombre(v).map_or(r.balance, |x| (x / 100.0).clamp(-1.0, 1.0)),
+                    "muet" => r.muet = oui(v, r.muet),
+                    "solo" => r.solo = oui(v, r.solo),
+                    "prioritaire" => r.prioritaire = oui(v, r.prioritaire),
+                    "egaliseur" => r.eq = Egaliseur::lire(v).unwrap_or(r.eq),
+                    _ => {}
+                },
+            }
+        }
+        finir(piste);
+    }
+
+    /// L'égaliseur de la sortie.
+    pub fn egaliseur(&self) -> Egaliseur {
+        self.eq.lire().unwrap_or_default()
+    }
+
+    /// Règle l'égaliseur de la sortie. Un seul écrivain à la fois : sous le verrou des
+    /// pistes.
+    pub fn regler_egaliseur(&self, e: &Egaliseur) {
+        let _p = self.pistes.lock().unwrap();
+        self.eq.ecrire(&e.borner());
     }
 
     /// Crêtes de la sortie, si elle est ouverte.
@@ -520,7 +635,9 @@ impl Mixeur {
             if rt.neuve {
                 rt.neuve = false;
                 rt.frac = 1.0;
+                rt.eq = Filtre::default();
             }
+            rt.eq.suivre(&c.eq, fs);
             let pas = c.frequence.load(Ordering::Relaxed) as f32 / fs;
             let mut crete = [0.0f32; 2];
             for o in out.chunks_exact_mut(2) {
@@ -533,11 +650,12 @@ impl Mixeur {
                 for ch in 0..2 {
                     rt.g[ch] += (cible[ch] - rt.g[ch]) * k;
                     let x = rt.avant[ch] + (rt.apres[ch] - rt.avant[ch]) * rt.frac;
-                    let y = x * rt.g[ch];
+                    let y = rt.eq.traiter(ch, x) * rt.g[ch];
                     o[ch] += y;
                     crete[ch] = crete[ch].max(y.abs());
                 }
             }
+            rt.eq.nettoyer();
             for ch in 0..2 {
                 c.crete[ch].set(crete[ch].max(c.crete[ch].get() * declin));
             }
@@ -546,13 +664,17 @@ impl Mixeur {
             }
         }
         let g = self.general.get().powi(2);
+        // L'égaliseur de la sortie : seul le rappel touche à son état
+        let eq = unsafe { &mut *self.eq_rt.get() };
+        eq.suivre(&self.eq, fs);
         let mut crete = [0.0f32; 2];
         for o in out.chunks_exact_mut(2) {
             for ch in 0..2 {
-                o[ch] = limiter(o[ch] * g);
+                o[ch] = limiter(eq.traiter(ch, o[ch]) * g);
                 crete[ch] = crete[ch].max(o[ch].abs());
             }
         }
+        eq.nettoyer();
         for ch in 0..2 {
             self.crete[ch].set(crete[ch].max(self.crete[ch].get() * declin));
         }
@@ -719,6 +841,8 @@ mod tests {
             frequence: AtomicU32::new(48_000),
             coupe: AtomicBool::new(false),
             general: F2(F::new(1.0)),
+            eq: Partage::new(&Egaliseur::default()),
+            eq_rt: UnsafeCell::new(Filtre::default()),
             crete: [F::new(0.0), F::new(0.0)],
             baisse: F::new(1.0),
             erreur: Mutex::new(None),
@@ -741,6 +865,62 @@ mod tests {
         let generation = c.generation.fetch_add(1, Ordering::AcqRel) + 1;
         c.etat.store(ACTIVE, Ordering::Release);
         Voie { m, i, generation }
+    }
+
+    #[test]
+    fn les_reglages_s_enregistrent_et_se_relisent() {
+        let m = mixeur_seul();
+        let mut eq = Egaliseur::default();
+        eq.bandes[2] = crate::egaliseur::Bande { frequence: 1800.0, gain: -3.5, q: 1.4 };
+        m.regler("Radio", Reglage { gain: 0.65, balance: -0.3, muet: true, eq, ..Reglage::default() });
+        m.regler("Essai", Reglage { prioritaire: true, ..Reglage::default() });
+        m.general.set(0.9);
+        let mut sortie = Egaliseur::default();
+        sortie.bandes[4].gain = 2.5;
+        sortie.actif = false;
+        m.regler_egaliseur(&sortie);
+        let texte = m.ecrire_reglages();
+        let n = mixeur_seul();
+        n.lire_reglages(&texte);
+        assert_eq!(n.ecrire_reglages(), texte);
+        assert_eq!(n.reglage("Radio"), m.reglage("Radio"));
+        assert_eq!(n.egaliseur(), sortie);
+        assert!((n.general.get() - 0.9).abs() < 1e-6);
+        // Écrit à la main : bornes, valeurs illisibles, section sans nom
+        let l = mixeur_seul();
+        l.lire_reglages("general = 300\n[piste Radio]\ngain = abc\nbalance = -500 # tout à gauche\nmuet = oui\n[piste ]\ngain = 10\n");
+        assert_eq!(l.general.get(), 1.0);
+        let r = l.reglage("Radio");
+        assert_eq!((r.gain, r.balance, r.muet), (Reglage::default().gain, -1.0, true));
+        assert_eq!(l.pistes().len(), 1);
+    }
+
+    #[test]
+    fn l_egaliseur_de_la_piste_puis_celui_de_la_sortie_s_appliquent() {
+        let m = mixeur_seul();
+        // L'étagère grave à -12 dB : un signal continu sort quatre fois plus bas
+        let mut eq = Egaliseur::default();
+        eq.bandes[0].gain = -12.0;
+        m.regler("A", Reglage { gain: 1.0, eq, ..Reglage::default() });
+        let a = voie(m, "A", 48_000);
+        a.ecrire(&[0.25; 48_000]);
+        let mut out = vec![0.0; 40_000];
+        m.melanger(&mut out);
+        let attendu = 0.25 * 10f32.powf(-12.0 / 20.0);
+        assert!((out[39_998] - attendu).abs() < 0.005, "{} au lieu de {attendu}", out[39_998]);
+        // La sortie remonte les graves d'autant : on retrouve le signal
+        let mut g = Egaliseur::default();
+        g.bandes[0].gain = 12.0;
+        m.regler_egaliseur(&g);
+        assert_eq!(m.egaliseur(), g);
+        a.ecrire(&[0.25; 48_000]);
+        m.melanger(&mut out);
+        assert!((out[39_998] - 0.25).abs() < 0.005, "{}", out[39_998]);
+        // Éteint sur la piste : le signal sort quatre fois plus fort
+        m.regler("A", Reglage { gain: 1.0, eq: Egaliseur { actif: false, ..eq }, ..Reglage::default() });
+        a.ecrire(&[0.25; 48_000]);
+        m.melanger(&mut out);
+        assert!((out[39_998] - limiter(1.0)).abs() < 0.01, "{}", out[39_998]);
     }
 
     #[test]

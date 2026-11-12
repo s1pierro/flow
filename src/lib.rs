@@ -10,6 +10,7 @@
 
 pub mod acces;
 pub mod app;
+pub mod applet;
 pub mod android;
 pub mod audio;
 pub mod clavier;
@@ -17,6 +18,7 @@ pub mod contexte;
 pub mod contextes;
 pub mod disque;
 pub mod draw;
+pub mod egaliseur;
 pub mod espace;
 pub mod explorateur;
 pub mod gestes;
