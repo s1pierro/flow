@@ -1654,19 +1654,38 @@ pub const SANS_PERTE: f32 = 5e-4;
 /// ajustées s'y arrêtent au lieu de l'arrondir.
 const ANGLE_VIF: f32 = 60.0;
 
+/// Ce que deviennent les suites de droites (et de courbes) simplifiées.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ajustement {
+    /// Des droites : les sommets gardés par Douglas-Peucker.
+    Droites,
+    /// Des cubiques ajustées par coupes successives (Schneider) : rapide.
+    Rapide,
+    /// Des cubiques en nombre minimal : les sommets sont choisis ensemble, par
+    /// programmation dynamique, parmi des candidats.
+    Optimal,
+    /// Une B-spline cubique dont les nœuds se placent seuls (insertion là où l'écart
+    /// est trop grand, puis retrait de ceux qui ne servent pas) : la courbure ne
+    /// saute pas aux sommets. Écrite en cubiques, une par intervalle de nœuds.
+    Spline,
+}
+
+impl Ajustement {
+    pub const TOUS: [Ajustement; 4] = [Ajustement::Droites, Ajustement::Rapide, Ajustement::Optimal, Ajustement::Spline];
+}
+
 /// Comment simplifier un tracé.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Simplification {
     /// L'écart permis entre le tracé simplifié et l'original, dans les unités du
     /// tracé. `SANS_PERTE` (ou moins) : aucun écart visible.
     pub tolerance: f32,
-    /// Remplacer les suites de droites (et de courbes) par des courbes de Bézier
-    /// ajustées. Sans effet sans perte.
-    pub courbes: bool,
+    /// Droites ou courbes ; sans perte, toujours des droites.
+    pub ajustement: Ajustement,
 }
 
 impl Simplification {
-    pub const SANS_PERTE: Simplification = Simplification { tolerance: SANS_PERTE, courbes: false };
+    pub const SANS_PERTE: Simplification = Simplification { tolerance: SANS_PERTE, ajustement: Ajustement::Droites };
 }
 
 /// Le nombre de sommets d'un tracé.
@@ -1705,17 +1724,17 @@ pub fn douglas_peucker(points: &[P], tol: f32) -> Vec<usize> {
 
 /// Simplifie un tracé : retire les morceaux de longueur nulle, redresse les courbes
 /// droites, retire les sommets qui ne s'écartent pas de plus de la tolérance (le
-/// long des suites de droites), et, avec `courbes`, ajuste des courbes de Bézier sur
-/// ces suites en gardant les angles vifs. Les arcs et la fermeture restent ; chaque
+/// long des suites de droites), et, avec un ajustement en courbes, remplace ces
+/// suites par des courbes de Bézier en gardant les angles vifs. Les arcs et la fermeture restent ; chaque
 /// sous-chemin garde au moins un segment.
 pub fn simplifier(t: &[Morceau], s: Simplification) -> Vec<Morceau> {
     let tol = s.tolerance.max(0.0);
-    let courbes = s.courbes && tol > SANS_PERTE;
+    let aj = if tol > SANS_PERTE { s.ajustement } else { Ajustement::Droites };
     let mut out = Vec::with_capacity(t.len());
     let mut i = 0;
     while i < t.len() {
         let (debut, fin) = sous_chemin(t, i);
-        simplifier_sous_chemin(&t[debut..fin], tol, courbes, &mut out);
+        simplifier_sous_chemin(&t[debut..fin], tol, aj, &mut out);
         i = fin;
     }
     out
@@ -1723,12 +1742,12 @@ pub fn simplifier(t: &[Morceau], s: Simplification) -> Vec<Morceau> {
 
 /// Ce qu'une suite de points devient : droites gardées par Douglas-Peucker, ou
 /// courbes ajustées.
-fn suite(points: &[P], tol: f32, courbes: bool, out: &mut Vec<Morceau>) {
+fn suite(points: &[P], tol: f32, aj: Ajustement, out: &mut Vec<Morceau>) {
     if points.len() < 2 {
         return;
     }
     let gardes = douglas_peucker(points, tol);
-    if !courbes || gardes.len() <= 2 {
+    if aj == Ajustement::Droites || gardes.len() <= 2 {
         out.extend(gardes[1..].iter().map(|k| Morceau::Droite(points[*k])));
         return;
     }
@@ -1769,12 +1788,17 @@ fn suite(points: &[P], tol: f32, courbes: bool, out: &mut Vec<Morceau>) {
             let lisse = lisser(morceau);
             let t1 = tangente(&lisse, tol, false);
             let t2 = tangente(&lisse, tol, true);
-            ajuster(&lisse, t1, t2, tol, out);
+            match aj {
+                Ajustement::Optimal => ajuster_optimal(&lisse, t1, t2, tol, out),
+                Ajustement::Spline => ajuster_spline(&lisse, tol, out),
+                _ => ajuster(&lisse, t1, t2, tol, out),
+            }
         }
     }
 }
 
-fn simplifier_sous_chemin(t: &[Morceau], tol: f32, courbes: bool, out: &mut Vec<Morceau>) {
+fn simplifier_sous_chemin(t: &[Morceau], tol: f32, aj: Ajustement, out: &mut Vec<Morceau>) {
+    let courbes = aj != Ajustement::Droites;
     let Some(Morceau::Depart(depart)) = t.first().copied() else {
         out.extend_from_slice(t);
         return;
@@ -1825,7 +1849,7 @@ fn simplifier_sous_chemin(t: &[Morceau], tol: f32, courbes: bool, out: &mut Vec<
                     Morceau::Quadratique(c, _) => dist(c, courant) <= eps && dist(p, courant) <= eps,
                     _ => dist(p, courant) <= eps,
                 };
-                suite(&points, tol, courbes, out);
+                suite(&points, tol, aj, out);
                 if !nul {
                     out.push(m);
                     courant = p;
@@ -1838,7 +1862,7 @@ fn simplifier_sous_chemin(t: &[Morceau], tol: f32, courbes: bool, out: &mut Vec<
     if ferme && points.len() > 2 && dist(*points.last().unwrap(), depart) <= eps {
         points.pop();
     }
-    suite(&points, tol, courbes, out);
+    suite(&points, tol, aj, out);
     if out.len() == debut + 1 {
         // Rien ne reste : un point (un trait rond) se garde comme un segment nul
         out.push(t[1..].iter().find_map(|m| if *m == Morceau::Fermer { None } else { Some(*m) }).unwrap_or(Morceau::Droite(depart)));
@@ -1992,6 +2016,341 @@ fn cubique_au_mieux(points: &[P], t1: P, t2: P, tol: f32) -> ([P; 4], f32, usize
         }
     }
     meilleure.unwrap()
+}
+
+/// La segmentation optimale (Plass et Stone, 1983) : parmi des sommets candidats (les
+/// points gardés par Douglas-Peucker à un cinquième de la tolérance), le plus petit
+/// nombre de cubiques qui tiennent la tolérance, cherché par programmation
+/// dynamique. Les tangentes sont celles de la suite en chaque candidat : les cubiques
+/// se raccordent sans angle.
+fn ajuster_optimal(points: &[P], t1: P, t2: P, tol: f32, out: &mut Vec<Morceau>) {
+    let n = points.len();
+    let mut candidats = douglas_peucker(points, tol * 0.2);
+    if candidats.len() > 400 {
+        candidats = douglas_peucker(points, tol * 0.5);
+    }
+    let m = candidats.len();
+    // La tangente vers l'avant en chaque candidat
+    let tangentes: Vec<P> = candidats.iter().map(|&k| if k == 0 { t1 } else if k == n - 1 { (-t2.0, -t2.1) } else { tangente_en(points, k, tol) }).collect();
+    let essai = |i: usize, j: usize| {
+        let (a, b) = (candidats[i], candidats[j]);
+        let tb = tangentes[j];
+        cubique_au_mieux(&points[a..=b], tangentes[i], (-tb.0, -tb.1), tol)
+    };
+    // meilleur[j] : (nombre de cubiques jusqu'au candidat j, écart total, précédent)
+    let mut meilleur: Vec<(usize, f32, usize)> = vec![(usize::MAX, 0.0, 0); m];
+    meilleur[0] = (0, 0.0, 0);
+    for j in 1..m {
+        let mut echecs = 0;
+        for i in (0..j).rev() {
+            let (_, ecart, _) = essai(i, j);
+            if ecart <= tol {
+                echecs = 0;
+                let c = (meilleur[i].0 + 1, meilleur[i].1 + ecart, i);
+                if c.0 < meilleur[j].0 || (c.0 == meilleur[j].0 && c.1 < meilleur[j].1) {
+                    meilleur[j] = c;
+                }
+            } else {
+                // Plus loin, ça ne tiendra pas davantage
+                echecs += 1;
+                if echecs >= 3 {
+                    break;
+                }
+            }
+        }
+        if meilleur[j].0 == usize::MAX {
+            // Rien ne tient (des tangentes contraires) : la plus courte, quand même
+            meilleur[j] = (meilleur[j - 1].0 + 1, meilleur[j - 1].1, j - 1);
+        }
+    }
+    let mut chaine = vec![m - 1];
+    while *chaine.last().unwrap() != 0 {
+        chaine.push(meilleur[*chaine.last().unwrap()].2);
+    }
+    chaine.reverse();
+    for w in chaine.windows(2) {
+        let (c, _, _) = essai(w[0], w[1]);
+        out.push(Morceau::Cubique(c[1], c[2], c[3]));
+    }
+}
+
+// --- Les B-splines à nœuds automatiques ---
+
+/// Les quatre fonctions de base cubiques non nulles en `u`, et l'intervalle `s`
+/// (`t[s] <= u < t[s+1]`) : le point vaut la somme des `n[r] * P[s-3+r]`.
+fn base_spline(t: &[f64], u: f64) -> (usize, [f64; 4]) {
+    let m = t.len() - 4; // nombre de contrôles
+    // L'intervalle non vide qui contient u (le dernier pour u = 1)
+    let mut s = 3;
+    while s + 1 < m && t[s + 1] <= u {
+        s += 1;
+    }
+    let mut n = [0.0f64; 4];
+    n[0] = 1.0;
+    let (mut gauche, mut droite) = ([0.0f64; 4], [0.0f64; 4]);
+    for j in 1..4 {
+        gauche[j] = u - t[s + 1 - j];
+        droite[j] = t[s + j] - u;
+        let mut reste = 0.0;
+        for r in 0..j {
+            let d = droite[r + 1] + gauche[j - r];
+            let q = if d.abs() < 1e-15 { 0.0 } else { n[r] / d };
+            n[r] = reste + droite[r + 1] * q;
+            reste = gauche[j - r] * q;
+        }
+        n[j] = reste;
+    }
+    (s, n)
+}
+
+/// Le point du blossom de l'intervalle `s` en (x1, x2, x3) : avec a, a, a puis
+/// a, a, b… on obtient les contrôles de Bézier de l'intervalle [a, b].
+fn blossom(t: &[f64], c: &[(f64, f64)], s: usize, x: [f64; 3]) -> (f64, f64) {
+    let mut d = [c[s - 3], c[s - 2], c[s - 1], c[s]];
+    for r in 1..=3 {
+        for j in (r..=3).rev() {
+            let i = s - 3 + j;
+            let den = t[i + 4 - r] - t[i];
+            let a = if den.abs() < 1e-15 { 0.0 } else { (x[r - 1] - t[i]) / den };
+            d[j] = ((1.0 - a) * d[j - 1].0 + a * d[j].0, (1.0 - a) * d[j - 1].1 + a * d[j].1);
+        }
+    }
+    d[3]
+}
+
+/// La B-spline en cubiques de Bézier, une par intervalle non vide, avec ses bornes.
+fn spline_en_cubiques(t: &[f64], c: &[(f64, f64)]) -> Vec<(f64, f64, [P; 4])> {
+    let mut v = Vec::new();
+    for s in 3..c.len() {
+        let (a, b) = (t[s], t[s + 1]);
+        if b - a < 1e-12 {
+            continue;
+        }
+        let q = |x: [f64; 3]| {
+            let p = blossom(t, c, s, x);
+            (p.0 as f32, p.1 as f32)
+        };
+        v.push((a, b, [q([a, a, a]), q([a, a, b]), q([a, b, b]), q([b, b, b])]));
+    }
+    v
+}
+
+/// Les contrôles de la B-spline de nœuds intérieurs `interieurs` la plus proche des
+/// points (aux paramètres `u`) par moindres carrés, les bouts passant par le premier
+/// et le dernier point. Une légère pénalité sur les différences secondes des
+/// contrôles (à la façon des P-splines) tient les intervalles sans points.
+fn moindres_carres_spline(points: &[P], u: &[f64], interieurs: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>) {
+    let mut t = vec![0.0f64; 4];
+    t.extend_from_slice(interieurs);
+    t.extend_from_slice(&[1.0; 4]);
+    let m = t.len() - 4;
+    let n = points.len();
+    let (p0, p1) = ((points[0].0 as f64, points[0].1 as f64), (points[n - 1].0 as f64, points[n - 1].1 as f64));
+    // Inconnues : les contrôles 1..m-1 (exclus) ; matrice normale bande de demi-largeur 3
+    let q = m - 2;
+    let mut a = vec![vec![0.0f64; q]; q];
+    let mut b = vec![(0.0f64, 0.0f64); q];
+    let mut ligne = |coefs: &[(usize, f64)], cible: (f64, f64), poids: f64| {
+        let mut c = cible;
+        let libres: Vec<(usize, f64)> = coefs
+            .iter()
+            .filter_map(|&(i, w)| {
+                if i == 0 {
+                    c = (c.0 - w * p0.0, c.1 - w * p0.1);
+                    None
+                } else if i == m - 1 {
+                    c = (c.0 - w * p1.0, c.1 - w * p1.1);
+                    None
+                } else {
+                    Some((i - 1, w))
+                }
+            })
+            .collect();
+        for &(i, wi) in &libres {
+            b[i].0 += poids * wi * c.0;
+            b[i].1 += poids * wi * c.1;
+            for &(j, wj) in &libres {
+                a[i][j] += poids * wi * wj;
+            }
+        }
+    };
+    for k in 0..n {
+        let (s, nb) = base_spline(&t, u[k]);
+        let coefs: Vec<(usize, f64)> = (0..4).map(|r| (s - 3 + r, nb[r])).collect();
+        ligne(&coefs, (points[k].0 as f64, points[k].1 as f64), 1.0);
+    }
+    let lambda = 1e-4 * n as f64 / m as f64;
+    for i in 1..m - 1 {
+        ligne(&[(i - 1, 1.0), (i, -2.0), (i + 1, 1.0)], (0.0, 0.0), lambda);
+    }
+    // Cholesky dans la bande
+    let mut l = vec![vec![0.0f64; q]; q];
+    for i in 0..q {
+        for j in i.saturating_sub(3)..=i {
+            let mut s = a[i][j];
+            for k in i.saturating_sub(3)..j {
+                s -= l[i][k] * l[j][k];
+            }
+            l[i][j] = if i == j { s.max(1e-12).sqrt() } else { s / l[j][j] };
+        }
+    }
+    let mut y = vec![(0.0f64, 0.0f64); q];
+    for i in 0..q {
+        let mut s = b[i];
+        for k in i.saturating_sub(3)..i {
+            s = (s.0 - l[i][k] * y[k].0, s.1 - l[i][k] * y[k].1);
+        }
+        y[i] = (s.0 / l[i][i], s.1 / l[i][i]);
+    }
+    let mut x = vec![(0.0f64, 0.0f64); q];
+    for i in (0..q).rev() {
+        let mut s = y[i];
+        for k in i + 1..(i + 4).min(q) {
+            s = (s.0 - l[k][i] * x[k].0, s.1 - l[k][i] * x[k].1);
+        }
+        x[i] = (s.0 / l[i][i], s.1 / l[i][i]);
+    }
+    let mut c = vec![p0];
+    c.extend(x);
+    c.push(p1);
+    (t, c)
+}
+
+/// L'écart de chaque point à la courbe (vraie distance, sur la courbe mise en
+/// points fins autour de son paramètre), et le paramètre du point le plus proche.
+fn ecarts_spline(points: &[P], u: &[f64], cubiques: &[(f64, f64, [P; 4])]) -> Vec<(f32, f64)> {
+    const FIN: usize = 24;
+    let fins: Vec<Vec<(P, f64)>> = cubiques
+        .iter()
+        .map(|(a, b, c)| (0..=FIN).map(|k| {
+            let v = k as f32 / FIN as f32;
+            (point_cubique(c[0], c[1], c[2], c[3], v), a + (b - a) * v as f64)
+        }).collect())
+        .collect();
+    // Le plus proche sur une mise en points : (carré de la distance, paramètre)
+    let proche = |p: P, f: &[(P, f64)], m: &mut (f32, f64)| {
+        for w in f.windows(2) {
+            let (a, b) = (w[0].0, w[1].0);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let l = dx * dx + dy * dy;
+            let v = if l > 0.0 { (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l).clamp(0.0, 1.0) } else { 0.0 };
+            let (ex, ey) = (p.0 - a.0 - v * dx, p.1 - a.1 - v * dy);
+            let e = ex * ex + ey * ey;
+            if e < m.0 {
+                *m = (e, w[0].1 + (w[1].1 - w[0].1) * v as f64);
+            }
+        }
+    };
+    points
+        .iter()
+        .zip(u)
+        .map(|(p, &uk)| {
+            let i = cubiques.partition_point(|c| c.1 < uk).min(cubiques.len() - 1);
+            let mut m = (f32::MAX, uk);
+            proche(*p, &fins[i], &mut m);
+            // Les intervalles voisins, seulement près d'une borne
+            let (a, b) = (cubiques[i].0, cubiques[i].1);
+            if i > 0 && uk - a < (b - a) * 0.25 {
+                proche(*p, &fins[i - 1], &mut m);
+            }
+            if i + 1 < fins.len() && b - uk < (b - a) * 0.25 {
+                proche(*p, &fins[i + 1], &mut m);
+            }
+            (m.0.sqrt(), m.1)
+        })
+        .collect()
+}
+
+/// Ajuste la B-spline de nœuds donnés, en reparamétrant `reprises` fois les points
+/// vers leur plus proche ; rend la courbe en cubiques et les écarts.
+fn essai_spline(points: &[P], u: &mut [f64], interieurs: &[f64], reprises: usize) -> (Vec<(f64, f64, [P; 4])>, Vec<(f32, f64)>) {
+    let mut res = None;
+    for passe in 0..=reprises {
+        let (t, c) = moindres_carres_spline(points, u, interieurs);
+        let cubiques = spline_en_cubiques(&t, &c);
+        let ecarts = ecarts_spline(points, u, &cubiques);
+        if passe < reprises {
+            let n = u.len();
+            for k in 1..n - 1 {
+                u[k] = ecarts[k].1.clamp(0.0, 1.0);
+            }
+            // L'ordre des paramètres reste celui des points
+            for k in 1..n {
+                if u[k] < u[k - 1] {
+                    u[k] = u[k - 1];
+                }
+            }
+        }
+        res = Some((cubiques, ecarts));
+    }
+    res.unwrap()
+}
+
+/// La B-spline cubique à nœuds automatiques : on part d'une seule cubique, on
+/// insère un nœud au point le plus loin de chaque intervalle qui dépasse la
+/// tolérance (Dierckx), puis on retire un à un les nœuds dont l'absence tient encore
+/// la tolérance (Lyche et Mørken). La courbe garde sa courbure continue aux sommets.
+fn ajuster_spline(points: &[P], tol: f32, out: &mut Vec<Morceau>) {
+    let n = points.len();
+    let mut u0 = vec![0.0f64; n];
+    for k in 1..n {
+        u0[k] = u0[k - 1] + dist(points[k], points[k - 1]) as f64;
+    }
+    let total = u0[n - 1].max(1e-12);
+    u0.iter_mut().for_each(|x| *x /= total);
+    let mut interieurs: Vec<f64> = Vec::new();
+    let max_noeuds = (n / 3).max(1);
+    let depasse = |cubiques: &[(f64, f64, [P; 4])], ecarts: &[(f32, f64)], u: &[f64]| -> Vec<(usize, f64)> {
+        // Par intervalle, le point le plus loin s'il dépasse
+        let mut pire: Vec<Option<(f32, f64)>> = vec![None; cubiques.len()];
+        for (k, e) in ecarts.iter().enumerate() {
+            if e.0 > tol {
+                let i = cubiques.partition_point(|c| c.1 < u[k]).min(cubiques.len() - 1);
+                if pire[i].is_none_or(|p| e.0 > p.0) {
+                    pire[i] = Some((e.0, u[k]));
+                }
+            }
+        }
+        pire.iter().enumerate().filter_map(|(i, p)| p.map(|p| (i, p.1))).collect()
+    };
+    // Insertion
+    let mut u = u0.clone();
+    for _ in 0..40 {
+        let (cubiques, ecarts) = essai_spline(points, &mut u, &interieurs, 2);
+        let trop = depasse(&cubiques, &ecarts, &u);
+        if trop.is_empty() || interieurs.len() >= max_noeuds {
+            break;
+        }
+        let avant = interieurs.len();
+        for (i, v) in trop {
+            let (a, b) = (cubiques[i].0, cubiques[i].1);
+            // Pas trop près des bornes : au milieu sinon
+            let v = if v - a < (b - a) * 0.2 || b - v < (b - a) * 0.2 { (a + b) / 2.0 } else { v };
+            if !interieurs.iter().any(|x| (x - v).abs() < 1e-9) {
+                interieurs.push(v);
+            }
+        }
+        interieurs.sort_by(f64::total_cmp);
+        if interieurs.len() == avant {
+            break;
+        }
+    }
+    // Retrait : chaque nœud dont l'absence tient la tolérance s'en va
+    let mut k = 0;
+    while k < interieurs.len() {
+        let mut sans = interieurs.clone();
+        sans.remove(k);
+        let mut v = u.clone();
+        let (cubiques, ecarts) = essai_spline(points, &mut v, &sans, 0);
+        if depasse(&cubiques, &ecarts, &v).is_empty() {
+            interieurs = sans;
+            u = v;
+        } else {
+            k += 1;
+        }
+    }
+    let (cubiques, _) = essai_spline(points, &mut u, &interieurs, 1);
+    out.extend(cubiques.iter().map(|(_, _, c)| Morceau::Cubique(c[1], c[2], c[3])));
 }
 
 /// La cubique aux tangentes `t1`, `t2` qui passe au mieux par les points (aux
@@ -2797,11 +3156,11 @@ mod tests {
             })
             .collect();
         let t: Vec<Morceau> = points.iter().enumerate().map(|(k, p)| if k == 0 { Morceau::Depart(*p) } else { Morceau::Droite(*p) }).collect();
-        let droites = simplifier(&t, Simplification { tolerance: 0.5, courbes: false });
+        let droites = simplifier(&t, Simplification { tolerance: 0.5, ajustement: Ajustement::Droites });
         assert!(sommets(&droites) < 60, "{}", sommets(&droites));
         assert!(droites.iter().skip(1).all(|m| matches!(m, Morceau::Droite(_))));
         assert!(ecart_au_trace(&points, &droites) <= 0.51);
-        let lisse = simplifier(&t, Simplification { tolerance: 0.5, courbes: true });
+        let lisse = simplifier(&t, Simplification { tolerance: 0.5, ajustement: Ajustement::Rapide });
         assert!(sommets(&lisse) <= 16, "{}", sommets(&lisse));
         assert!(lisse.iter().skip(1).all(|m| matches!(m, Morceau::Cubique(..))));
         assert!(ecart_au_trace(&points, &lisse) <= 0.6, "{}", ecart_au_trace(&points, &lisse));
@@ -2810,13 +3169,49 @@ mod tests {
         for (a, b) in [((0.0, 0.0), (10.0, 0.0)), ((10.0, 0.0), (10.0, 10.0)), ((10.0, 10.0), (0.0, 10.0))] {
             carre.extend((1..=20).map(|k| Morceau::Droite(milieu(a, b, k as f32 / 20.0))));
         }
-        assert_eq!(ecrire_trace(&simplifier(&carre, Simplification { tolerance: 0.3, courbes: true })), "M0 0 L10 0 L10 10 L0 10");
+        for aj in [Ajustement::Rapide, Ajustement::Optimal, Ajustement::Spline] {
+            assert_eq!(ecrire_trace(&simplifier(&carre, Simplification { tolerance: 0.3, ajustement: aj })), "M0 0 L10 0 L10 10 L0 10", "{aj:?}");
+        }
         // Une suite de courbes se refond
         let c = lire_trace("M0 0 C0 5 5 10 10 10 C15 10 20 5 20 0 C20 -5 25 -10 30 -10");
-        let r = simplifier(&c, Simplification { tolerance: 0.2, courbes: true });
+        let r = simplifier(&c, Simplification { tolerance: 0.2, ajustement: Ajustement::Rapide });
         assert!(sommets(&r) <= sommets(&c));
         let fins: Vec<P> = (0..=60).map(|k| point_sur(&c, 1 + (k * 3 / 61), (k * 3 % 61) as f32 / 61.0)).collect();
         assert!(ecart_au_trace(&fins, &r) <= 0.3);
+    }
+
+    #[test]
+    fn optimal_et_spline() {
+        // Une tache tremblée de 241 points (comme un tracé au doigt), fermée
+        let mut pts = Vec::new();
+        for k in 0..=240 {
+            let a = k as f32 / 240.0 * std::f32::consts::TAU;
+            let r = 70.0 + 12.0 * (3.0 * a).sin() + 0.6 * (k as f32 * 2.3).sin();
+            pts.push((200.0 + r * a.cos(), 150.0 + r * a.sin()));
+        }
+        let t: Vec<Morceau> = pts.iter().enumerate().map(|(k, p)| if k == 0 { Morceau::Depart(*p) } else { Morceau::Droite(*p) }).collect();
+        let s = |aj| simplifier(&t, Simplification { tolerance: 1.0, ajustement: aj });
+        let (rapide, optimal, spline) = (s(Ajustement::Rapide), s(Ajustement::Optimal), s(Ajustement::Spline));
+        // Fidèles (le lissage enlève le tremblé de ±0,6), et pas plus de sommets que la méthode rapide
+        for (nom, r) in [("rapide", &rapide), ("optimal", &optimal), ("spline", &spline)] {
+            let e = ecart_au_trace(&pts, r);
+            assert!(e <= 1.7, "{nom} : écart {e}");
+            assert!(r[1..].iter().all(|m| matches!(m, Morceau::Cubique(..))), "{nom}");
+        }
+        assert!(sommets(&optimal) <= sommets(&rapide), "{} > {}", sommets(&optimal), sommets(&rapide));
+        assert!(sommets(&spline) <= 16, "{}", sommets(&spline));
+        // La spline : aux sommets intérieurs, tangente et courbure continues
+        for w in spline[1..].windows(2) {
+            let (Morceau::Cubique(_, b2, p), Morceau::Cubique(c1, c2, _)) = (w[0], w[1]) else { panic!() };
+            let (u, v) = (unitaire((p.0 - b2.0, p.1 - b2.1)), unitaire((c1.0 - p.0, c1.1 - p.1)));
+            assert!(u.0 * v.0 + u.1 * v.1 > 0.9998, "tangente {u:?} {v:?}");
+            let _ = c2;
+        }
+        // Une droite bruitée reste une droite, quelle que soit la méthode
+        let d: Vec<Morceau> = (0..50).map(|k| { let p = (k as f32, 0.05 * (k as f32 * 1.3).sin()); if k == 0 { Morceau::Depart(p) } else { Morceau::Droite(p) } }).collect();
+        for aj in Ajustement::TOUS {
+            assert_eq!(sommets(&simplifier(&d, Simplification { tolerance: 0.5, ajustement: aj })), 2, "{aj:?}");
+        }
     }
 
     #[test]
@@ -2824,7 +3219,7 @@ mod tests {
         let mut d = Document::lire(r#"<svg><g transform="scale(10)"><polyline points="0 0 1 0.05 2 0 3 0"/></g><rect width="5" height="5"/><path d="M0 0 L1 0.02 L2 0"/></svg>"#).unwrap();
         let r = d.racine;
         // 0,2 de tolérance : l'écart de 0,02 retiré dehors, gardé dans le groupe agrandi
-        assert_eq!(d.simplifier(r, Simplification { tolerance: 0.1, courbes: false }), (7, 6));
+        assert_eq!(d.simplifier(r, Simplification { tolerance: 0.1, ajustement: Ajustement::Droites }), (7, 6));
         let e = d.ecrire();
         assert!(e.contains("points=\"0 0 1 0.05 2 0 3 0\""), "{e}");
         assert!(e.contains("d=\"M0 0 L2 0\""), "{e}");

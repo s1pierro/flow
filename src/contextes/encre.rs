@@ -56,7 +56,7 @@ const PAPIER: Color = [0xFB, 0xFA, 0xF6, 255];
 const ZOOM: (f32, f32) = (0.1, 12.0);
 /// La simplification des traits, par défaut : sans perte à la précision où ils
 /// s'écrivent (un dixième d'unité), donc 0,05 d'écart au plus.
-pub const SIMPLIFICATION: svg::Simplification = svg::Simplification { tolerance: 0.05, courbes: false };
+pub const SIMPLIFICATION: svg::Simplification = svg::Simplification { tolerance: 0.05, ajustement: svg::Ajustement::Droites };
 /// Le rayon de la gomme, à l'écran, en dp.
 const GOMME: f32 = 12.0;
 
@@ -282,7 +282,7 @@ impl Trait {
             return;
         }
         let t: Vec<svg::Morceau> = self.points.iter().enumerate().map(|(i, p)| if i == 0 { svg::Morceau::Depart(*p) } else { svg::Morceau::Droite(*p) }).collect();
-        let u = svg::simplifier(&t, svg::Simplification { courbes: false, ..s });
+        let u = svg::simplifier(&t, svg::Simplification { ajustement: svg::Ajustement::Droites, ..s });
         let points: Vec<(f32, f32)> = u.iter().filter_map(svg::Morceau::fin).collect();
         // Un trait revenu sur place se garde en point
         self.points = if points.len() == 2 && points[0] == points[1] { vec![points[0]] } else { points };

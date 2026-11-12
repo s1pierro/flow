@@ -27,8 +27,9 @@
 //! - **Simplifier** (une sélection, ou la forme de l'outil Sommets) retire les sommets
 //!   inutiles des chemins, polygones et polylignes qu'elle contient
 //!   (`svg::simplifier`), en aperçu : « Sans perte » d'abord, puis un écart permis
-//!   (en unités du dessin) et « Courbes » pour remplacer les suites de droites par des
-//!   courbes ajustées. Les sommets restants sont montrés, et leur compte ;
+//!   (en unités du dessin) et ce que deviennent les suites de droites : Droites,
+//!   Courbes rapides (Schneider), Courbes optimales (le moins de sommets possible) ou
+//!   B-spline (nœuds placés seuls, courbure continue). Les sommets restants sont montrés, et leur compte ;
 //!   « Appliquer » garde le résultat, « Annuler » (ou toute autre action) y renonce.
 //!   Le dernier réglage est retenu.
 //! - **En haut** : annuler, rétablir (l'historique dure la session), le nom, « Source »
@@ -46,7 +47,7 @@ use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
 use crate::gestes::Geste;
 use crate::surface::{FenetreId, Placee};
-use crate::svg::{self, Document, Forme, Matrice, Morceau, Repere, Simplification, P};
+use crate::svg::{self, Ajustement, Document, Forme, Matrice, Morceau, Repere, Simplification, P};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::path::{Path, PathBuf};
@@ -141,7 +142,7 @@ enum Commande {
     Simplifier,
     /// L'écart permis : un indice de `TOLERANCES`.
     Tolerance(usize),
-    Courbes,
+    Ajuster(Ajustement),
     Appliquer,
     Renoncer,
 }
@@ -218,7 +219,7 @@ pub struct Svg {
     /// La simplification en aperçu, et son réglage (retenu).
     apercu: Option<Apercu>,
     tolerance: usize,
-    courbes: bool,
+    ajustement: Ajustement,
 }
 
 impl Default for Svg {
@@ -255,7 +256,7 @@ impl Default for Svg {
             source: None,
             apercu: None,
             tolerance: 0,
-            courbes: false,
+            ajustement: Ajustement::Droites,
         }
     }
 }
@@ -270,7 +271,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     };
     if let [t, c] = e.nombres("simplifier")[..] {
         s.tolerance = (t.max(0.0) as usize).min(TOLERANCES.len() - 1);
-        s.courbes = c != 0.0;
+        s.ajustement = Ajustement::TOUS[(c.max(0.0) as usize).min(Ajustement::TOUS.len() - 1)];
     }
     if let [x, y, z] = v[..] {
         s.vue = Vue { x, y, zoom: z.clamp(ZOOM.0, ZOOM.1) };
@@ -661,7 +662,7 @@ impl Svg {
 
     fn commander(&mut self, c: Commande) {
         // Toute autre action renonce à l'aperçu en cours
-        if self.apercu.is_some() && !matches!(c, Commande::Tolerance(_) | Commande::Courbes | Commande::Appliquer | Commande::Renoncer | Commande::Cadrer) {
+        if self.apercu.is_some() && !matches!(c, Commande::Tolerance(_) | Commande::Ajuster(_) | Commande::Appliquer | Commande::Renoncer | Commande::Cadrer) {
             self.conclure_simplification(false);
         }
         match c {
@@ -670,8 +671,8 @@ impl Svg {
                 self.tolerance = i.min(TOLERANCES.len() - 1);
                 self.simplifier_apercu();
             }
-            Commande::Courbes => {
-                self.courbes = !self.courbes;
+            Commande::Ajuster(a) => {
+                self.ajustement = a;
                 self.simplifier_apercu();
             }
             Commande::Appliquer => self.conclure_simplification(true),
@@ -758,7 +759,7 @@ impl Svg {
     fn simplification(&self) -> Simplification {
         match TOLERANCES[self.tolerance] {
             0.0 => Simplification::SANS_PERTE,
-            e => Simplification { tolerance: e, courbes: self.courbes },
+            e => Simplification { tolerance: e, ajustement: self.ajustement },
         }
     }
 
@@ -1219,10 +1220,23 @@ impl Svg {
                 .enumerate()
                 .map(|(i, e)| (Commande::Tolerance(i), if *e == 0.0 { "Sans perte".to_string() } else { format!("± {}", svg::nombre(*e).replace('.', ",")) }, i == self.tolerance))
                 .collect();
-            if self.tolerance > 0 {
-                v.push((Commande::Courbes, "Courbes".into(), self.courbes));
-            }
             g.push(v);
+            if self.tolerance > 0 {
+                g.push(
+                    Ajustement::TOUS
+                        .iter()
+                        .map(|a| {
+                            let nom = match a {
+                                Ajustement::Droites => "Droites",
+                                Ajustement::Rapide => "Courbes rapides",
+                                Ajustement::Optimal => "Courbes optimales",
+                                Ajustement::Spline => "B-spline",
+                            };
+                            (Commande::Ajuster(*a), nom.to_string(), *a == self.ajustement)
+                        })
+                        .collect(),
+                );
+            }
             g.push(vec![
                 (Commande::Appliquer, format!("Appliquer · de {} à {} sommets", a.compte.0, a.compte.1), true),
                 (Commande::Renoncer, "Annuler".into(), false),
@@ -1432,7 +1446,8 @@ impl Contexte for Svg {
         if self.charge {
             e.mettre("vue", format!("{} {} {}", svg::nombre(self.vue.x), svg::nombre(self.vue.y), self.vue.zoom));
         }
-        e.mettre("simplifier", format!("{} {}", self.tolerance, self.courbes as u8));
+        let a = Ajustement::TOUS.iter().position(|a| *a == self.ajustement).unwrap_or(0);
+        e.mettre("simplifier", format!("{} {a}", self.tolerance));
     }
 
     fn retour(&mut self, _c: &Commun) {

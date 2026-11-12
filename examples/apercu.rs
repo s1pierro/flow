@@ -36,7 +36,7 @@ const SVG_TAP: (f32, f32) = (700.0, 600.0);
 
 /// Les touchers de l'aperçu `svg-simplifier` : la tache tremblée, « Simplifier »,
 /// un écart de 1, « Courbes ».
-const SIMPLIFIER: [(f32, f32); 4] = [(960.0, 560.0), (242.0, 1023.0), (549.0, 942.0), (835.0, 942.0)];
+const SIMPLIFIER: [(f32, f32); 4] = [(960.0, 560.0), (242.0, 1023.0), (549.0, 942.0), (683.0, 942.0)];
 
 /// Les touchers de l'aperçu `svg-sommets` : la pilule, la forme, un sommet, puis un
 /// sommet à tirer.

@@ -22,7 +22,8 @@ fini est simplifié sans perte), SVG (éditeur
 de dessin vectoriel : ouvre tout SVG, trace rectangles, ellipses, lignes, polygones et textes avec
 fond, trait et épaisseur ; sélection avec poignées pour déplacer, agrandir et tourner ; édition des sommets des chemins (déplacer
 sommets et contrôles, ajouter en touchant le contour, retirer, courber, redresser, ouvrir, fermer) ; simplifier les chemins
-(sans perte, ou avec un écart permis et des courbes ajustées, en aperçu) ; dupliquer,
+(sans perte, ou avec un écart permis : droites, courbes rapides, courbes optimales en nombre minimal,
+ou B-spline à nœuds automatiques et courbure continue ; en aperçu) ; dupliquer,
 supprimer, monter, descendre ; annuler, rétablir ; la source colorée à côté, synchronisée), Argile
 (sculpture 3D comme de la terre : gonfler, creuser, lisser, aplatir, pincer, tirer, avec symétrie ;
 la forme tourne au doigt, se subdivise pour les détails et s'enregistre en glTF binaire `.glb`),
