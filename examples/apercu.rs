@@ -75,6 +75,8 @@ fn main() {
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "applets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "applets-telephone", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lanceur", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lanceur-sombre", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "encre-portrait", w: 1200, h: 1920, dp: 1.5, end: true, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 2 },
     ];
     let mut egl = Egl::new(true).expect("EGL");
@@ -171,6 +173,12 @@ fn main() {
             }
             o.reglages.affichage = flow::orchestre::AffichageBatterie::LesDeux;
             app.applets.ouvert = Some(if s.name == "applets" { "orchestre" } else { "radio" });
+        }
+        if s.name.starts_with("lanceur") {
+            // Le lanceur ouvert, à gauche, à côté d'un texte ; en sombre, sur fond noir
+            app.surface.changer_vue(1, indice("texte").unwrap());
+            app.shell.start.open = true;
+            app.commun.theme.sombre = s.name == "lanceur-sombre";
         }
         if s.gestes > 0 {
             // Le dessin s'enregistre : pas dans le projet
@@ -359,11 +367,17 @@ fn main() {
                 ui.event(Event::Down { id: 0, x: 80.0, y: h - c - 0.375 * c }, t);
                 ui.event(Event::Up { id: 0 }, t + 0.02);
             }
-            if i == 30 && s.help {
-                // Vraie séquence tactile : appui sur la pastille d'aide, dans la barre du bas.
+            if i == 20 && s.help {
+                // Vraie séquence tactile : le logo ouvre le lanceur, puis son lien À propos
                 let c = 48.0 * s.dp;
-                ui.event(Event::Down { id: 0, x: 2.5 * c, y: h - c / 2.0 }, 0.0);
+                ui.event(Event::Down { id: 0, x: c / 2.0, y: h - c / 2.0 }, 0.0);
                 ui.event(Event::Up { id: 0 }, 0.05);
+            }
+            if i == 40 && s.help {
+                if let Some(z) = app.zones_liens.get(1).copied() {
+                    ui.event(Event::Down { id: 0, x: z.cx(), y: z.cy() }, 0.0);
+                    ui.event(Event::Up { id: 0 }, 0.05);
+                }
             }
             dl.clear();
             let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: s.dp, theme: Default::default() };

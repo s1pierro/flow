@@ -1,7 +1,9 @@
 //! L'application : l'espace de travail partagé en fenêtres, chacune portant une
 //! instance de contexte (`contexte`, `contextes`), le panneau latéral (paramètres de
-//! l'application, aide, à propos), et en bas de l'écran la barre de l'application :
-//! ses pastilles aplaties (le logo, les paramètres, l'aide), les applets des contextes
+//! l'application, aide, à propos), le lanceur à gauche (la liste des contextes, ouverte
+//! par le logo), et en bas de l'écran la barre de l'application :
+//! le logo (qui ouvre le lanceur, où sont aussi les liens des paramètres et de l'à
+//! propos), les applets des contextes
 //! (`applet` : radio, mixeur, énergie…) et l'heure.
 //! Le bas de l'écran est réservé aux gestes du système, mais les appuis y restent
 //! disponibles.
@@ -23,10 +25,10 @@ use crate::widgets::{Cx, Icon};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const PARAMETRES: Id = id("parametres");
-const HELP: Id = id("aide");
 const BARRE: Id = id("barre-application");
 const LOGO: Id = id("logo");
+const LANCEUR: Id = id("lanceur");
+const LANCEUR_LIGNE: Id = id("lanceur-ligne");
 
 /// Ce que le moteur de rendu doit savoir de l'image : l'espace de travail, et le
 /// fond de l'écran.
@@ -60,6 +62,60 @@ pub struct App {
     essai: Edition,
     /// Les applets de la barre, et le volet ouvert.
     pub applets: crate::applet::Applets,
+    /// Où était chaque contexte du lanceur à la dernière image (vide s'il est fermé).
+    pub zones_lanceur: Vec<Rect>,
+    /// Où étaient ses liens, Paramètres puis À propos.
+    pub zones_liens: Vec<Rect>,
+}
+
+/// Les liens du bas du lanceur : ils ouvrent le panneau de droite.
+const LIENS: [(&str, EndContent); 2] = [("Paramètres", EndContent::Parametres), ("À propos", EndContent::APropos)];
+
+/// La hauteur d'un lien du lanceur, et l'écart qui les sépare des bords.
+fn mesures_liens(cx: &Cx) -> (f32, f32) {
+    ((36.0 * cx.dp).round(), (10.0 * cx.dp).round())
+}
+
+/// La place que prennent les liens en bas du lanceur : empilés en paysage, sur une
+/// ligne en portrait (renvoie largeur et hauteur de leur zone).
+fn zone_liens(cx: &mut Cx, paysage: bool) -> (f32, f32) {
+    let (h, m) = mesures_liens(cx);
+    let largeurs: Vec<f32> = LIENS.iter().map(|(n, _)| cx.measure(n, 15.0) + 2.0 * m).collect();
+    if paysage {
+        (largeurs.iter().fold(0.0f32, |a, &b| a.max(b)) + 2.0 * m, LIENS.len() as f32 * h + 2.0 * m)
+    } else {
+        (largeurs.iter().sum::<f32>() + 2.0 * m, h + m)
+    }
+}
+
+/// La place des contextes dans le lanceur, depuis son coin haut gauche (sans le
+/// défilement), et la taille qu'il demande. Paysage : une liste, large de son plus
+/// long élément, marges comprises (renvoie la largeur). Portrait : des tuiles côte à
+/// côte, à la ligne quand la largeur `w` est pleine (renvoie la hauteur).
+fn places_lanceur(cx: &mut Cx, paysage: bool, w: f32) -> (Vec<Rect>, f32) {
+    let d = cx.dp;
+    let h = (cx.theme.ligne * d).round();
+    let (icone, marge, interieur) = ((24.0 * d).round(), (14.0 * d).round(), (12.0 * d).round());
+    let textes: Vec<f32> = GENRES.iter().map(|g| cx.measure(g.nom, 16.0)).collect();
+    if paysage {
+        let large = (marge + icone + marge + textes.iter().fold(0.0f32, |a, &b| a.max(b)) + marge).ceil();
+        let large = large.max(zone_liens(cx, true).0.ceil());
+        let haut = (8.0 * d).round();
+        ((0..GENRES.len()).map(|i| Rect::new(0.0, haut + i as f32 * h, large, h)).collect(), large)
+    } else {
+        let (ecart, bord) = ((8.0 * d).round(), (12.0 * d).round());
+        let (mut x, mut y, mut places) = (bord, bord, Vec::new());
+        for t in textes {
+            let tw = (interieur + icone + 10.0 * d + t + interieur + 4.0 * d).ceil().min(w - 2.0 * bord);
+            if x > bord && x + tw > w - bord {
+                x = bord;
+                y += h + ecart;
+            }
+            places.push(Rect::new(x, y, tw, h));
+            x += tw + ecart;
+        }
+        (places, y + h + bord + zone_liens(cx, false).1)
+    }
 }
 
 impl App {
@@ -74,6 +130,8 @@ impl App {
             onglet_parametres: 0,
             essai: Edition::default(),
             applets: crate::applet::Applets::default(),
+            zones_lanceur: Vec::new(),
+            zones_liens: Vec::new(),
         }
     }
 
@@ -273,6 +331,8 @@ impl App {
         if !flottant {
             self.frappes(cx, zone_clavier, dt);
         }
+        // Le lanceur prend la taille de sa liste
+        self.shell.start.voulu = Some(places_lanceur(cx, screen.w >= screen.h, screen.w).1);
         let l = self.shell.layout(screen, dt);
         let vues = contextes::vues();
         self.surface.accueil = contextes::indice(contextes::accueil::CLE).unwrap_or(0);
@@ -300,10 +360,20 @@ impl App {
             self.traiter(d);
         }
         self.surface.dessus(cx, &vues);
+        // Le lanceur ouvert : en paysage, il descend jusqu'en bas de l'écran et la barre
+        // se rabat à sa droite ; en portrait, il monte sous la barre et la pousse vers le
+        // haut
+        let barre = if l.landscape {
+            let lanceur = (l.start.right() - screen.x).clamp(0.0, barre.w);
+            Rect::new(barre.x + lanceur, barre.y, barre.w - lanceur, barre.h)
+        } else {
+            Rect::new(barre.x, l.start.y.min(barre.y), barre.w, barre.h)
+        };
         self.barre(cx, barre);
 
         self.end_panel(cx, &l);
-        self.handles(cx, &l, screen);
+        self.lanceur(cx, &l, hb);
+        self.handles(cx, &l, screen, hb);
         // Le volet d'un applet, par-dessus les fenêtres et les panneaux
         self.applets.volet(cx, &mut self.commun, haut);
         // Flottant, le clavier déclare ses touches en dernier : elles passent devant tout
@@ -327,16 +397,8 @@ impl App {
         cx.ui.region_add(BARRE, r, crate::ui::Sense::Sink);
         cx.dl.rrect(r, 0.0, col.surface);
         cx.dl.rrect(Rect::new(r.x, r.y, r.w, d.max(1.0)), 0.0, col.ligne);
-        let case = |i: f32| Rect::new(r.x + i * r.h, r.y, r.h, r.h);
-        let (end, content) = (self.shell.end.open, self.end_content);
-        if cx.pastille_plate(LOGO, case(0.0), Icon::Rustine, end && content == EndContent::APropos) {
-            self.toggle_end(EndContent::APropos);
-        }
-        if cx.pastille_plate(PARAMETRES, case(1.0), Icon::Sliders, end && content == EndContent::Parametres) {
-            self.toggle_end(EndContent::Parametres);
-        }
-        if cx.pastille_plate(HELP, case(2.0), Icon::Help, end && content == EndContent::Help) {
-            self.toggle_end(EndContent::Help);
+        if cx.pastille_plate(LOGO, Rect::new(r.x, r.y, r.h, r.h), Icon::Rustine, self.shell.start.open) {
+            self.shell.start.toggle();
         }
         // À droite : l'heure tout au bord, puis les applets (la batterie en est un :
         // Énergie, de l'Orchestre)
@@ -348,7 +410,7 @@ impl App {
             cx.text_at(x, r.cy(), &s, 15.0, col.texte);
             x -= cx.pad();
         }
-        let debut = r.x + 3.0 * r.h + cx.pad();
+        let debut = r.x + r.h + cx.pad();
         self.applets.barre(cx, &mut self.commun, Rect::new(debut, r.y, (x - debut).max(0.0), r.h));
     }
 
@@ -399,39 +461,156 @@ impl App {
                 cx.body_end(b, &mut c.scrolls);
             }
             EndContent::APropos => {
-                cx.tabs(id("onglets-a-propos"), tabs.x, tabs.y, &["Flow"], 0);
+                if cx.tabs(id("onglets-aide"), tabs.x, tabs.y, &["Aide", "À propos"], 1) == 0 {
+                    self.end_content = EndContent::Help;
+                }
                 let mut b = cx.body(id("corps-a-propos"), body, &c.scrolls);
                 cx.section(&mut b, &format!("FLOW {}", env!("CARGO_PKG_VERSION")));
                 cx.paragraph(&mut b, "Une application d'exploitation : des contextes (sous-applications) à disposer dans les fenêtres, pour composer son espace de travail.");
                 cx.paragraph(&mut b, &format!("{} contextes : {}.", GENRES.len(), GENRES.iter().map(|g| g.nom).collect::<Vec<_>>().join(", ")));
                 cx.paragraph(&mut b, "Réutilisable à des fins non commerciales, selon la licence PolyForm Noncommercial 1.0.0.");
                 cx.section(&mut b, "BARRE");
-                cx.paragraph(&mut b, "Le centre du bas de l'écran est réservé aux gestes du système, mais les appuis y restent libres : la barre de l'application y range ses pastilles, et les applets des contextes : la radio, le mixeur, l'avancement d'une copie de fichiers… Toucher un applet ouvre son volet ; les applets montrés se choisissent dans les paramètres (Interface, section Barre).");
+                cx.paragraph(&mut b, "Le centre du bas de l'écran est réservé aux gestes du système, mais les appuis y restent libres : la barre de l'application y range le logo (il ouvre la liste des contextes, avec en bas les liens Paramètres et À propos), et les applets des contextes : la radio, le mixeur, l'avancement d'une copie de fichiers… Toucher un applet ouvre son volet ; les applets montrés se choisissent dans les paramètres (Interface, section Barre).");
                 cx.body_end(b, &mut c.scrolls);
             }
             EndContent::Help => {
-                cx.tabs(id("onglets-aide"), tabs.x, tabs.y, &["Aide"], 0);
+                if cx.tabs(id("onglets-aide"), tabs.x, tabs.y, &["Aide", "À propos"], 0) == 1 {
+                    self.end_content = EndContent::APropos;
+                }
                 let mut b = cx.body(id("corps-aide"), body, &c.scrolls);
                 cx.section(&mut b, "FENÊTRES");
                 cx.paragraph(&mut b, "Touchez le titre d'une fenêtre pour choisir son contexte, la partager en deux ou la fermer.");
                 cx.section(&mut b, "PANNEAU");
-                cx.paragraph(&mut b, "Les pastilles de la barre du bas ouvrent ce panneau : à propos, paramètres de l'application, aide. L'espace de travail s'adapte à la place restante.");
+                cx.paragraph(&mut b, "Le logo de la barre du bas ouvre la liste des contextes (à gauche en paysage, sous la barre en portrait) : en toucher un l'ajoute à l'espace de travail, à gauche en paysage, en bas en portrait, et referme la liste.");
+                cx.paragraph(&mut b, "Les liens Paramètres et À propos, en bas de la liste des contextes, ouvrent ce panneau. L'espace de travail s'adapte à la place restante.");
                 cx.paragraph(&mut b, "Glissez la frontière du panneau pour le redimensionner ; un double appui rétablit sa taille.");
                 cx.body_end(b, &mut c.scrolls);
             }
         }
     }
 
+    /// Le lanceur, à gauche, de haut en bas de l'écran : la liste des contextes, sur un fond noir (thème sombre) ou
+    /// blanc. Toucher un contexte l'ajoute à l'espace et referme le lanceur.
+    fn lanceur(&mut self, cx: &mut Cx, l: &Layout, hb: f32) {
+        self.zones_lanceur.clear();
+        if self.shell.start.anim == 0.0 {
+            return;
+        }
+        // En paysage, sur toute la hauteur, à côté de la barre rabattue ; en portrait,
+        // sous la barre poussée vers le haut
+        let r = if l.landscape { Rect::new(l.start.x, l.start.y, l.start.w, l.start.h + hb) } else { Rect::new(l.start.x, l.start.y + hb, l.start.w, l.start.h) };
+        let (d, col) = (cx.dp, cx.couleurs());
+        cx.ui.region_add(LANCEUR, r, crate::ui::Sense::Sink);
+        cx.dl.rrect(r, 0.0, if cx.theme.sombre { [0, 0, 0, 255] } else { [255, 255, 255, 255] });
+        if l.landscape {
+            cx.dl.rrect(Rect::new(r.right() - d.max(1.0), r.y, d.max(1.0), r.h), 0.0, col.ligne);
+        }
+        // En bas, les liens : à droite, empilés en paysage, sur une ligne en portrait
+        let (_, hz) = zone_liens(cx, l.landscape);
+        let (hl, m) = mesures_liens(cx);
+        let zone = Rect::new(r.x, (r.bottom() - hz).max(r.y), r.w, hz.min(r.h));
+        self.zones_liens.clear();
+        let mut lien = None;
+        let mut x = zone.right() - m;
+        for (i, (nom, contenu)) in LIENS.iter().enumerate().rev() {
+            let w = cx.measure(nom, 15.0) + 2.0 * m;
+            let z = if l.landscape {
+                Rect::new(zone.right() - m - w, zone.y + m + i as f32 * hl, w, hl)
+            } else {
+                x -= w;
+                Rect::new(x, zone.y, w, hl)
+            };
+            let lid = sub_id(id("lanceur-lien"), i);
+            if cx.ui.click(lid, z, None) {
+                lien = Some(*contenu);
+            }
+            let actif = self.shell.end.open && (self.end_content == *contenu || (*contenu == EndContent::APropos && self.end_content == EndContent::Help));
+            if cx.ui.pressed(lid) || actif {
+                cx.dl.rrect(z, cx.theme.rayon(hl) * 0.5, col.puce);
+            }
+            cx.text_right(z.right() - m, z.cy(), nom, 15.0, col.accent);
+            self.zones_liens.insert(0, z);
+        }
+        let liste = Rect::new(r.x, r.y, r.w, (zone.y - r.y).max(0.0));
+        let c = &mut self.commun;
+        let corps = id("corps-lanceur");
+        let (places, _) = places_lanceur(cx, l.landscape, r.w);
+        let mut b = cx.body(corps, liste, &c.scrolls);
+        // Le haut du contenu, défilement compris
+        let haut = b.y - (8.0 * d).round();
+        let mut choisi = None;
+        let s = (24.0 * d).round();
+        for (i, (g, p)) in GENRES.iter().zip(places).enumerate() {
+            let lid = sub_id(LANCEUR_LIGNE, i);
+            let presse = cx.ui.pressed(lid);
+            let (z, x) = if l.landscape {
+                // Une ligne bord à bord ; la marge avant l'icône
+                let z = Rect::new(r.x, haut + p.y, r.w, p.h);
+                if presse {
+                    cx.dl.rrect(z.inset(2.0 * d), cx.theme.rayon(z.h) * 0.45, col.puce);
+                }
+                (z, z.x + (14.0 * d).round())
+            } else {
+                // Une tuile
+                let z = Rect::new(r.x + p.x, haut + p.y, p.w, p.h);
+                cx.dl.rrect(z, cx.theme.rayon(z.h) * 0.6, if presse { col.ligne } else { col.puce });
+                (z, z.x + (12.0 * d).round())
+            };
+            if cx.ui.click(lid, z, Some(corps)) {
+                choisi = Some(i as u32);
+            }
+            self.zones_lanceur.push(z);
+            cx.icon(Rect::new(x, z.cy() - s / 2.0, s, s), g.icone, col.accent);
+            cx.clip(Some(z.intersect(&liste)));
+            cx.text_at(x + s + 10.0 * d, z.cy(), g.nom, 16.0, col.texte);
+            cx.clip(Some(liste));
+        }
+        // La hauteur du contenu, pour le défilement
+        b.y = self.zones_lanceur.last().map_or(haut, |z| z.bottom());
+        cx.body_end(b, &mut c.scrolls);
+        if let Some(vue) = choisi {
+            self.lancer(vue, l.landscape);
+        }
+        // Un lien ouvre son panneau (ou le referme) ; le lanceur se referme
+        if let Some(contenu) = lien {
+            self.shell.start.open = false;
+            let deja = self.shell.end.open && (self.end_content == contenu || (contenu == EndContent::APropos && self.end_content == EndContent::Help));
+            if deja {
+                self.shell.end.open = false;
+            } else {
+                self.toggle_end(contenu);
+            }
+        }
+    }
+
+    /// Ajoute le contexte `vue` à l'espace de travail : à la place d'une fenêtre
+    /// d'Accueil s'il y en a une, sinon dans une fenêtre insérée à gauche (paysage) ou
+    /// en bas (portrait). Le lanceur se referme en même temps.
+    fn lancer(&mut self, vue: u32, paysage: bool) {
+        self.shell.start.open = false;
+        let accueil = contextes::indice(contextes::accueil::CLE);
+        if let Some(f) = self.surface.placees().iter().find(|p| Some(p.vue) == accueil && Some(vue) != accueil).map(|p| p.id) {
+            self.surface.changer_vue(f, vue);
+        } else if paysage {
+            self.surface.inserer(crate::surface::Sens::Colonnes, true, vue);
+        } else {
+            self.surface.inserer(crate::surface::Sens::Lignes, false, vue);
+        }
+    }
+
     /// Poignées de redimensionnement, sur la frontière de chaque panneau ouvert.
-    fn handles(&mut self, cx: &mut Cx, l: &Layout, screen: Rect) {
+    fn handles(&mut self, cx: &mut Cx, l: &Layout, screen: Rect, hb: f32) {
         let d = cx.dp;
         for (side, key, shown) in [(Side::Start, id("poignee-debut"), self.shell.start.anim), (Side::End, id("poignee-fin"), self.shell.end.anim)] {
             if shown < 1.0 {
                 continue;
             }
-            let band = self.shell.handle(l, side);
+            // En portrait, le lanceur est sous la barre : sa poignée aussi
+            let decale = if side == Side::Start && !l.landscape { hb } else { 0.0 };
+            let mut band = self.shell.handle(l, side);
+            band.y += decale;
             if let Some(drag) = cx.ui.drag(key, band) {
-                self.shell.resize(side, screen, drag.x, drag.y);
+                self.shell.resize(side, screen, drag.x, drag.y - decale);
             }
             if cx.ui.double_tapped(key) {
                 self.shell.reset_size(side, screen);
@@ -463,18 +642,19 @@ mod tests {
         ui: Ui,
         text: Text,
         dl: DrawList,
+        ecran: Rect,
     }
 
     impl Rig {
         fn new() -> Rig {
-            let mut r = Rig { app: App::new(1.5), ui: Ui::new(1.5), text: Text::new(), dl: DrawList::default() };
+            let mut r = Rig { app: App::new(1.5), ui: Ui::new(1.5), text: Text::new(), dl: DrawList::default(), ecran: SCREEN };
             r.frames(1);
             r
         }
         fn frame(&mut self, dt: f32) -> Scene {
             self.dl.clear();
             let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.5, theme: Default::default() };
-            let s = self.app.frame(&mut cx, SCREEN, dt);
+            let s = self.app.frame(&mut cx, self.ecran, dt);
             self.ui.end_frame();
             s
         }
@@ -496,9 +676,19 @@ mod tests {
         contextes::indice(cle).unwrap()
     }
 
-    // Centre de la n-ième pastille de la barre du bas : 0 le logo, 1 les paramètres, 2 l'aide.
+    // Centre de la n-ième pastille de la barre du bas : 0 le logo.
     fn pastille(n: f32) -> (f32, f32) {
         (72.0 * (n + 0.5), 1200.0 - 36.0)
+    }
+
+    // Ouvre le lanceur par le logo, et touche son lien `n` : 0 Paramètres, 1 À propos.
+    fn lien(r: &mut Rig, n: usize) {
+        let (x, _) = pastille(0.0);
+        r.tap(x, r.ecran.h - 36.0);
+        r.frames(60);
+        let z = r.app.zones_liens[n];
+        r.tap(z.cx(), z.cy());
+        assert!(!r.app.shell.start.open, "le lien referme le lanceur");
     }
 
     #[test]
@@ -506,34 +696,127 @@ mod tests {
         let mut r = Rig::new();
         r.app.commun.theme.commande = 60.0;
         r.frames(1);
-        // Les pastilles font 60 dp : la barre est plus haute, celle des paramètres plus loin
-        r.tap(90.0 * 1.5, 1200.0 - 45.0);
-        assert!(r.app.shell.end.open && r.app.end_content == EndContent::Parametres);
+        // La pastille du logo fait 60 dp : la barre est plus haute
+        r.tap(45.0 * 1.5, 1200.0 - 45.0);
+        assert!(r.app.shell.start.open);
+        assert_eq!(r.frames(60).workspace.bottom(), 1200.0 - 90.0);
     }
 
     #[test]
-    fn la_pastille_des_parametres_deploie_le_panneau_et_l_espace_s_adapte() {
+    fn le_lien_des_parametres_deploie_le_panneau_et_l_espace_s_adapte() {
         let mut r = Rig::new();
-        let (x, y) = pastille(1.0);
-        r.tap(x, y);
+        r.frames(1);
+        // Les liens, en bas à droite du lanceur, empilés
+        let (x, _) = pastille(0.0);
+        r.tap(x, 1200.0 - 36.0);
+        r.frames(60);
+        let (a, b) = (r.app.zones_liens[0], r.app.zones_liens[1]);
+        let lanceur = r.app.zones_lanceur[0].right();
+        assert!(a.bottom() <= b.y && b.bottom() > 1100.0 && (a.right() - b.right()).abs() < 0.5 && a.right() < lanceur && a.right() > lanceur - 30.0, "{a:?} {b:?}");
+        r.tap(x, 1200.0 - 36.0);
+        r.frames(60);
+        lien(&mut r, 0);
         assert!(r.app.shell.end.open && r.app.end_content == EndContent::Parametres);
         let s = r.frames(60);
         assert_eq!(s.workspace.w, 1920.0 - 576.0);
         assert!(!r.app.animating());
-        r.tap(x, y); // nouvel appui : referme
+        lien(&mut r, 0); // nouvel appui : referme
         assert!(!r.app.shell.end.open);
         assert_eq!(r.frames(60).workspace, Rect::new(0., 0., 1920., 1200. - 72.));
     }
 
     #[test]
-    fn la_pastille_d_aide_remplace_le_contenu_sans_fermer() {
+    fn en_portrait_les_liens_sont_sur_une_ligne_sous_les_tuiles() {
         let mut r = Rig::new();
-        let (x, y) = pastille(1.0);
-        r.tap(x, y);
+        r.ecran = Rect::new(0., 0., 1200., 1920.);
+        r.frames(1);
+        let (x, _) = pastille(0.0);
+        r.tap(x, 1920.0 - 36.0);
         r.frames(60);
-        let (x, y) = pastille(2.0);
-        r.tap(x, y);
-        assert!(r.app.shell.end.open && r.app.end_content == EndContent::Help);
+        let (a, b) = (r.app.zones_liens[0], r.app.zones_liens[1]);
+        let tuiles = r.app.zones_lanceur.iter().fold(0.0f32, |m, z| m.max(z.bottom()));
+        assert!(a.y == b.y && a.right() <= b.x && b.right() > 1150.0 && a.y >= tuiles && b.bottom() <= 1920.0, "{a:?} {b:?} {tuiles}");
+    }
+
+    // Ouvre le lanceur par le logo, et touche la ligne du contexte `cle`.
+    fn lancer(r: &mut Rig, cle: &str) {
+        let (x, _) = pastille(0.0);
+        r.tap(x, r.ecran.h - 36.0);
+        assert!(r.app.shell.start.open);
+        let s = r.frames(60);
+        let paysage = r.ecran.w >= r.ecran.h;
+        let zones = r.app.zones_lanceur.clone();
+        assert_eq!(zones.len(), GENRES.len());
+        // Paysage : le lanceur, large de sa liste, pousse l'espace et la barre se rabat à
+        // sa droite ; portrait : des tuiles sous la barre, qui monte d'autant
+        let logo = if paysage {
+            assert!(s.workspace.x > 150.0 && s.workspace.x < 400.0, "{:?}", s.workspace);
+            assert!(zones.iter().all(|z| z.x == 0.0 && (z.right() - s.workspace.x).abs() < 1.0));
+            (s.workspace.x + x, r.ecran.h - 36.0)
+        } else {
+            let bas = zones.iter().fold(0.0f32, |a, z| a.max(z.bottom()));
+            assert!(zones.iter().any(|z| z.x > 0.0 && z.y == zones[0].y), "plusieurs tuiles par ligne");
+            assert!((r.ecran.h - bas - 18.0 - 69.0).abs() < 1.0, "la hauteur suit les tuiles et la ligne des liens");
+            (x, zones[0].y - 18.0 - 36.0)
+        };
+        r.tap(logo.0, logo.1);
+        assert!(!r.app.shell.start.open, "le logo déplacé referme le lanceur");
+        r.frames(60);
+        r.tap(x, r.ecran.h - 36.0);
+        r.frames(60);
+        let z = r.app.zones_lanceur[vue(cle) as usize];
+        r.tap(z.cx(), z.cy());
+        assert!(!r.app.shell.start.open, "le lanceur se referme");
+        r.frames(60);
+    }
+
+    #[test]
+    fn le_lanceur_insere_a_gauche_en_paysage() {
+        let mut r = Rig::new();
+        r.app.surface = Surface::new(vue("texte"));
+        r.frames(1);
+        lancer(&mut r, "fichiers");
+        let p = r.app.surface.placees().to_vec();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0].vue, vue("fichiers"));
+        assert!(p[0].cadre.x < p[1].cadre.x && (p[0].cadre.w - p[1].cadre.w).abs() < 2.0);
+        // Une troisième prend un tiers
+        lancer(&mut r, "radio");
+        let p = r.app.surface.placees().to_vec();
+        assert_eq!((p.len(), p[0].vue), (3, vue("radio")));
+        assert!((p[0].cadre.w - 1920.0 / 3.0).abs() < 2.0, "{:?}", p[0].cadre);
+    }
+
+    #[test]
+    fn le_lanceur_insere_en_bas_en_portrait() {
+        let mut r = Rig::new();
+        r.ecran = Rect::new(0., 0., 1200., 1920.);
+        r.app.surface = Surface::new(vue("texte"));
+        r.frames(1);
+        lancer(&mut r, "orchestre");
+        let p = r.app.surface.placees().to_vec();
+        assert_eq!((p.len(), p[1].vue), (2, vue("orchestre")));
+        assert!(p[1].cadre.y > p[0].cadre.y && p[1].cadre.x == p[0].cadre.x);
+    }
+
+    #[test]
+    fn le_lanceur_remplace_l_accueil() {
+        let mut r = Rig::new();
+        r.app.surface = Surface::new(vue(contextes::accueil::CLE));
+        r.frames(1);
+        lancer(&mut r, "texte");
+        let p = r.app.surface.placees().to_vec();
+        assert_eq!((p.len(), p[0].vue), (1, vue("texte")));
+        assert_eq!(r.app.fenetres[&p[0].id].cle(), "texte");
+    }
+
+    #[test]
+    fn le_lien_a_propos_remplace_le_contenu_sans_fermer() {
+        let mut r = Rig::new();
+        lien(&mut r, 0);
+        r.frames(60);
+        lien(&mut r, 1);
+        assert!(r.app.shell.end.open && r.app.end_content == EndContent::APropos);
     }
 
     #[test]

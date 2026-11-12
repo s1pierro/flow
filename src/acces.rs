@@ -394,6 +394,52 @@ pub fn service(etat: i32, titre: &str, texte: &str) {
     }
 }
 
+/// Appelle une méthode statique de `fr.s1pierro.flow.Installation` : elle reçoit le
+/// contexte de l'application et, s'il y en a un, le texte `arg`, et rend un texte.
+/// Rien hors d'Android, si la méthode échoue ou rend `null`. Depuis n'importe quel
+/// thread. La classe est celle de l'application : on la charge par son chargeur (le
+/// `FindClass` d'un thread natif ne voit que les classes du système).
+pub fn installation(methode: &str, arg: Option<&str>) -> Option<String> {
+    let contexte = CONTEXTE.load(std::sync::atomic::Ordering::Relaxed) as Obj;
+    if contexte.is_null() {
+        return None;
+    }
+    unsafe {
+        let vm = vm();
+        let deja = deja_attache(vm);
+        let env = attacher(vm)?;
+        let j = Jni { env };
+        let push: unsafe extern "C" fn(*mut c_void, i32) -> i32 = j.f(PUSH_LOCAL_FRAME);
+        if push(env, 16) != 0 {
+            j.exception();
+            return None;
+        }
+        let r = (|| {
+            let kc = j.classe_de(contexte);
+            let chargeur = j.objet(contexte, j.methode(kc, "getClassLoader", "()Ljava/lang/ClassLoader;", false)?, &[])?;
+            let charger = j.methode(j.classe_de(chargeur), "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", false)?;
+            let k = j.objet(chargeur, charger, &[j.texte("fr.s1pierro.flow.Installation")? as Val])?;
+            let s = match arg {
+                Some(a) => {
+                    let m = j.methode(k, methode, "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;", true)?;
+                    j.objet_statique(k, m, &[contexte as Val, j.texte16(a)? as Val])?
+                }
+                None => {
+                    let m = j.methode(k, methode, "(Landroid/content/Context;)Ljava/lang/String;", true)?;
+                    j.objet_statique(k, m, &[contexte as Val])?
+                }
+            };
+            j.lire_texte16(s)
+        })();
+        let pop: unsafe extern "C" fn(*mut c_void, Obj) -> Obj = j.f(POP_LOCAL_FRAME);
+        pop(env, std::ptr::null_mut());
+        if !deja {
+            detacher(vm);
+        }
+        r
+    }
+}
+
 /// Le texte du presse-papier d'Android (son premier élément, converti en texte), ou
 /// rien s'il est vide, illisible, ou hors d'Android. Android 10 et plus ne le donnent
 /// qu'à l'application au premier plan : c'est le cas quand on touche le clavier.

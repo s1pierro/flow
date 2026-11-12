@@ -30,6 +30,7 @@ use crate::draw::Rect;
 use crate::clavier::{self, Edition, Frappe};
 use crate::explorateur::{self, Dossier, Famille, Nature, Tri};
 use crate::operations::{self, Sorte};
+use crate::paquets;
 use crate::radio;
 use crate::surface::{FenetreId, Placee};
 use crate::ui::{id, sub_id, Id, Sense};
@@ -95,6 +96,8 @@ enum Dialogue {
     Renommer(String),
     /// Confirmer la suppression de ces entrées.
     Supprimer(Vec<String>),
+    /// Un `.apk` touché : l'installer, le mettre à jour, ouvrir l'application.
+    Application { chemin: PathBuf, apk: Result<paquets::Apk, String> },
 }
 
 /// Une commande de la barre d'outils.
@@ -201,7 +204,7 @@ impl Fichiers {
             _ => Edition::default(),
         };
         self.erreur = None;
-        if !matches!(d, Dialogue::Supprimer(_)) {
+        if matches!(d, Dialogue::Creer | Dialogue::Renommer(_)) {
             c.clavier.ouvrir(sub_id(NOM, k));
         }
         self.dialogue = Some(d);
@@ -237,7 +240,7 @@ impl Fichiers {
                     return true;
                 }
             }
-            None => return true,
+            Some(Dialogue::Application { .. }) | None => return true,
         };
         match r {
             Ok(m) => {
@@ -325,7 +328,8 @@ impl Contexte for Fichiers {
 
     /// Redessiner pendant une opération, jusqu'à son bilan.
     fn anime(&self, c: &Commun) -> bool {
-        c.fichiers.travail.is_some()
+        // Une installation se suit sans attendre d'événement
+        c.fichiers.travail.is_some() || matches!(self.dialogue, Some(Dialogue::Application { .. }))
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
@@ -613,6 +617,12 @@ impl Contexte for Fichiers {
                         etat.mettre("document", chemin.display());
                         c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::svg::CLE, etat });
                     }
+                    _ if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("apk")) => {
+                        // Une application : ce qu'elle est, et l'installer ou l'ouvrir
+                        paquets::oublier();
+                        let apk = paquets::lire(&chemin);
+                        self.dialoguer(Dialogue::Application { chemin, apk }, k, c);
+                    }
                     _ if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("glb")) => {
                         let mut etat = Etat::default();
                         etat.mettre("document", chemin.display());
@@ -658,6 +668,51 @@ impl Contexte for Fichiers {
 }
 
 impl Fichiers {
+    /// Le contenu de la boîte d'une application : son nom, ses versions, où en est
+    /// l'installation, et les boutons (0 fermer, 1 installer, 2 ouvrir, 3 autoriser).
+    fn dialogue_application(&mut self, chemin: &std::path::Path, apk: &Result<paquets::Apk, String>) -> (String, Vec<String>, Vec<(&'static str, u8)>) {
+        let a = match apk {
+            Ok(a) => a,
+            Err(e) => return ("Application".into(), vec![e.clone()], vec![("Fermer", 0)]),
+        };
+        let suivi = paquets::suivi();
+        // Installée : on relit l'application, pour sa nouvelle version
+        if suivi == paquets::Suivi::Reussie && a.installee.as_ref().map(|i| i.1) != Some(a.code) {
+            if let Ok(nouveau) = paquets::lire(chemin) {
+                self.dialogue = Some(Dialogue::Application { chemin: chemin.to_path_buf(), apk: Ok(nouveau) });
+            }
+        }
+        let mut q = vec![a.paquet.clone(), format!("Ce fichier : version {} ({})", a.version, a.code)];
+        q.push(match &a.installee {
+            Some((v, c)) => format!("Installée : version {v} ({c})"),
+            None => "Pas encore installée".into(),
+        });
+        let action = a.action();
+        let autorisee = paquets::autorisee();
+        match &suivi {
+            paquets::Suivi::Copie(f) => q.push(format!("Copie vers l'installateur… {:.0} %", f * 100.0)),
+            paquets::Suivi::Confirmation => q.push("Confirmez dans la fenêtre d'Android.".into()),
+            paquets::Suivi::Reussie => q.push("Installation réussie.".into()),
+            paquets::Suivi::Annulee => q.push("Installation annulée.".into()),
+            paquets::Suivi::Echec(m) => self.erreur = Some(if m.is_empty() { "L'installation a échoué.".into() } else { format!("Échec : {m}") }),
+            paquets::Suivi::Rien if action == paquets::Action::PlusAncienne => q.push("Plus ancienne que l'installée : Android la refusera.".into()),
+            paquets::Suivi::Rien if !autorisee => q.push("Autorisez Flow à installer des applications.".into()),
+            paquets::Suivi::Rien => {}
+        }
+        let mut b = vec![("Fermer", 0)];
+        if a.installee.is_some() && !suivi.en_cours() {
+            b.push(("Ouvrir", 2));
+        }
+        if !suivi.en_cours() && suivi != paquets::Suivi::Reussie {
+            match action.bouton() {
+                Some(_) if !autorisee => b.push(("Autoriser", 3)),
+                Some(nom) => b.push((nom, 1)),
+                None => {}
+            }
+        }
+        (a.nom.clone(), q, b)
+    }
+
     /// La boîte de dialogue : un voile sur la fenêtre, une carte en haut (le clavier
     /// prend le bas), le nom à saisir ou la question, et les boutons.
     fn dessiner_dialogue(&mut self, cx: &mut Cx, c: &mut Commun, p: &Placee, dl: &Dialogue) {
@@ -671,6 +726,7 @@ impl Fichiers {
         let w = (r.w - 2.0 * 12.0 * d).min(440.0 * d).max(0.0);
         let x = r.x + (r.w - w) / 2.0;
         let (titre, question, boutons): (String, Vec<String>, Vec<(&str, u8)>) = match dl {
+            Dialogue::Application { chemin, apk } => self.dialogue_application(chemin, apk),
             Dialogue::Creer => ("Nouveau".into(), Vec::new(), vec![("Annuler", 0), ("Fichier", 1), ("Dossier", 2)]),
             Dialogue::Renommer(n) => (format!("Renommer « {} »", n), Vec::new(), vec![("Annuler", 0), ("Renommer", 1)]),
             Dialogue::Supprimer(noms) => {
@@ -684,7 +740,7 @@ impl Fichiers {
                 ("Supprimer ?".into(), q, vec![("Annuler", 0), ("Supprimer", 1)])
             }
         };
-        let saisie = !matches!(dl, Dialogue::Supprimer(_));
+        let saisie = matches!(dl, Dialogue::Creer | Dialogue::Renommer(_));
         let lh = 20.0 * d * cx.theme.texte;
         let h = pad + 26.0 * d * cx.theme.texte + if saisie { hc + 2.0 * gap } else { 0.0 } + question.len() as f32 * lh + if self.erreur.is_some() { lh } else { 0.0 } + gap + hc + pad;
         let carte = Rect::new(x, r.y + (r.h * 0.12).min(60.0 * d), w, h);
@@ -729,6 +785,25 @@ impl Fichiers {
         cx.clip(None);
         match (choisi, dl) {
             (Some(0), _) => self.fermer_dialogue(k, c),
+            (Some(code), Dialogue::Application { chemin, apk }) => {
+                self.erreur = None;
+                match (code, apk) {
+                    (1, _) => {
+                        if let Err(e) = paquets::installer(chemin) {
+                            self.erreur = Some(e);
+                        }
+                    }
+                    (2, Ok(a)) => {
+                        if paquets::lancer(&a.paquet) {
+                            self.fermer_dialogue(k, c);
+                        } else {
+                            self.erreur = Some("Cette application n'a pas d'écran à ouvrir.".into());
+                        }
+                    }
+                    (3, _) => paquets::autoriser(),
+                    _ => {}
+                }
+            }
             (Some(code), _) => {
                 // Créer : 1 fichier, 2 dossier ; sinon l'action
                 if self.conclure(code == 2, c) {
@@ -743,6 +818,15 @@ impl Fichiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn la_boite_d_une_application_hors_d_android() {
+        let mut f = Fichiers::default();
+        let apk = paquets::lire(std::path::Path::new("/x/flow.apk"));
+        let (titre, q, b) = f.dialogue_application(std::path::Path::new("/x/flow.apk"), &apk);
+        assert_eq!((titre.as_str(), b), ("Application", vec![("Fermer", 0)]));
+        assert_eq!(q.len(), 1, "le message d'erreur seul");
+    }
 
     #[test]
     fn les_commandes_se_rangent_en_lignes() {

@@ -1,7 +1,9 @@
 //! Coque de l'application : espace de travail et panneaux latéraux, repris de
-//! `PanneauOnglets` de GDA. En paysage, panneau de début à gauche et de fin à
-//! droite ; en portrait, en haut et en bas. L'espace de travail se réduit d'autant,
-//! et garde toujours au moins 30 % de l'écran.
+//! `PanneauOnglets` de GDA. Le panneau de début (le lanceur de contextes) est
+//! à gauche en paysage, en bas en portrait (sous la barre de l'application, qu'il
+//! pousse vers le haut) ; celui de fin est à droite en paysage, en bas en portrait
+//! (au-dessus du lanceur).
+//! L'espace de travail se réduit d'autant, et garde toujours au moins 30 % de l'écran.
 
 use crate::draw::Rect;
 
@@ -18,6 +20,8 @@ pub struct Panel {
     pub anim: f32,
     /// Taille choisie à la poignée : [paysage, portrait].
     custom: [Option<f32>; 2],
+    /// La taille que demande le contenu (le lanceur : sa liste), à défaut de poignée.
+    pub voulu: Option<f32>,
 }
 
 impl Panel {
@@ -68,14 +72,14 @@ impl Shell {
     fn sizes(&self, screen: Rect) -> (f32, f32) {
         let landscape = screen.w >= screen.h;
         let (avail, def_start, def_end) = if landscape {
-            (screen.w, (288.0 * self.dp).min(0.30 * screen.w), (384.0 * self.dp).min(0.40 * screen.w))
+            (screen.w, (240.0 * self.dp).min(0.30 * screen.w), (384.0 * self.dp).min(0.40 * screen.w))
         } else {
-            (screen.h, (320.0 * self.dp).min(0.32 * screen.h), (448.0 * self.dp).min(0.45 * screen.h))
+            (screen.h, (360.0 * self.dp).min(0.40 * screen.h), (448.0 * self.dp).min(0.45 * screen.h))
         };
         let both = self.start.open && self.end.open;
-        let (max_start, max_end) = if both { (0.28, 0.42) } else { (0.70, 0.70) };
         let o = if landscape { 0 } else { 1 };
-        (self.start.custom[o].unwrap_or(def_start).min(max_start * avail), self.end.custom[o].unwrap_or(def_end).min(max_end * avail))
+        let (max_start, max_end) = if both && landscape { (0.28, 0.42) } else if both { (0.30, 0.40) } else { (0.70, 0.70) };
+        (self.start.custom[o].or(self.start.voulu).unwrap_or(def_start).min(max_start * avail), self.end.custom[o].unwrap_or(def_end).min(max_end * avail))
     }
 
     /// Avance les animations de `dt` secondes et place chaque zone.
@@ -93,9 +97,9 @@ impl Shell {
             }
         } else {
             Layout {
-                workspace: Rect::new(screen.x, screen.y + shown_s, screen.w, screen.h - shown_s - shown_e),
-                start: Rect::new(screen.x, screen.y + shown_s - s, screen.w, s),
-                end: Rect::new(screen.x, screen.bottom() - shown_e, screen.w, e),
+                workspace: Rect::new(screen.x, screen.y, screen.w, screen.h - shown_s - shown_e),
+                start: Rect::new(screen.x, screen.bottom() - shown_s, screen.w, s),
+                end: Rect::new(screen.x, screen.bottom() - shown_s - shown_e, screen.w, e),
                 landscape: false,
             }
         }
@@ -108,7 +112,7 @@ impl Shell {
         match (side, l.landscape) {
             (Side::Start, true) => Rect::new(w.x - band / 2.0, w.y, band, w.h),
             (Side::End, true) => Rect::new(w.right() - band / 2.0, w.y, band, w.h),
-            (Side::Start, false) => Rect::new(w.x, w.y - band / 2.0, w.w, band),
+            (Side::Start, false) => Rect::new(w.x, l.start.y - band / 2.0, w.w, band),
             (Side::End, false) => Rect::new(w.x, w.bottom() - band / 2.0, w.w, band),
         }
     }
@@ -119,7 +123,7 @@ impl Shell {
         let size = match (side, landscape) {
             (Side::Start, true) => x - screen.x,
             (Side::End, true) => screen.right() - x,
-            (Side::Start, false) => y - screen.y,
+            (Side::Start, false) => screen.bottom() - y,
             (Side::End, false) => screen.bottom() - y,
         };
         let panel = if side == Side::Start { &mut self.start } else { &mut self.end };
@@ -169,7 +173,8 @@ mod tests {
             if x {
                 assert!((l.start.right() - w.x).abs() < 0.01 && (w.right() - l.end.x).abs() < 0.01);
             } else {
-                assert!((l.start.bottom() - w.y).abs() < 0.01 && (w.bottom() - l.end.y).abs() < 0.01);
+                // De haut en bas : l'espace, le panneau de fin, le lanceur
+                assert!((w.bottom() - l.end.y).abs() < 0.01 && (l.end.bottom() - l.start.y).abs() < 0.01 && (l.start.bottom() - screen.bottom()).abs() < 0.01, "{l:?}");
             }
         }
     }

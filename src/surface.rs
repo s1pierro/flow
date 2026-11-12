@@ -308,6 +308,29 @@ impl Surface {
         self.partager_ou(f, sens, 0.5, true, Some(vue))
     }
 
+    /// Insère une fenêtre neuve montrant `vue` sur un bord de toute la surface : à
+    /// gauche (`Colonnes`, `debut`) ou en bas (`Lignes`, pas `debut`)… Elle prend une
+    /// part égale à celle des fenêtres déjà rangées dans ce sens au premier niveau
+    /// (`Changement::Nouvelle`). Renvoie son identifiant.
+    pub fn inserer(&mut self, sens: Sens, debut: bool, vue: u32) -> FenetreId {
+        fn rangs(n: &Noeud, sens: Sens) -> usize {
+            match n {
+                Noeud::Partage { sens: s, a, b, .. } if *s == sens => rangs(a, sens) + rangs(b, sens),
+                _ => 1,
+            }
+        }
+        let nouvelle = self.suivant;
+        let part = 1.0 / (rangs(&self.racine, sens) as f32 + 1.0);
+        let ancienne = std::mem::replace(&mut self.racine, Noeud::Fenetre { id: 0, vue: 0 });
+        let nv = Box::new(Noeud::Fenetre { id: nouvelle, vue });
+        let (a, b, ratio) = if debut { (nv, Box::new(ancienne), part) } else { (Box::new(ancienne), nv, 1.0 - part) };
+        self.racine = Noeud::Partage { sens, ratio: ratio.clamp(MIN, MAX), a, b };
+        self.suivant += 1;
+        self.changements.push(Changement::Nouvelle(nouvelle));
+        self.modifiee = true;
+        nouvelle
+    }
+
     fn partager_ou(&mut self, f: FenetreId, sens: Sens, ratio: f32, apres: bool, autre: Option<u32>) -> Option<FenetreId> {
         let nouvelle = self.suivant;
         fn remplacer(n: &mut Noeud, f: FenetreId, sens: Sens, ratio: f32, nouvelle: FenetreId, apres: bool, autre: Option<u32>) -> bool {

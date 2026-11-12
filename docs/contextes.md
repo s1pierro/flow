@@ -7,8 +7,19 @@ choisissant le contexte de chacune. Ce guide explique comment ajouter un context
 par exemple un éditeur de texte ou de SVG.
 
 Les paramètres de l'application (apparence, clavier, gestes) ne sont pas un contexte : ils
-vivent dans le panneau latéral (`src/parametres.rs`), ouvert par une pastille de la
-barre du bas.
+vivent dans le panneau latéral (`src/parametres.rs`), ouvert par le lien Paramètres,
+en bas du lanceur (le lien À propos ouvre l'aide et l'à-propos).
+
+Le logo de la barre du bas ouvre le lanceur : la liste des contextes de
+`GENRES`, avec leur icône et leur nom. Toucher un contexte l'ajoute à l'espace de
+travail (`Surface::inserer`) : dans une fenêtre insérée à gauche en paysage, en bas en
+portrait, à part égale avec celles déjà rangées dans ce sens ; une fenêtre d'Accueil,
+s’il y en a une, prend le contexte à la place. Le lanceur se referme en même temps.
+En paysage, il descend jusqu’en bas de l’écran et la barre de l’application se rabat
+à sa droite, logo compris ; en portrait, il monte du bas de l’écran, sous la barre,
+qu’il pousse vers le haut. En paysage, c’est une liste, large de son plus long
+élément, marges comprises ; en portrait, des tuiles côte à côte qui passent à la ligne,
+et le lanceur prend juste leur hauteur (`places_lanceur`).
 
 ## Les principes
 
