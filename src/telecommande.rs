@@ -25,14 +25,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(not(test))]
 pub const PORT: u16 = 47_811;
+/// Les essais ont leur port : Flow peut écouter sur l'appareil qui les lance.
+#[cfg(test)]
+pub const PORT: u16 = 47_819;
 /// Les identifiants des doigts distants (loin de ceux de l'écran).
 pub const ID0: i32 = 1000;
 /// L'intervalle des pings, en secondes.
 pub const PING: f32 = 0.2;
-/// Le gain du pavé : un glissement sur toute sa largeur traverse l'écran piloté `GAIN`
-/// fois.
-const GAIN: f32 = 1.0;
+/// Le doigt virtuel du défilement à deux doigts.
+const ID_DEFILE: i32 = ID0 + 999;
 
 /// Un message de la télécommande ou de l'appareil piloté.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,8 +53,16 @@ pub enum Message {
     Pose(i32, f32, f32),
     Glisse(i32, f32, f32),
     Leve(i32),
-    /// Le pavé : déplacer le curseur (en largeurs du pavé), cliquer, tenir ou lâcher.
+    /// Le pavé : déplacer le curseur (en dp, l'accélération déjà appliquée par la
+    /// télécommande), cliquer, tenir ou lâcher.
     Relatif(f32, f32),
+    /// Le défilement à deux doigts (en dp) : un glissé sous le curseur, qui ne le
+    /// déplace pas ; « S0 » le termine.
+    Defile(f32, f32),
+    FinDefile,
+    /// « T w h » : la taille de l'écran piloté (en pixels), envoyée avec chaque ping,
+    /// pour que le miroir en garde les proportions.
+    Taille(f32, f32),
     Clic,
     Bouton(bool),
     /// Une frappe du clavier.
@@ -74,6 +85,9 @@ impl Message {
             Message::Glisse(i, x, y) => format!("M {i} {x:.5} {y:.5}"),
             Message::Leve(i) => format!("U {i}"),
             Message::Relatif(x, y) => format!("R {x:.5} {y:.5}"),
+            Message::Defile(x, y) => format!("S {x:.3} {y:.3}"),
+            Message::FinDefile => "S0".into(),
+            Message::Taille(w, h) => format!("T {w:.0} {h:.0}"),
             Message::Clic => "C".into(),
             Message::Bouton(b) => format!("B {}", *b as u8),
             Message::Touche(f) => match f {
@@ -109,6 +123,9 @@ impl Message {
             "M" => Message::Glisse(n(0)?, f(1)?, f(2)?),
             "U" => Message::Leve(n(0)?),
             "R" => Message::Relatif(f(0)?, f(1)?),
+            "S" => Message::Defile(f(0)?, f(1)?),
+            "S0" => Message::FinDefile,
+            "T" => Message::Taille(f(0)?.max(1.0), f(1)?.max(1.0)),
             "C" => Message::Clic,
             "B" => Message::Bouton(reste == "1"),
             "K" => Message::Touche(match (mots.first().copied()?, reste.get(2..)) {
@@ -127,8 +144,40 @@ impl Message {
     }
 }
 
-/// L'adresse de cet appareil sur le réseau local (celle qui sert à sortir), s'il en a.
+/// L'adresse de cet appareil sur le Wi-Fi et la longueur du préfixe de son réseau
+/// (demandées à Android ; ailleurs, l'adresse de sortie et /24).
+pub fn reseau_local() -> Option<(Ipv4Addr, u8)> {
+    if let Some(t) = crate::acces::wifi() {
+        let (ip, p) = t.split_once('/')?;
+        return Some((ip.parse().ok()?, p.parse().ok()?));
+    }
+    adresse_sortie().map(|a| (a, 24))
+}
+
+/// L'adresse de cet appareil sur le réseau local, s'il en a.
 pub fn adresse_locale() -> Option<Ipv4Addr> {
+    reseau_local().map(|r| r.0)
+}
+
+/// Les adresses à interroger pour trouver les Flow : la diffusion générale, celle du
+/// réseau, puis (si les diffusions se perdent, ce qui arrive sur bien des Wi-Fi) chaque
+/// adresse du réseau, une à une (au plus 1022).
+pub fn adresses_a_sonder(local: Option<(Ipv4Addr, u8)>, une_a_une: bool) -> Vec<Ipv4Addr> {
+    let mut v = vec![Ipv4Addr::BROADCAST];
+    let Some((ip, p)) = local else { return v };
+    let p = p.clamp(22, 30) as u32;
+    let masque = u32::MAX << (32 - p);
+    let reseau = u32::from(ip) & masque;
+    let diffusion = reseau | !masque;
+    v.push(Ipv4Addr::from(diffusion));
+    if une_a_une {
+        v.extend((reseau + 1..diffusion).filter(|&a| a != u32::from(ip)).map(Ipv4Addr::from));
+    }
+    v
+}
+
+/// L'adresse par laquelle cet appareil sort (sans rien envoyer).
+fn adresse_sortie() -> Option<Ipv4Addr> {
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     // Aucun paquet ne part : la socket choisit seulement son interface
     s.connect("192.0.2.1:9").ok()?;
@@ -157,6 +206,8 @@ pub struct Hote {
     curseur_vu: Option<Instant>,
     tenu: bool,
     clavier: bool,
+    /// Le défilement en cours : où son doigt virtuel est rendu.
+    defile: Option<(f32, f32)>,
 }
 
 struct Ecoute {
@@ -165,7 +216,7 @@ struct Ecoute {
 }
 
 static ECOUTE: Mutex<Option<Ecoute>> = Mutex::new(None);
-static TAILLE: Mutex<(f32, f32)> = Mutex::new((1.0, 1.0));
+static TAILLE: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
 
 fn hote() -> Option<Arc<Mutex<Hote>>> {
     ECOUTE.lock().ok()?.as_ref().map(|e| e.hote.clone())
@@ -184,15 +235,16 @@ pub fn ecouter(oui: bool) -> Result<(), String> {
     if e.is_some() {
         return Ok(());
     }
+    // Les verrous d'abord : ils lient aussi les sockets à venir au Wi-Fi
+    let verrous = crate::acces::verrous_wifi(true).filter(|e| !e.is_empty());
     let socket = UdpSocket::bind(("0.0.0.0", PORT)).map_err(|e| format!("port {PORT} : {e}"))?;
     socket.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
     let _ = socket.set_broadcast(true);
     let code = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos()) / 1000) % 9000 + 1000;
-    let hote = Arc::new(Mutex::new(Hote { code, ..Default::default() }));
+    let hote = Arc::new(Mutex::new(Hote { code, erreur: verrous.map(|e| format!("Wi-Fi : {e}")), ..Default::default() }));
     let arret = Arc::new(AtomicBool::new(false));
     let (h, a) = (hote.clone(), arret.clone());
     std::thread::spawn(move || boucle_hote(socket, h, a));
-    let _ = crate::acces::verrous_wifi(true);
     *e = Some(Ecoute { hote, arret });
     Ok(())
 }
@@ -219,12 +271,16 @@ fn boucle_hote(socket: UdpSocket, h: Arc<Mutex<Hote>>, arret: Arc<AtomicBool>) {
             }
         };
         let Some(m) = std::str::from_utf8(&b[..n]).ok().and_then(Message::lire) else { continue };
+        let mut taille = None;
         let reponse = {
             let Ok(mut h) = h.lock() else { return };
             match m {
                 Message::Qui => Some(Message::Moi("Flow".into())),
                 // Un ping, même d'une télécommande pas encore liée : rien n'en dépend
-                Message::Ping(..) => Some(m),
+                Message::Ping(..) => {
+                    taille = TAILLE.lock().ok().map(|t| *t).filter(|t| t.0 > 0.0);
+                    Some(m)
+                }
                 Message::Lier(c) => {
                     let ok = c == h.code;
                     if ok {
@@ -264,7 +320,7 @@ fn boucle_hote(socket: UdpSocket, h: Arc<Mutex<Hote>>, arret: Arc<AtomicBool>) {
                 hh.vu = Some(Instant::now());
             }
         }
-        if let Some(r) = reponse {
+        for r in reponse.into_iter().chain(taille.map(|(w, h)| Message::Taille(w, h))) {
             let _ = socket.send_to(r.texte().as_bytes(), de);
         }
         crate::radio::reveiller();
@@ -272,8 +328,9 @@ fn boucle_hote(socket: UdpSocket, h: Arc<Mutex<Hote>>, arret: Arc<AtomicBool>) {
 }
 
 /// Les événements des doigts distants arrivés depuis la dernière image, pour un écran
-/// de `w` × `h` pixels : (événement, décalage en secondes, pour qu'un clic dure).
-pub fn evenements(w: f32, h: f32) -> Vec<(Event, f64)> {
+/// de `w` × `h` pixels à `dp` pixels par dp : (événement, décalage en secondes, pour
+/// qu'un clic dure).
+pub fn evenements(w: f32, h: f32, dp: f32) -> Vec<(Event, f64)> {
     if let Ok(mut t) = TAILLE.lock() {
         *t = (w, h);
     }
@@ -287,11 +344,30 @@ pub fn evenements(w: f32, h: f32) -> Vec<(Event, f64)> {
             Message::Glisse(i, x, y) => v.push((Event::Move { id: ID0 + 1 + i, x: x * w, y: y * h }, 0.0)),
             Message::Leve(i) => v.push((Event::Up { id: ID0 + 1 + i }, 0.0)),
             Message::Relatif(dx, dy) => {
-                let n = ((c.0 + dx * w * GAIN).clamp(0.0, w - 1.0), (c.1 + dy * w * GAIN).clamp(0.0, h - 1.0));
+                let n = ((c.0 + dx * dp).clamp(0.0, w - 1.0), (c.1 + dy * dp).clamp(0.0, h - 1.0));
                 s.curseur = Some(n);
                 s.curseur_vu = Some(Instant::now());
                 if s.tenu {
                     v.push((Event::Move { id: ID0, x: n.0, y: n.1 }, 0.0));
+                }
+            }
+            Message::Defile(dx, dy) => {
+                s.curseur_vu = Some(Instant::now());
+                let (x, y) = match s.defile {
+                    Some(p) => p,
+                    None => {
+                        v.push((Event::Down { id: ID_DEFILE, x: c.0, y: c.1 }, 0.0));
+                        c
+                    }
+                };
+                // Le doigt virtuel peut sortir de l'écran : le glissé continue
+                let n = (x + dx * dp, y + dy * dp);
+                s.defile = Some(n);
+                v.push((Event::Move { id: ID_DEFILE, x: n.0, y: n.1 }, 0.0));
+            }
+            Message::FinDefile => {
+                if s.defile.take().is_some() {
+                    v.push((Event::Up { id: ID_DEFILE }, 0.0));
                 }
             }
             Message::Clic => {
@@ -379,26 +455,53 @@ pub struct Client {
     dernier_ping: Option<Instant>,
     origine: Instant,
     pub derniere_reponse: Option<Instant>,
+    /// La recherche : combien d'envois déjà, quand le dernier ; l'adresse de cet
+    /// appareil ; la dernière erreur d'envoi.
+    relances: u8,
+    relance: Option<Instant>,
+    pub local: Option<(Ipv4Addr, u8)>,
+    pub erreur: Option<String>,
+    /// La taille de l'écran piloté, en pixels.
+    pub taille: Option<(f32, f32)>,
 }
+
+/// Les envois d'une recherche (toutes les 0,3 s) ; au troisième, chaque adresse du
+/// réseau est interrogée.
+const RELANCES: u8 = 6;
 
 impl Client {
     pub fn new() -> Result<Client, String> {
+        let erreur = crate::acces::verrous_wifi(true).filter(|e| !e.is_empty()).map(|e| format!("Wi-Fi : {e}"));
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
         socket.set_nonblocking(true).map_err(|e| e.to_string())?;
         let _ = socket.set_broadcast(true);
-        let _ = crate::acces::verrous_wifi(true);
-        Ok(Client { socket, trouves: Vec::new(), hote: None, lie: false, refuse: false, latence: Latence::default(), numero: 0, attente: VecDeque::new(), dernier_ping: None, origine: Instant::now(), derniere_reponse: None })
+        Ok(Client { socket, trouves: Vec::new(), hote: None, lie: false, refuse: false, latence: Latence::default(), numero: 0, attente: VecDeque::new(), dernier_ping: None, origine: Instant::now(), derniere_reponse: None, relances: RELANCES, relance: None, local: reseau_local(), erreur, taille: None })
     }
 
     /// Diffuse « qui accepte d'être piloté ? » (à tout le réseau, et au /24 local).
+    /// La recherche se répète `RELANCES` fois : une diffusion se perd facilement.
     pub fn chercher(&mut self) {
         self.trouves.clear();
+        self.erreur = None;
+        self.local = reseau_local();
+        self.relances = 0;
+        self.relancer();
+    }
+
+    /// La recherche est-elle en cours ?
+    pub fn cherche(&self) -> bool {
+        self.relances < RELANCES || self.relance.is_some_and(|t| t.elapsed().as_secs_f32() < 0.8)
+    }
+
+    fn relancer(&mut self) {
         let m = Message::Qui.texte();
-        let _ = self.socket.send_to(m.as_bytes(), (Ipv4Addr::BROADCAST, PORT));
-        if let Some(a) = adresse_locale() {
-            let o = a.octets();
-            let _ = self.socket.send_to(m.as_bytes(), (Ipv4Addr::new(o[0], o[1], o[2], 255), PORT));
+        for a in adresses_a_sonder(self.local, self.relances == 2) {
+            if let Err(e) = self.socket.send_to(m.as_bytes(), (a, PORT)) {
+                self.erreur = Some(format!("envoi vers {a} : {e}"));
+            }
         }
+        self.relances += 1;
+        self.relance = Some(Instant::now());
     }
 
     /// Se lie à `ip` avec `code`.
@@ -443,6 +546,7 @@ impl Client {
                     self.lie = ok;
                     self.refuse = !ok;
                 }
+                Message::Taille(w, h) if Some(de) == self.hote => self.taille = Some((w, h)),
                 Message::Ping(k, _) if Some(de) == self.hote => {
                     self.derniere_reponse = Some(Instant::now());
                     if let Some(i) = self.attente.iter().position(|(n, _)| *n == k) {
@@ -458,6 +562,10 @@ impl Client {
                 }
                 _ => {}
             }
+        }
+        if self.relances < RELANCES && self.relance.is_none_or(|t| t.elapsed().as_secs_f32() >= 0.3) {
+            self.relancer();
+            change = true;
         }
         // Les pings sans réponse depuis 1 s sont perdus
         while self.attente.front().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(1)) {
@@ -533,6 +641,9 @@ mod tests {
             Message::Glisse(1, 0.75, 1.0),
             Message::Leve(1),
             Message::Relatif(-0.01, 0.02),
+            Message::Defile(3.5, -12.0),
+            Message::FinDefile,
+            Message::Taille(1920.0, 1200.0),
             Message::Clic,
             Message::Bouton(true),
             Message::Touche(Frappe::Car('é')),
@@ -549,6 +660,20 @@ mod tests {
     }
 
     #[test]
+    fn les_adresses_a_sonder_couvrent_le_reseau() {
+        let v = adresses_a_sonder(Some((Ipv4Addr::new(192, 168, 1, 20), 24)), false);
+        assert_eq!(v, vec![Ipv4Addr::BROADCAST, Ipv4Addr::new(192, 168, 1, 255)]);
+        let v = adresses_a_sonder(Some((Ipv4Addr::new(192, 168, 1, 20), 24)), true);
+        assert_eq!(v.len(), 2 + 253);
+        assert!(v.contains(&Ipv4Addr::new(192, 168, 1, 1)) && v.contains(&Ipv4Addr::new(192, 168, 1, 254)));
+        assert!(!v.contains(&Ipv4Addr::new(192, 168, 1, 20)));
+        // Un grand réseau n'est sondé que sur 1022 adresses autour de soi
+        let v = adresses_a_sonder(Some((Ipv4Addr::new(10, 1, 2, 3), 8)), true);
+        assert_eq!(v[1], Ipv4Addr::new(10, 1, 3, 255));
+        assert_eq!(v.len(), 2 + 1021);
+    }
+
+    #[test]
     fn le_suivi_dit_pose_glisse_leve() {
         let mut s = Suivi::default();
         assert_eq!(s.messages(&[(3, 0.1, 0.2)]), vec![Message::Pose(3, 0.1, 0.2)]);
@@ -560,7 +685,11 @@ mod tests {
     #[test]
     fn une_telecommande_se_lie_et_pilote_en_local() {
         // Les deux bouts sur cet appareil : le vrai réseau, en boucle locale
-        ecouter(true).unwrap();
+        // Flow lancé sur l'appareil qui teste peut déjà tenir le port
+        if let Err(e) = ecouter(true) {
+            eprintln!("essai sauté : {e}");
+            return;
+        }
         let (code, ..) = etat_hote().unwrap();
         let mut c = Client::new().unwrap();
         c.lier(Ipv4Addr::LOCALHOST, code + 1);
@@ -583,14 +712,14 @@ mod tests {
         // Un doigt, un clic au curseur, une frappe
         c.envoyer(&Message::Pose(0, 0.5, 0.25));
         c.envoyer(&Message::Leve(0));
-        c.envoyer(&Message::Relatif(0.1, 0.0));
+        c.envoyer(&Message::Relatif(50.0, 0.0));
         c.envoyer(&Message::Clic);
         c.envoyer(&Message::Touche(Frappe::Car('a')));
         c.envoyer(&Message::Clavier(true));
         let mut ev = Vec::new();
         let mut fr = Vec::new();
         for _ in 0..200 {
-            ev.extend(evenements(1000.0, 800.0));
+            ev.extend(evenements(1000.0, 800.0, 2.0));
             fr.extend(frappes());
             if ev.len() >= 4 && !fr.is_empty() && clavier_distant() {
                 break;

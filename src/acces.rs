@@ -430,6 +430,12 @@ pub fn verrous_wifi(pris: bool) -> Option<String> {
     appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "verrous", Some(if pris { "1" } else { "0" }))
 }
 
+/// L'adresse Wi-Fi de cet appareil et son préfixe (« 192.168.1.20/24 », "" sans
+/// Wi-Fi) ; rien hors d'Android.
+pub fn wifi() -> Option<String> {
+    appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "wifi", Some(""))
+}
+
 /// Comme `installation`, pour `fr.s1pierro.flow.Toile`, qui reçoit l'activité.
 pub fn toile(methode: &str, arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Toile", &ACTIVITE, methode, Some(arg))

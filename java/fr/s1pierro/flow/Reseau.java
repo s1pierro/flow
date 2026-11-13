@@ -1,10 +1,16 @@
 package fr.s1pierro.flow;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 
 import java.io.File;
+import java.net.Inet4Address;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -27,6 +33,10 @@ public class Reseau {
      */
     public static synchronized String verrous(Context c, String arg) {
         try {
+            // Les sockets de la télécommande passent par le Wi-Fi, même quand Android
+            // garde les données mobiles par défaut (un Wi-Fi sans internet)
+            ConnectivityManager cm = (ConnectivityManager) c.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) cm.bindProcessToNetwork("1".equals(arg) ? reseauWifi(cm) : null);
             WifiManager w = (WifiManager) c.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             if (w == null) return "pas de Wi-Fi";
             if ("1".equals(arg)) {
@@ -49,6 +59,35 @@ public class Reseau {
         } catch (Throwable e) {
             String m = e.getMessage();
             return e.getClass().getSimpleName() + (m == null ? "" : " : " + m);
+        }
+    }
+
+    private static Network reseauWifi(ConnectivityManager cm) {
+        for (Network n : cm.getAllNetworks()) {
+            NetworkCapabilities k = cm.getNetworkCapabilities(n);
+            if (k != null && k.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return n;
+        }
+        return null;
+    }
+
+    /**
+     * L'adresse IPv4 de cet appareil sur le Wi-Fi et la longueur de son préfixe
+     * (« 192.168.1.20/24 »), ou "" sans Wi-Fi.
+     */
+    public static String wifi(Context c, String arg) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) c.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return "";
+            Network n = reseauWifi(cm);
+            if (n == null) return "";
+            LinkProperties lp = cm.getLinkProperties(n);
+            if (lp == null) return "";
+            for (LinkAddress a : lp.getLinkAddresses()) {
+                if (a.getAddress() instanceof Inet4Address) return a.getAddress().getHostAddress() + "/" + a.getPrefixLength();
+            }
+            return "";
+        } catch (Throwable e) {
+            return "";
         }
     }
 

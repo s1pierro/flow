@@ -33,13 +33,30 @@ const SAISIE: Id = id("telecommande-saisie");
 
 const ONGLETS: [&str; 4] = ["Pavé", "Écran", "Clavier", "Délier"];
 
-/// Le doigt qui mène le pavé : où il est, quand il s'est posé, le chemin parcouru.
+/// Le doigt qui mène le pavé : où il est, quand il s'est posé, le chemin parcouru
+/// (en dp), sa vitesse lissée (dp/s), s'il a quitté la zone morte ; le nombre de
+/// doigts le plus grand vu pendant l'appui.
 struct DoigtPave {
     id: i32,
     x: f32,
     y: f32,
     debut: Instant,
+    vu: Instant,
     chemin: f32,
+    vitesse: f32,
+    parti: bool,
+    doigts: usize,
+}
+
+/// En deçà, un appui est une touche : le curseur ne bouge pas (dp).
+const ZONE_MORTE: f32 = 6.0;
+
+/// Le gain du pavé selon la vitesse du doigt (dp/s) : 1 en mouvement lent, pour viser
+/// au pixel, jusqu'à 3,5 en geste vif, pour traverser l'écran ; la courbe est douce
+/// pour que le curseur ne saute pas d'un régime à l'autre.
+pub fn gain(vitesse: f32) -> f32 {
+    let t = ((vitesse - 60.0) / (1400.0 - 60.0)).clamp(0.0, 1.0);
+    1.0 + 2.5 * t * t * (3.0 - 2.0 * t)
 }
 
 pub struct Telecommande {
@@ -56,7 +73,6 @@ pub struct Telecommande {
     recherche: Option<Instant>,
     /// Les dernières frappes envoyées, pour les voir.
     tape: String,
-    dt: f32,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -72,7 +88,6 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         tenu: false,
         recherche: None,
         tape: String::new(),
-        dt: 0.016,
     })
 }
 
@@ -144,10 +159,16 @@ impl Telecommande {
                 c.clavier.ouvrir(sub_id(CODE, k));
             }
         }
-        if self.recherche.is_some_and(|t| t.elapsed().as_secs_f32() < 2.0) && trouves.is_empty() {
+        let cherche = self.client.as_ref().is_some_and(|cl| cl.cherche());
+        if cherche && trouves.is_empty() {
             cx.paragraph(&mut b, "Recherche…");
         } else if self.recherche.is_some() && trouves.is_empty() {
-            cx.paragraph(&mut b, "Aucun Flow n'a répondu. Tapez son adresse, ou vérifiez que l'écoute y est activée.");
+            cx.paragraph(&mut b, "Aucun Flow n'a répondu. Vérifiez que l'écoute est activée là-bas, et que les deux appareils sont sur le même Wi-Fi (un réseau « invités » isole souvent ses appareils). Vous pouvez aussi taper l'adresse qu'il affiche.");
+        }
+        if let Some(cl) = &self.client {
+            let ici = cl.local.map_or("pas d'adresse Wi-Fi".to_string(), |(a, p)| format!("{a}/{p}"));
+            let e = cl.erreur.clone().map_or(String::new(), |e| format!(" · {e}"));
+            cx.paragraph(&mut b, &format!("Cet appareil : {ici}{e}"));
         }
         clavier::champ(cx, &mut b, sub_id(ADRESSE, k), "Adresse, par exemple 192.168.1.20", &mut self.adresse, &mut c.clavier);
         clavier::champ(cx, &mut b, sub_id(CODE, k), "Code à quatre chiffres", &mut self.code, &mut c.clavier);
@@ -255,36 +276,54 @@ impl Telecommande {
         let pid = sub_id(base, 40);
         cx.ui.region_add(pid, surface, Sense::Drag);
         cx.dl.rrect(surface, 14.0 * d, col.puce);
-        cx.centered(surface, "Glissez pour déplacer · touchez pour cliquer", 13.0, col.pale);
+        cx.centered(surface, "Glissez pour déplacer · touchez pour cliquer · deux doigts pour défiler", 13.0, col.pale);
 
         let doigts = cx.ui.doigts_sur(pid);
         let premier = doigts.iter().min_by_key(|p| p.0).copied();
+        let mut envois = Vec::new();
         match (premier, self.pave.as_mut()) {
             (Some((i, x, y)), Some(p)) if p.id == i => {
-                let (dx, dy) = (x - p.x, y - p.y);
+                // En dp : le même geste fait le même chemin quelle que soit la densité
+                let (dx, dy) = ((x - p.x) / d, (y - p.y) / d);
                 let pas = (dx * dx + dy * dy).sqrt();
-                if pas > 0.0 {
-                    // L'accélération : plus le doigt va vite, plus le curseur va loin
-                    let vitesse = pas / self.dt.max(0.004) / surface.w.max(1.0);
-                    let k = 1.0 + vitesse.min(3.0) * 0.6;
-                    let w = surface.w.max(1.0);
-                    let m = Message::Relatif(dx / w * k, dy / w * k);
-                    p.chemin += pas;
-                    p.x = x;
-                    p.y = y;
-                    if let Some(c) = &self.client {
-                        c.envoyer(&m);
+                let dt = p.vu.elapsed().as_secs_f32().max(0.004);
+                p.vu = Instant::now();
+                // La vitesse lissée : une image en retard ne fait pas bondir le curseur
+                p.vitesse += (pas / dt - p.vitesse) * (dt / 0.06).min(1.0);
+                p.chemin += pas;
+                p.x = x;
+                p.y = y;
+                let deux = doigts.len() >= 2;
+                p.doigts = p.doigts.max(doigts.len());
+                if p.chemin >= ZONE_MORTE && pas > 0.0 {
+                    p.parti = true;
+                    if deux {
+                        // Deux doigts : le contenu suit les doigts, sans accélération
+                        envois.push(Message::Defile(dx, dy));
+                    } else if p.doigts < 2 {
+                        let k = gain(p.vitesse);
+                        envois.push(Message::Relatif(dx * k, dy * k));
                     }
                 }
             }
-            (Some((i, x, y)), _) => self.pave = Some(DoigtPave { id: i, x, y, debut: Instant::now(), chemin: 0.0 }),
+            (Some((i, x, y)), _) => {
+                if self.pave.as_ref().is_some_and(|p| p.doigts >= 2) {
+                    envois.push(Message::FinDefile);
+                }
+                self.pave = Some(DoigtPave { id: i, x, y, debut: Instant::now(), vu: Instant::now(), chemin: 0.0, vitesse: 0.0, parti: false, doigts: doigts.len() });
+            }
             (None, Some(_)) => {
                 let p = self.pave.take().unwrap();
-                if p.debut.elapsed().as_secs_f32() < 0.3 && p.chemin < 12.0 * d {
-                    self.envoyer(&Message::Clic);
+                if p.doigts >= 2 {
+                    envois.push(Message::FinDefile);
+                } else if !p.parti && p.debut.elapsed().as_secs_f32() < 0.35 {
+                    envois.push(Message::Clic);
                 }
             }
             (None, None) => {}
+        }
+        for m in envois {
+            self.envoyer(&m);
         }
 
         // Les boutons : Clic, et Tenir (le bouton reste enfoncé pour glisser)
@@ -308,6 +347,15 @@ impl Telecommande {
 
     fn ecran(&mut self, cx: &mut Cx, zone: Rect, base: Id) {
         let (d, col) = (cx.dp, cx.couleurs());
+        // Aux proportions de l'écran piloté, centré dans la zone
+        let zone = match self.client.as_ref().and_then(|c| c.taille) {
+            Some((tw, th)) if zone.w > 0.0 && zone.h > 0.0 => {
+                let k = (zone.w / tw).min(zone.h / th);
+                let (w, h) = (tw * k, th * k);
+                Rect::new(zone.x + (zone.w - w) / 2.0, zone.y + (zone.h - h) / 2.0, w, h)
+            }
+            _ => zone,
+        };
         let eid = sub_id(base, 50);
         cx.ui.region_add(eid, zone, Sense::Drag);
         cx.dl.rrect(zone, 14.0 * d, col.puce);
@@ -367,8 +415,7 @@ impl Contexte for Telecommande {
         }
     }
 
-    fn avancer(&mut self, dt: f32, _c: &Commun) {
-        self.dt = dt;
+    fn avancer(&mut self, _dt: f32, _c: &Commun) {
         if let Some(cl) = self.client.as_mut() {
             cl.avancer();
         }
@@ -377,7 +424,7 @@ impl Contexte for Telecommande {
     fn anime(&self, _c: &Commun) -> bool {
         // La socket se lit à chaque image tant qu'on attend quelque chose ; les pings
         // demandent des images régulières pendant la liaison
-        self.client.as_ref().is_some_and(|cl| cl.hote.is_some()) || self.recherche.is_some_and(|t| t.elapsed().as_secs_f32() < 2.5)
+        self.client.as_ref().is_some_and(|cl| cl.hote.is_some() || cl.cherche())
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
@@ -423,6 +470,24 @@ impl Contexte for Telecommande {
                 self.quitter_onglet(c, k);
             }
             self.reglages(cx, c, r, k)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gain;
+
+    #[test]
+    fn le_gain_monte_doucement_avec_la_vitesse() {
+        assert_eq!(gain(0.0), 1.0);
+        assert_eq!(gain(60.0), 1.0);
+        assert!((gain(5000.0) - 3.5).abs() < 1e-5);
+        let mut avant = 1.0;
+        for v in (0..1500).step_by(10) {
+            let g = gain(v as f32);
+            assert!(g >= avant && g - avant < 0.06, "à {v} dp/s : {avant} puis {g}");
+            avant = g;
         }
     }
 }
