@@ -52,7 +52,8 @@ Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie sur
 recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`),
 Télécommande (piloter un autre Flow par le Wi-Fi local — découverte sur le réseau, liaison par
 un code à quatre chiffres, puis pavé tactile avec curseur, écran en miroir à plusieurs doigts ou
-clavier, ou manette de jeu — deux sticks, croix, A B X Y, tranches, gâchettes — qui fait
+clavier, ou manette de jeu — deux surfaces à stick flottant striées de vibrations au millimètre,
+croix, A B X Y, tranches, gâchettes — qui fait
 voler la 3D des Lieux et sert de manette à WhiteRoom ; l'aller-retour mesuré s'affiche — ou se
 laisser piloter), Aide. Les paramètres de l'application (apparence, clavier,
 gestes) sont dans le panneau latéral. Deux façons de disposer les fenêtres (Paramètres, Interface) :

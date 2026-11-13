@@ -8,8 +8,11 @@
 //!     de Flow y passent tels quels) ;
 //!   - **Clavier** : le clavier de cet appareil écrit dans le champ choisi là-bas (le
 //!     clavier de l'autre écran se cache) ;
-//!   - **Manette** : deux sticks, la croix, A B X Y, L1 R1, les gâchettes, Select et
-//!     Start, à plusieurs doigts. Flow s'en sert dans la 3D des Lieux ; WhiteRoom la
+//!   - **Manette** : deux surfaces à stick flottant (le contact pose le stick au repos,
+//!     comme les commandes à l'écran de WhiteRoom), la croix, A B X Y, L1 R1, les
+//!     gâchettes, Select et Start, à plusieurs doigts. Sous le doigt, des stries
+//!     (`vibreur::Stries`, 1 mm par défaut) : chacune franchie fait vibrer l'appareil
+//!     aussi brièvement qu'il le peut, une rugosité qui dit au pouce où il va. Flow s'en sert dans la 3D des Lieux ; WhiteRoom la
 //!     voit comme une manette de jeu (n'y sont alors proposés que Manette et Délier).
 //!   La ligne du haut dit l'aller-retour mesuré (`telecommande::Latence`).
 //! - **Être piloté** : l'interrupteur ouvre l'écoute ; l'adresse et le code s'affichent.
@@ -21,6 +24,7 @@ use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::Rect;
 use crate::surface::{FenetreId, Placee};
 use crate::telecommande::{self as tc, bouton, Client, Manette, Message, Suivi};
+use crate::vibreur::{self, Stries};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::net::Ipv4Addr;
@@ -53,6 +57,50 @@ struct DoigtPave {
     doigts: usize,
 }
 
+/// La course d'un stick flottant, en millimètres : à cette distance du contact, il est
+/// à fond, et au-delà sa base suit le doigt.
+const COURSE_MM: f32 = 9.0;
+/// Les écarts de stries proposés (mm ; 0 : sans vibration).
+const STRIES: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 3.0, 0.0];
+
+/// Un stick flottant sur une surface : le doigt qui le tient, la base posée au contact,
+/// où est le doigt, et les stries sous lui.
+#[derive(Clone, Copy, Debug, Default)]
+struct StickFlottant {
+    doigt: Option<i32>,
+    base: Option<[f32; 2]>,
+    pos: Option<[f32; 2]>,
+    stries: Stries,
+}
+
+impl StickFlottant {
+    /// Les doigts posés sur la surface ; la course et l'écart des stries en pixels.
+    /// Rend la valeur du stick (−1 à 1, y vers le bas) et si une strie est franchie.
+    fn suivre(&mut self, doigts: &[(i32, f32, f32)], course: f32, pas: f32) -> ([f32; 2], bool) {
+        let tenu = self.doigt.and_then(|i| doigts.iter().find(|p| p.0 == i)).or_else(|| doigts.iter().min_by_key(|p| p.0)).copied();
+        let Some((i, x, y)) = tenu else {
+            *self = StickFlottant::default();
+            return ([0.0; 2], false);
+        };
+        if self.doigt != Some(i) {
+            // Un autre doigt : le stick se repose sous lui
+            *self = StickFlottant { doigt: Some(i), ..StickFlottant::default() };
+        }
+        let p = [x, y];
+        let mut b = self.base.unwrap_or(p);
+        let r = course.max(1.0);
+        let (dx, dy) = (p[0] - b[0], p[1] - b[1]);
+        let l = dx.hypot(dy);
+        if l > r {
+            b = [p[0] - dx / l * r, p[1] - dy / l * r];
+        }
+        self.base = Some(b);
+        self.pos = Some(p);
+        let tic = self.stries.suivre(Some(p), pas);
+        ([((p[0] - b[0]) / r).clamp(-1.0, 1.0), ((p[1] - b[1]) / r).clamp(-1.0, 1.0)], tic)
+    }
+}
+
 /// En deçà, un appui est une touche : le curseur ne bouge pas (dp).
 const ZONE_MORTE: f32 = 6.0;
 
@@ -83,6 +131,9 @@ pub struct Telecommande {
     manette_envoyee: Option<Instant>,
     /// Les aperçus montrent la vue liée sans réseau (`demo = oui`).
     demo: bool,
+    /// Les deux sticks flottants, et l'écart de leurs stries (mm, 0 : aucune).
+    sticks: [StickFlottant; 2],
+    stries: f32,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -100,6 +151,8 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         manette: Manette::default(),
         manette_envoyee: None,
         demo: e.texte("demo") == Some("oui"),
+        sticks: Default::default(),
+        stries: e.texte("stries").and_then(|v| v.parse().ok()).filter(|v: &f32| STRIES.contains(v)).unwrap_or(1.0),
         onglet: e.texte("onglet").and_then(|o| ONGLETS.iter().position(|n| *n == o)).filter(|&i| i != DELIER).unwrap_or(0),
     })
 }
@@ -134,6 +187,7 @@ impl Telecommande {
         if std::mem::take(&mut self.tenu) {
             self.envoyer(&Message::Bouton(false));
         }
+        self.sticks = Default::default();
         if !self.manette.au_repos() {
             self.manette = Manette::default();
             self.envoyer(&Message::Manette(self.manette));
@@ -452,9 +506,22 @@ impl Telecommande {
         };
         let (case_stick_g, case_croix) = cases(gauche, false);
         let (case_abxy, case_stick_d) = cases(droite, true);
-        let bh = h.min(colonne.h / 3.0);
-        let sel = Rect::new(colonne.x, colonne.cy() - bh - e / 2.0, colonne.w, bh);
-        let start = Rect::new(colonne.x, colonne.cy() + e / 2.0, colonne.w, bh);
+        let bh = h.min((colonne.h - 2.0 * e) / 3.0);
+        let y0 = colonne.cy() - 1.5 * bh - e;
+        let sel = Rect::new(colonne.x, y0, colonne.w, bh);
+        let start = Rect::new(colonne.x, y0 + bh + e, colonne.w, bh);
+        // L'écart des stries : chaque appui passe au suivant
+        let rug = Rect::new(colonne.x, y0 + 2.0 * (bh + e), colonne.w, bh);
+        if cx.ui.click(sub_id(mb, 7), rug, None) {
+            let i = STRIES.iter().position(|v| *v == self.stries).unwrap_or(0);
+            self.stries = STRIES[(i + 1) % STRIES.len()];
+            if self.stries > 0.0 {
+                vibreur::tic(1.0);
+            }
+        }
+        cx.dl.rrect(rug, cx.theme.rayon(bh), col.puce);
+        let t = if self.stries > 0.0 { format!("Stries {} mm", self.stries).replace('.', ",") } else { "Sans stries".into() };
+        cx.centered(rug, &t, 13.0, col.accent);
         if touche(cx, sub_id(mb, 5), sel, "Select") {
             m.boutons |= bouton::SELECT;
         }
@@ -462,8 +529,21 @@ impl Telecommande {
             m.boutons |= bouton::START;
         }
 
-        m.gauche = Self::stick(cx, sub_id(mb, 10), case_stick_g);
-        m.droit = Self::stick(cx, sub_id(mb, 11), case_stick_d);
+        let mm = vibreur::px_par_mm(d);
+        let (course, pas) = (COURSE_MM * mm, self.stries * mm);
+        let mut tic = false;
+        for (i, (case, nom)) in [(case_stick_g, "Stick gauche"), (case_stick_d, "Stick droit")].into_iter().enumerate() {
+            let (v, t) = self.surface(cx, sub_id(mb, 10 + i), case.inset(e * 0.5), nom, i, course, pas);
+            if i == 0 {
+                m.gauche = v;
+            } else {
+                m.droit = v;
+            }
+            tic |= t;
+        }
+        if tic {
+            vibreur::tic(1.0);
+        }
 
         // La croix : une seule zone, la direction d'après le doigt (le pouce glisse
         // d'une flèche à l'autre, et vise les diagonales)
@@ -526,28 +606,25 @@ impl Telecommande {
         }
     }
 
-    /// Un stick dans `cell` : sa position (−1 à 1, y vers le bas), d'après le premier
-    /// doigt posé ; il revient au centre quand on le lâche.
-    fn stick(cx: &mut Cx, id: Id, cell: Rect) -> [f32; 2] {
+    /// Une surface à stick flottant : le contact pose le stick au repos, le doigt
+    /// l'écarte jusqu'à `course` pixels. Rend sa valeur et si une strie est franchie.
+    #[allow(clippy::too_many_arguments)]
+    fn surface(&mut self, cx: &mut Cx, id: Id, r: Rect, nom: &str, i: usize, course: f32, pas: f32) -> ([f32; 2], bool) {
         let (d, col) = (cx.dp, cx.couleurs());
-        cx.ui.region_add(id, cell, Sense::Drag);
-        let c = [cell.cx(), cell.cy()];
-        let r = (cell.w.min(cell.h) / 2.0 - 10.0 * d).max(8.0 * d);
-        // Le bouton fait un tiers du rayon : la course est ce qui reste
-        let course = r * 0.68;
-        let mut v = [0.0, 0.0];
-        if let Some((_, x, y)) = cx.ui.doigts_sur(id).into_iter().min_by_key(|p| p.0) {
-            let (dx, dy) = ((x - c[0]) / course, (y - c[1]) / course);
-            let l = dx.hypot(dy).max(1.0);
-            v = [dx / l, dy / l];
+        cx.ui.region_add(id, r, Sense::Drag);
+        let doigts = cx.ui.doigts_sur(id);
+        let (v, tic) = self.sticks[i].suivre(&doigts, course, pas);
+        cx.dl.rrect(r, 16.0 * d, [col.puce[0], col.puce[1], col.puce[2], 150]);
+        let st = self.sticks[i];
+        match (st.base, st.pos) {
+            (Some(b), Some(p)) => {
+                cx.dl.secteur(b, course - 2.0 * d, course, 0.0, std::f32::consts::TAU, 0.0, col.ligne);
+                let k = 22.0 * d;
+                cx.dl.rrect(Rect::new(p[0] - k, p[1] - k, 2.0 * k, 2.0 * k), k, col.accent);
+            }
+            _ => cx.centered(r, nom, 13.0, col.pale),
         }
-        cx.dl.secteur(c, r - 2.5 * d, r, 0.0, std::f32::consts::TAU, 0.0, col.ligne);
-        cx.dl.rrect(Rect::new(c[0] - r, c[1] - r, 2.0 * r, 2.0 * r), r, [col.puce[0], col.puce[1], col.puce[2], 120]);
-        let k = r * 0.32;
-        let (kx, ky) = (c[0] + v[0] * course, c[1] + v[1] * course);
-        let on = v != [0.0, 0.0];
-        cx.dl.rrect(Rect::new(kx - k, ky - k, 2.0 * k, 2.0 * k), k, if on { col.accent } else { col.puce });
-        v
+        (v, tic)
     }
 
     fn clavier(&mut self, cx: &mut Cx, c: &mut Commun, zone: Rect, k: usize) {
@@ -593,6 +670,7 @@ impl Contexte for Telecommande {
             e.mettre("adresse", self.adresse.texte.clone());
         }
         e.mettre("onglet", ONGLETS[self.onglet]);
+        e.mettre("stries", self.stries);
     }
 
     fn avancer(&mut self, _dt: f32, _c: &Commun) {
@@ -656,7 +734,25 @@ impl Contexte for Telecommande {
 
 #[cfg(test)]
 mod tests {
-    use super::gain;
+    use super::{gain, StickFlottant};
+
+    #[test]
+    fn le_stick_flottant_se_pose_sous_le_doigt() {
+        let mut s = StickFlottant::default();
+        // Le contact : au repos
+        assert_eq!(s.suivre(&[(7, 100.0, 100.0)], 50.0, 10.0), ([0.0, 0.0], false));
+        // À mi-course vers la droite, deux stries franchies (une seule vibration)
+        assert_eq!(s.suivre(&[(7, 125.0, 100.0)], 50.0, 10.0), ([0.5, 0.0], true));
+        // Vers le haut à fond, au-delà : la base suit
+        let (v, _) = s.suivre(&[(7, 100.0, 20.0)], 50.0, 10.0);
+        assert_eq!(v[1], -1.0);
+        // Un second doigt ne le prend pas
+        let (v2, _) = s.suivre(&[(3, 0.0, 0.0), (7, 100.0, 20.0)], 50.0, 10.0);
+        assert_eq!(v2, v);
+        // Levé : au repos ; reposé ailleurs : au repos là
+        assert_eq!(s.suivre(&[], 50.0, 10.0).0, [0.0, 0.0]);
+        assert_eq!(s.suivre(&[(9, 400.0, 400.0)], 50.0, 10.0), ([0.0, 0.0], false));
+    }
 
     #[test]
     fn le_gain_monte_doucement_avec_la_vitesse() {
