@@ -119,6 +119,33 @@ impl Relief3d {
         self.camera.tangage = (self.camera.tangage + dy * k).clamp(0.02, 1.5);
     }
 
+    /// Une manette (celle d'une télécommande) pendant `dt` s : le stick gauche avance
+    /// et décale au sol (d'autant plus vite que la vue est haute), le droit tourne
+    /// autour de la cible et la penche, les gâchettes rapprochent (RT) et éloignent
+    /// (LT), la croix fait de même par crans plus doux.
+    pub fn piloter(&mut self, m: &crate::telecommande::Manette, dt: f32) {
+        use crate::telecommande::bouton;
+        let morte = |v: f32| if v.abs() < 0.12 { 0.0 } else { (v - 0.12 * v.signum()) / 0.88 };
+        let c = &mut self.camera;
+        let (gx, gy) = (morte(m.gauche[0]), morte(m.gauche[1]));
+        let vitesse = c.distance * 0.9 * if m.appuye(bouton::A) { 3.0 } else { 1.0 };
+        let (sl, cl) = c.lacet.sin_cos();
+        // Droite (cl, 0, -sl) ; devant au sol (-sl, 0, -cl) ; pousser vers le haut avance
+        let (avant, droite) = (-gy * vitesse * dt, gx * vitesse * dt);
+        c.cible[0] += droite * cl - avant * sl;
+        c.cible[2] += -droite * sl - avant * cl;
+        c.lacet -= morte(m.droit[0]) * 1.8 * dt;
+        c.tangage = (c.tangage - morte(m.droit[1]) * 1.1 * dt).clamp(0.02, 1.5);
+        let mut zoom = m.rt - m.lt;
+        if m.appuye(bouton::HAUT) {
+            zoom += 0.4;
+        }
+        if m.appuye(bouton::BAS) {
+            zoom -= 0.4;
+        }
+        c.distance = (c.distance * (-zoom * 1.6 * dt).exp()).clamp(5.0, 200_000.0);
+    }
+
     /// Deux doigts : rapprocher de `k` (écart relatif), glisser de (dx, dy) pixels.
     pub fn pincer(&mut self, k: f32, dx: f32, dy: f32, h: f32) {
         // Le déplacement dans le plan du sol, à l'échelle de la cible

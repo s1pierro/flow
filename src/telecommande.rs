@@ -37,6 +37,50 @@ pub const PING: f32 = 0.2;
 /// Le doigt virtuel du défilement à deux doigts.
 const ID_DEFILE: i32 = ID0 + 999;
 
+/// L'état d'une manette de jeu : sticks de −1 à 1 (y vers le bas, comme Android),
+/// gâchettes de 0 à 1, boutons en bits (`bouton`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Manette {
+    pub gauche: [f32; 2],
+    pub droit: [f32; 2],
+    pub lt: f32,
+    pub rt: f32,
+    pub boutons: u32,
+}
+
+/// Les bits des boutons de `Manette`, dans l'ordre du protocole.
+pub mod bouton {
+    pub const A: u32 = 1 << 0;
+    pub const B: u32 = 1 << 1;
+    pub const X: u32 = 1 << 2;
+    pub const Y: u32 = 1 << 3;
+    pub const L1: u32 = 1 << 4;
+    pub const R1: u32 = 1 << 5;
+    pub const SELECT: u32 = 1 << 6;
+    pub const START: u32 = 1 << 7;
+    pub const HAUT: u32 = 1 << 8;
+    pub const BAS: u32 = 1 << 9;
+    pub const GAUCHE: u32 = 1 << 10;
+    pub const DROITE: u32 = 1 << 11;
+    pub const STICK_G: u32 = 1 << 12;
+    pub const STICK_D: u32 = 1 << 13;
+}
+
+impl Manette {
+    pub fn appuye(&self, b: u32) -> bool {
+        self.boutons & b != 0
+    }
+
+    /// Au repos : rien d'enfoncé, sticks au centre.
+    pub fn au_repos(&self) -> bool {
+        self.boutons == 0 && self.lt == 0.0 && self.rt == 0.0 && self.gauche == [0.0; 2] && self.droit == [0.0; 2]
+    }
+}
+
+/// Une manette muette depuis ce temps (s) est remise au repos : un paquet perdu ne
+/// laisse pas une voiture accélérer.
+pub const MANETTE_MUETTE: f32 = 1.0;
+
 /// Un message de la télécommande ou de l'appareil piloté.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
@@ -69,6 +113,9 @@ pub enum Message {
     Touche(Frappe),
     /// La télécommande sert de clavier (celui de l'écran piloté se cache), ou plus.
     Clavier(bool),
+    /// « G lx ly rx ry lt rt boutons » : l'état de la manette, envoyé à chaque
+    /// changement et toutes les 0,1 s.
+    Manette(Manette),
     /// « Q » : la télécommande s'en va.
     Fin,
 }
@@ -99,6 +146,7 @@ impl Message {
                 Frappe::Droite => "K d".into(),
             },
             Message::Clavier(b) => format!("KB {}", *b as u8),
+            Message::Manette(m) => format!("G {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {}", m.gauche[0], m.gauche[1], m.droit[0], m.droit[1], m.lt, m.rt, m.boutons),
             Message::Fin => "Q".into(),
         }
     }
@@ -138,6 +186,10 @@ impl Message {
                 _ => return None,
             }),
             "KB" => Message::Clavier(reste == "1"),
+            "G" => {
+                let a = |i: usize| f(i).map(|v| v.clamp(-1.0, 1.0));
+                Message::Manette(Manette { gauche: [a(0)?, a(1)?], droit: [a(2)?, a(3)?], lt: a(4)?.max(0.0), rt: a(5)?.max(0.0), boutons: mots.get(6)?.parse().ok()? })
+            }
             "Q" => Message::Fin,
             _ => return None,
         })
@@ -208,6 +260,8 @@ pub struct Hote {
     clavier: bool,
     /// Le défilement en cours : où son doigt virtuel est rendu.
     defile: Option<(f32, f32)>,
+    /// La manette de la télécommande, et quand elle a parlé.
+    manette: Option<(Manette, Instant)>,
 }
 
 struct Ecoute {
@@ -294,6 +348,7 @@ fn boucle_hote(socket: UdpSocket, h: Arc<Mutex<Hote>>, arret: Arc<AtomicBool>) {
                 Message::Fin => {
                     h.lie = None;
                     h.clavier = false;
+                    h.manette = None;
                     // Un bouton tenu se lâche
                     if std::mem::take(&mut h.tenu) {
                         h.doigts.push_back(Message::Bouton(false));
@@ -306,6 +361,10 @@ fn boucle_hote(socket: UdpSocket, h: Arc<Mutex<Hote>>, arret: Arc<AtomicBool>) {
                 }
                 Message::Clavier(oui) => {
                     h.clavier = oui;
+                    None
+                }
+                Message::Manette(m) => {
+                    h.manette = Some((m, Instant::now()));
                     None
                 }
                 m => {
@@ -407,9 +466,19 @@ pub fn curseur() -> Option<(f32, f32, bool)> {
     (h.lie.is_some() && recent).then_some((x, y, h.tenu))
 }
 
-/// Le curseur est-il encore à montrer (pour redessiner quand il doit disparaître) ?
+/// La manette de la télécommande liée, si elle a parlé il y a moins de
+/// `MANETTE_MUETTE` s.
+pub fn manette() -> Option<Manette> {
+    let h = hote()?;
+    let h = h.lock().ok()?;
+    let (m, t) = h.manette?;
+    (h.lie.is_some() && t.elapsed().as_secs_f32() < MANETTE_MUETTE).then_some(m)
+}
+
+/// Le curseur est-il encore à montrer (pour redessiner quand il doit disparaître),
+/// une manette tenue ?
 pub fn anime() -> bool {
-    curseur().is_some()
+    curseur().is_some() || manette().is_some_and(|m| !m.au_repos())
 }
 
 // ----- Côté télécommande -----------------------------------------------------------
@@ -461,8 +530,9 @@ pub struct Client {
     relance: Option<Instant>,
     pub local: Option<(Ipv4Addr, u8)>,
     pub erreur: Option<String>,
-    /// La taille de l'écran piloté, en pixels.
+    /// La taille de l'écran piloté, en pixels ; son nom (« Flow », « WhiteRoom »…).
     pub taille: Option<(f32, f32)>,
+    pub nom_hote: Option<String>,
 }
 
 /// Les envois d'une recherche (toutes les 0,3 s) ; au troisième, chaque adresse du
@@ -475,7 +545,7 @@ impl Client {
         let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
         socket.set_nonblocking(true).map_err(|e| e.to_string())?;
         let _ = socket.set_broadcast(true);
-        Ok(Client { socket, trouves: Vec::new(), hote: None, lie: false, refuse: false, latence: Latence::default(), numero: 0, attente: VecDeque::new(), dernier_ping: None, origine: Instant::now(), derniere_reponse: None, relances: RELANCES, relance: None, local: reseau_local(), erreur, taille: None })
+        Ok(Client { socket, trouves: Vec::new(), hote: None, lie: false, refuse: false, latence: Latence::default(), numero: 0, attente: VecDeque::new(), dernier_ping: None, origine: Instant::now(), derniere_reponse: None, relances: RELANCES, relance: None, local: reseau_local(), erreur, taille: None, nom_hote: None })
     }
 
     /// Diffuse « qui accepte d'être piloté ? » (à tout le réseau, et au /24 local).
@@ -510,6 +580,8 @@ impl Client {
         self.hote = Some(a);
         self.lie = false;
         self.refuse = false;
+        self.taille = None;
+        self.nom_hote = None;
         self.latence = Latence::default();
         self.attente.clear();
         let _ = self.socket.send_to(Message::Lier(code).texte().as_bytes(), a);
@@ -537,6 +609,7 @@ impl Client {
             let Some(m) = std::str::from_utf8(&b[..n]).ok().and_then(Message::lire) else { continue };
             change = true;
             match m {
+                Message::Moi(nom) if Some(de) == self.hote => self.nom_hote = Some(nom),
                 Message::Moi(nom) => {
                     if !self.trouves.iter().any(|(a, _)| *a == de) {
                         self.trouves.push((de, nom));
@@ -545,6 +618,10 @@ impl Client {
                 Message::Lie(ok) if Some(de) == self.hote => {
                     self.lie = ok;
                     self.refuse = !ok;
+                    // Son nom dit ce qu'il sait faire
+                    if ok {
+                        self.envoyer(&Message::Qui);
+                    }
                 }
                 Message::Taille(w, h) if Some(de) == self.hote => self.taille = Some((w, h)),
                 Message::Ping(k, _) if Some(de) == self.hote => {
@@ -644,6 +721,7 @@ mod tests {
             Message::Defile(3.5, -12.0),
             Message::FinDefile,
             Message::Taille(1920.0, 1200.0),
+            Message::Manette(Manette { gauche: [0.5, -1.0], droit: [0.0, 0.25], lt: 0.0, rt: 1.0, boutons: bouton::A | bouton::DROITE }),
             Message::Clic,
             Message::Bouton(true),
             Message::Touche(Frappe::Car('é')),
@@ -716,6 +794,8 @@ mod tests {
         c.envoyer(&Message::Clic);
         c.envoyer(&Message::Touche(Frappe::Car('a')));
         c.envoyer(&Message::Clavier(true));
+        let m = Manette { gauche: [0.0, -1.0], rt: 1.0, boutons: bouton::A, ..Manette::default() };
+        c.envoyer(&Message::Manette(m));
         let mut ev = Vec::new();
         let mut fr = Vec::new();
         for _ in 0..200 {
@@ -735,10 +815,15 @@ mod tests {
         assert_eq!(fr, vec![Frappe::Car('a')]);
         assert!(clavier_distant());
         assert!(curseur().is_some());
+        assert_eq!(manette(), Some(m));
+        assert!(anime());
+        // Le nom de l'appareil piloté, demandé à la liaison
+        assert!(attendre(&mut c, &|c| c.nom_hote.as_deref() == Some("Flow")));
         // La télécommande s'en va : plus liée, plus de clavier distant
         c.delier();
         std::thread::sleep(Duration::from_millis(100));
         assert!(!clavier_distant());
+        assert_eq!(manette(), None);
         assert!(etat_hote().unwrap().1.is_none());
         ecouter(false).unwrap();
         assert!(etat_hote().is_none());

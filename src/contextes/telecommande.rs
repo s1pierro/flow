@@ -7,7 +7,10 @@
 //!   - **Écran** : la zone est l'autre écran en miroir, à plusieurs doigts (les gestes
 //!     de Flow y passent tels quels) ;
 //!   - **Clavier** : le clavier de cet appareil écrit dans le champ choisi là-bas (le
-//!     clavier de l'autre écran se cache).
+//!     clavier de l'autre écran se cache) ;
+//!   - **Manette** : deux sticks, la croix, A B X Y, L1 R1, les gâchettes, Select et
+//!     Start, à plusieurs doigts. Flow s'en sert dans la 3D des Lieux ; WhiteRoom la
+//!     voit comme une manette de jeu (n'y sont alors proposés que Manette et Délier).
 //!   La ligne du haut dit l'aller-retour mesuré (`telecommande::Latence`).
 //! - **Être piloté** : l'interrupteur ouvre l'écoute ; l'adresse et le code s'affichent.
 //!
@@ -17,7 +20,7 @@ use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::Rect;
 use crate::surface::{FenetreId, Placee};
-use crate::telecommande::{self as tc, Client, Message, Suivi};
+use crate::telecommande::{self as tc, bouton, Client, Manette, Message, Suivi};
 use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::net::Ipv4Addr;
@@ -31,7 +34,9 @@ const ADRESSE: Id = id("telecommande-adresse");
 const CODE: Id = id("telecommande-code");
 const SAISIE: Id = id("telecommande-saisie");
 
-const ONGLETS: [&str; 4] = ["Pavé", "Écran", "Clavier", "Délier"];
+const ONGLETS: [&str; 5] = ["Pavé", "Écran", "Clavier", "Manette", "Délier"];
+const MANETTE: usize = 3;
+const DELIER: usize = 4;
 
 /// Le doigt qui mène le pavé : où il est, quand il s'est posé, le chemin parcouru
 /// (en dp), sa vitesse lissée (dp/s), s'il a quitté la zone morte ; le nombre de
@@ -73,6 +78,11 @@ pub struct Telecommande {
     recherche: Option<Instant>,
     /// Les dernières frappes envoyées, pour les voir.
     tape: String,
+    /// La manette : le dernier état envoyé, et quand.
+    manette: Manette,
+    manette_envoyee: Option<Instant>,
+    /// Les aperçus montrent la vue liée sans réseau (`demo = oui`).
+    demo: bool,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -81,13 +91,16 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         erreur: None,
         adresse: Edition::new(e.texte("adresse").unwrap_or("")),
         code: Edition::default(),
-        onglet: 0,
         clavier_annonce: false,
         suivi: Suivi::default(),
         pave: None,
         tenu: false,
         recherche: None,
         tape: String::new(),
+        manette: Manette::default(),
+        manette_envoyee: None,
+        demo: e.texte("demo") == Some("oui"),
+        onglet: e.texte("onglet").and_then(|o| ONGLETS.iter().position(|n| *n == o)).filter(|&i| i != DELIER).unwrap_or(0),
     })
 }
 
@@ -103,7 +116,7 @@ impl Telecommande {
     }
 
     fn lie(&self) -> bool {
-        self.client.as_ref().is_some_and(|c| c.lie)
+        self.demo || self.client.as_ref().is_some_and(|c| c.lie)
     }
 
     fn envoyer(&self, m: &Message) {
@@ -120,6 +133,10 @@ impl Telecommande {
         self.pave = None;
         if std::mem::take(&mut self.tenu) {
             self.envoyer(&Message::Bouton(false));
+        }
+        if !self.manette.au_repos() {
+            self.manette = Manette::default();
+            self.envoyer(&Message::Manette(self.manette));
         }
         if std::mem::take(&mut self.clavier_annonce) {
             self.envoyer(&Message::Clavier(false));
@@ -235,10 +252,19 @@ impl Telecommande {
         let pad = cx.pad();
         let h = cx.commande();
         cx.clip(Some(r));
-        let choix = cx.tabs(sub_id(base, 30), r.x + pad, r.y + pad, &ONGLETS, self.onglet);
+        // Un WhiteRoom n'a que faire du pavé, de l'écran ni du clavier
+        let jeu = self.client.as_ref().and_then(|c| c.nom_hote.as_deref()).is_some_and(|n| n.starts_with("WhiteRoom"));
+        let visibles: Vec<usize> = if jeu { vec![MANETTE, DELIER] } else { (0..ONGLETS.len()).collect() };
+        if !visibles.contains(&self.onglet) {
+            self.quitter_onglet(c, k);
+            self.onglet = MANETTE;
+        }
+        let noms: Vec<&str> = visibles.iter().map(|&i| ONGLETS[i]).collect();
+        let actuel = visibles.iter().position(|&i| i == self.onglet).unwrap_or(0);
+        let choix = visibles[cx.tabs(sub_id(base, 30), r.x + pad, r.y + pad, &noms, actuel)];
         if choix != self.onglet {
             self.quitter_onglet(c, k);
-            if choix == 3 {
+            if choix == DELIER {
                 self.delier(c, k);
                 cx.clip(None);
                 return "déliée".into();
@@ -262,6 +288,7 @@ impl Telecommande {
         match self.onglet {
             0 => self.pave(cx, zone, base),
             1 => self.ecran(cx, zone, base),
+            MANETTE => self.manette(cx, zone, base),
             _ => self.clavier(cx, c, zone, k),
         }
         cx.clip(None);
@@ -371,6 +398,158 @@ impl Telecommande {
         }
     }
 
+    /// La manette : gâchettes et tranches en haut ; à gauche le stick et la croix, à
+    /// droite A B X Y et le second stick ; Select et Start au milieu.
+    fn manette(&mut self, cx: &mut Cx, zone: Rect, base: Id) {
+        let (d, col) = (cx.dp, cx.couleurs());
+        let e = cx.pad() * 0.5;
+        let h = cx.commande();
+        let mb = sub_id(base, 60);
+        let mut m = Manette::default();
+
+        // Une touche : vraie tant qu'un doigt y est posé
+        let touche = |cx: &mut Cx, id: Id, r: Rect, nom: &str| -> bool {
+            cx.ui.region_add(id, r, Sense::Drag);
+            let on = !cx.ui.doigts_sur(id).is_empty();
+            cx.dl.rrect(r, cx.theme.rayon(r.h).min(r.w / 2.0), if on { col.accent } else { col.puce });
+            cx.centered(r, nom, 15.0, if on { col.sur_accent } else { col.texte });
+            on
+        };
+
+        // Les tranches : LT L1 … R1 RT
+        let q = (zone.w - 3.0 * e) / 4.0;
+        let haut = |i: f32| Rect::new(zone.x + i * (q + e), zone.y, q, h);
+        if touche(cx, sub_id(mb, 1), haut(0.0), "LT") {
+            m.lt = 1.0;
+        }
+        if touche(cx, sub_id(mb, 2), haut(1.0), "L1") {
+            m.boutons |= bouton::L1;
+        }
+        if touche(cx, sub_id(mb, 3), haut(2.0), "R1") {
+            m.boutons |= bouton::R1;
+        }
+        if touche(cx, sub_id(mb, 4), haut(3.0), "RT") {
+            m.rt = 1.0;
+        }
+
+        // Le reste : deux moitiés et une colonne au milieu
+        let reste = Rect::new(zone.x, zone.y + h + e, zone.w, (zone.h - h - e).max(0.0));
+        let milieu = (reste.w * 0.18).min(110.0 * d);
+        let mw = (reste.w - milieu - 2.0 * e) / 2.0;
+        let gauche = Rect::new(reste.x, reste.y, mw, reste.h);
+        let droite = Rect::new(reste.right() - mw, reste.y, mw, reste.h);
+        let colonne = Rect::new(gauche.right() + e, reste.y, milieu, reste.h);
+        // Une moitié se partage en deux cases : côte à côte si elle est large (paysage),
+        // l'une sur l'autre sinon ; la première est à l'extérieur, ou en haut
+        let cases = |r: Rect, exterieur_a_droite: bool| -> (Rect, Rect) {
+            if r.w > r.h * 1.3 {
+                let w = r.w / 2.0;
+                let (g, d) = (Rect::new(r.x, r.y, w, r.h), Rect::new(r.x + w, r.y, w, r.h));
+                if exterieur_a_droite { (d, g) } else { (g, d) }
+            } else {
+                (Rect::new(r.x, r.y, r.w, r.h / 2.0), Rect::new(r.x, r.y + r.h / 2.0, r.w, r.h / 2.0))
+            }
+        };
+        let (case_stick_g, case_croix) = cases(gauche, false);
+        let (case_abxy, case_stick_d) = cases(droite, true);
+        let bh = h.min(colonne.h / 3.0);
+        let sel = Rect::new(colonne.x, colonne.cy() - bh - e / 2.0, colonne.w, bh);
+        let start = Rect::new(colonne.x, colonne.cy() + e / 2.0, colonne.w, bh);
+        if touche(cx, sub_id(mb, 5), sel, "Select") {
+            m.boutons |= bouton::SELECT;
+        }
+        if touche(cx, sub_id(mb, 6), start, "Start") {
+            m.boutons |= bouton::START;
+        }
+
+        m.gauche = Self::stick(cx, sub_id(mb, 10), case_stick_g);
+        m.droit = Self::stick(cx, sub_id(mb, 11), case_stick_d);
+
+        // La croix : une seule zone, la direction d'après le doigt (le pouce glisse
+        // d'une flèche à l'autre, et vise les diagonales)
+        let croix = case_croix;
+        let cid = sub_id(mb, 12);
+        cx.ui.region_add(cid, croix, Sense::Drag);
+        let (c0, rc) = ([croix.cx(), croix.cy()], (croix.w.min(croix.h) / 2.0 - e).max(1.0));
+        for (_, x, y) in cx.ui.doigts_sur(cid) {
+            let (dx, dy) = ((x - c0[0]) / rc, (y - c0[1]) / rc);
+            let l = dx.hypot(dy);
+            if l > 0.2 {
+                if dx > 0.38 * l {
+                    m.boutons |= bouton::DROITE;
+                }
+                if dx < -0.38 * l {
+                    m.boutons |= bouton::GAUCHE;
+                }
+                if dy > 0.38 * l {
+                    m.boutons |= bouton::BAS;
+                }
+                if dy < -0.38 * l {
+                    m.boutons |= bouton::HAUT;
+                }
+            }
+        }
+        let b = rc * 0.36;
+        for (bit, ox, oy) in [(bouton::HAUT, 0.0, -1.0), (bouton::BAS, 0.0, 1.0), (bouton::GAUCHE, -1.0, 0.0), (bouton::DROITE, 1.0, 0.0)] {
+            let on = m.appuye(bit);
+            let r = Rect::new(c0[0] + ox * rc * 0.62 - b, c0[1] + oy * rc * 0.62 - b, 2.0 * b, 2.0 * b);
+            cx.dl.rrect(r, 6.0 * d, if on { col.accent } else { col.puce });
+        }
+        cx.dl.rrect(Rect::new(c0[0] - b, c0[1] - b, 2.0 * b, 2.0 * b), 0.0, col.puce);
+
+        // A B X Y : une seule zone, chaque doigt prend le bouton le plus proche
+        let abxy = case_abxy;
+        let aid = sub_id(mb, 13);
+        cx.ui.region_add(aid, abxy, Sense::Drag);
+        let (c1, ra) = ([abxy.cx(), abxy.cy()], (abxy.w.min(abxy.h) / 2.0 - e).max(1.0));
+        let places = [(bouton::Y, "Y", 0.0, -1.0), (bouton::A, "A", 0.0, 1.0), (bouton::X, "X", -1.0, 0.0), (bouton::B, "B", 1.0, 0.0)];
+        for (_, x, y) in cx.ui.doigts_sur(aid) {
+            let (dx, dy) = ((x - c1[0]) / ra, (y - c1[1]) / ra);
+            let pres = places.iter().min_by(|p, q| ((dx - p.2 * 0.62).hypot(dy - p.3 * 0.62)).total_cmp(&(dx - q.2 * 0.62).hypot(dy - q.3 * 0.62)));
+            if let Some(p) = pres {
+                m.boutons |= p.0;
+            }
+        }
+        let rb = ra * 0.33;
+        for (bit, nom, ox, oy) in places {
+            let on = m.appuye(bit);
+            let r = Rect::new(c1[0] + ox * ra * 0.62 - rb, c1[1] + oy * ra * 0.62 - rb, 2.0 * rb, 2.0 * rb);
+            cx.dl.rrect(r, rb, if on { col.accent } else { col.puce });
+            cx.centered(r, nom, 17.0, if on { col.sur_accent } else { col.texte });
+        }
+
+        // Envoyée à chaque changement, et toutes les 0,1 s pour dire qu'elle est là
+        if m != self.manette || self.manette_envoyee.is_none_or(|t| t.elapsed().as_secs_f32() >= 0.1) {
+            self.manette = m;
+            self.manette_envoyee = Some(Instant::now());
+            self.envoyer(&Message::Manette(m));
+        }
+    }
+
+    /// Un stick dans `cell` : sa position (−1 à 1, y vers le bas), d'après le premier
+    /// doigt posé ; il revient au centre quand on le lâche.
+    fn stick(cx: &mut Cx, id: Id, cell: Rect) -> [f32; 2] {
+        let (d, col) = (cx.dp, cx.couleurs());
+        cx.ui.region_add(id, cell, Sense::Drag);
+        let c = [cell.cx(), cell.cy()];
+        let r = (cell.w.min(cell.h) / 2.0 - 10.0 * d).max(8.0 * d);
+        // Le bouton fait un tiers du rayon : la course est ce qui reste
+        let course = r * 0.68;
+        let mut v = [0.0, 0.0];
+        if let Some((_, x, y)) = cx.ui.doigts_sur(id).into_iter().min_by_key(|p| p.0) {
+            let (dx, dy) = ((x - c[0]) / course, (y - c[1]) / course);
+            let l = dx.hypot(dy).max(1.0);
+            v = [dx / l, dy / l];
+        }
+        cx.dl.secteur(c, r - 2.5 * d, r, 0.0, std::f32::consts::TAU, 0.0, col.ligne);
+        cx.dl.rrect(Rect::new(c[0] - r, c[1] - r, 2.0 * r, 2.0 * r), r, [col.puce[0], col.puce[1], col.puce[2], 120]);
+        let k = r * 0.32;
+        let (kx, ky) = (c[0] + v[0] * course, c[1] + v[1] * course);
+        let on = v != [0.0, 0.0];
+        cx.dl.rrect(Rect::new(kx - k, ky - k, 2.0 * k, 2.0 * k), k, if on { col.accent } else { col.puce });
+        v
+    }
+
     fn clavier(&mut self, cx: &mut Cx, c: &mut Commun, zone: Rect, k: usize) {
         let col = cx.couleurs();
         let cible = sub_id(SAISIE, k);
@@ -413,6 +592,7 @@ impl Contexte for Telecommande {
         if !self.adresse.texte.is_empty() {
             e.mettre("adresse", self.adresse.texte.clone());
         }
+        e.mettre("onglet", ONGLETS[self.onglet]);
     }
 
     fn avancer(&mut self, _dt: f32, _c: &Commun) {

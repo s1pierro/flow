@@ -90,6 +90,7 @@ fn main() {
         Shot { name: "images", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "images-visionneuse", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 23 },
         Shot { name: "telecommande", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "telecommande-manette", w: 2400, h: 1080, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "toile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -332,6 +333,9 @@ fn main() {
                 let vue3d = match s.name { "lieux-3d" => "vue3d = 0.5 0.45 4000 0 0 0\n", "lieux-3d-pres" => "vue3d = 2.6 0.22 700 -150 0 -50\n", "lieux-3d-portrait" => "vue3d = -0.6 0.35 2500 0 0 0\n", _ => "" };
                 app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}outil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
             }
+        }
+        if s.name == "telecommande-manette" {
+            app.ouvrir_espace("fenetres = F1:telecommande\n[fenetre 1]\ndemo = oui\nonglet = Manette\n");
         }
         if s.name == "telecommande" {
             // L'écoute ouverte : l'adresse et le code s'affichent

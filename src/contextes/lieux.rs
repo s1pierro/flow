@@ -174,6 +174,8 @@ pub struct Lieux {
     classe: usize,
     trait_: Option<Trait>,
     pincement: f32,
+    /// La dernière image où une manette a mené la 3D.
+    manette_vu: Option<std::time::Instant>,
     passe: Vec<Retouche>,
     futur: Vec<Retouche>,
     /// Une retouche du panneau en cours (un curseur tiré) : elle ne s'empile qu'une fois.
@@ -218,6 +220,7 @@ impl Default for Lieux {
             classe: 1,
             trait_: None,
             pincement: 1.0,
+            manette_vu: None,
             passe: Vec::new(),
             futur: Vec::new(),
             ouverte: false,
@@ -1066,6 +1069,10 @@ impl Lieux {
             self.trois_d = Some(r);
         }
         let dp = cx.dp;
+        // La manette d'une télécommande fait voler la caméra
+        let maintenant = std::time::Instant::now();
+        let manette = crate::telecommande::manette().map(|m| (m, self.manette_vu.map_or(0.0, |t| maintenant.duration_since(t).as_secs_f32().min(0.1))));
+        self.manette_vu = manette.map(|_| maintenant);
         let Some(r) = &mut self.trois_d else { return };
         for g in cx.ui.gestes(sub_id(base, 2), zone) {
             match g {
@@ -1088,6 +1095,9 @@ impl Lieux {
                 }
                 _ => {}
             }
+        }
+        if let Some((m, dt)) = manette {
+            r.piloter(&m, dt);
         }
         let Some(carte) = &mut self.carte else { return };
         cx.clip(Some(zone));
