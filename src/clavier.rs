@@ -384,7 +384,7 @@ impl Clavier {
             let mut x = r.x + pad + (10.0 - total) * unite / 2.0;
             for &(sorte, l) in rangee {
                 let k = Rect::new(x, y0 + i as f32 * kh, l * unite, kh);
-                self.touches.push((k, sorte, sub_id(TOUCHE, n + if self.symboles { 1000 } else { 0 })));
+                self.touches.push((k, sorte, sub_id(TOUCHE, n)));
                 x += l * unite;
                 n += 1;
             }
@@ -395,7 +395,14 @@ impl Clavier {
                 Some(g) => {
                     vues.push(tid);
                     let maintenant = self.temps;
+                    // Les ids des touches ne dépendent pas de la couche (l'appui qui suit
+                    // un changement de couche vise encore les régions de l'image
+                    // d'avant) : une tenue dont la touche a changé repart de zéro
                     let i = match self.tenues.iter().position(|t| t.id == tid) {
+                        Some(i) if self.tenues[i].sorte != sorte => {
+                            self.tenues[i] = Tenue { id: tid, sorte, rect: k, debut: maintenant, depart: (g.x, g.y), doigt: (g.x, g.y), repete: 0, curseur: 0, variantes: None };
+                            i
+                        }
                         Some(i) => i,
                         None => {
                             self.tenues.push(Tenue { id: tid, sorte, rect: k, debut: maintenant, depart: (g.x, g.y), doigt: (g.x, g.y), repete: 0, curseur: 0, variantes: None });
@@ -439,7 +446,7 @@ impl Clavier {
                     }
                 }
                 None => {
-                    if let Some(i) = self.tenues.iter().position(|t| t.id == tid) {
+                    if let Some(i) = self.tenues.iter().position(|t| t.id == tid && t.sorte == sorte) {
                         let mut t = self.tenues.remove(i);
                         if t.sorte == Sorte::Espace && t.repete > 0 {
                             t.curseur = t.curseur.max(1);
@@ -754,6 +761,8 @@ mod tests {
         fn tenir(&mut self, n: usize, s: f32, dx: f32) {
             let (x, y) = self.touche(n);
             self.ui.event(Event::Down { id: 0, x, y }, self.t);
+            // Une image voit le doigt posé avant qu'il bouge, comme sur l'appareil
+            self.image(0.0);
             let pas = 20;
             for k in 1..=pas {
                 self.ui.event(Event::Move { id: 0, x: x + dx * k as f32 / pas as f32, y }, self.t);

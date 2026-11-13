@@ -4,7 +4,7 @@
 use crate::draw::{Color, DrawList, Rect};
 use std::collections::HashMap;
 
-pub const ATLAS: usize = 1024;
+pub const ATLAS: usize = 2048;
 const FONTS: [&str; 3] = ["/system/fonts/RobotoStatic-Regular.ttf", "/system/fonts/Roboto-Regular.ttf", "/system/fonts/DroidSans.ttf"];
 /// La police à chasse fixe, pour les lignes d'état ; à défaut, la police principale.
 const MONO: [&str; 3] = ["/system/fonts/DroidSansMono.ttf", "/system/fonts/RobotoMono-Regular.ttf", "/system/fonts/CutiveMono.ttf"];
@@ -23,6 +23,9 @@ pub struct Text {
     glyphs: HashMap<(char, u32, bool), Glyph>,
     pub atlas: Vec<u8>,
     pub dirty: bool,
+    /// Levé quand l'atlas plein a été vidé : les glyphes déjà posés dans l'image en
+    /// cours pointent vers l'ancien, il faut redessiner une image.
+    pub refaire: bool,
     shelf: (usize, usize, usize), // x, y, hauteur de la rangée courante
 }
 
@@ -36,7 +39,7 @@ impl Text {
             })
         };
         let (font, mono) = (charger(&FONTS), charger(&MONO));
-        Text { font, mono, glyphs: HashMap::new(), atlas: vec![0; ATLAS * ATLAS], dirty: true, shelf: (1, 1, 0) }
+        Text { font, mono, glyphs: HashMap::new(), atlas: vec![0; ATLAS * ATLAS], dirty: true, refaire: false, shelf: (1, 1, 0) }
     }
 
     fn glyph(&mut self, c: char, px: f32, mono: bool) -> Option<Glyph> {
@@ -52,7 +55,16 @@ impl Text {
             (x, y, row) = (1, y + row + 1, 0);
         }
         if y + h + 1 >= ATLAS {
-            return None; // atlas plein : le glyphe ne s'affiche pas, rien ne plante
+            // Atlas plein (beaucoup de tailles différentes) : on le vide et on le
+            // remplit de nouveau, plutôt que de laisser des caractères invisibles qui
+            // prennent quand même leur place
+            if self.glyphs.is_empty() || h + 2 >= ATLAS || w + 2 >= ATLAS {
+                return None;
+            }
+            self.glyphs.clear();
+            self.atlas.fill(0);
+            self.refaire = true;
+            (x, y, row) = (1, 1, 0);
         }
         for line in 0..h {
             let at = (y + line) * ATLAS + x;
@@ -129,5 +141,28 @@ impl Text {
 impl Default for Text {
     fn default() -> Text {
         Text::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l_atlas_plein_se_vide_au_lieu_de_perdre_des_caracteres() {
+        let mut t = Text::new();
+        if t.font.is_none() {
+            return; // pas de police système ici
+        }
+        // De grandes tailles remplissent l'atlas
+        let mut px = 40.0;
+        while !t.refaire && px < 2000.0 {
+            for c in "abcdefghijklmnopqrstuvwxyz".chars() {
+                t.glyph(c, px, false);
+            }
+            px += 7.0;
+        }
+        assert!(t.refaire, "l'atlas aurait dû se remplir");
+        assert!(t.glyph('k', 61.0, false).is_some());
     }
 }

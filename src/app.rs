@@ -397,7 +397,11 @@ impl App {
             let lanceur = (l.start.right() - screen.x).clamp(0.0, barre.w);
             Rect::new(barre.x + lanceur, barre.y, barre.w - lanceur, barre.h)
         } else {
-            Rect::new(barre.x, l.start.y.min(barre.y), barre.w, barre.h)
+            // Lanceur fermé, la barre reste en bas : son bord haut est celui de l'écran
+            // réduit, qui avec le clavier ouvert est le haut du clavier (la barre
+            // couvrait alors celle du clavier et son bouton Baisser)
+            let monte = screen.bottom() - l.start.y > 0.5;
+            Rect::new(barre.x, if monte { l.start.y.min(barre.y) } else { barre.y }, barre.w, barre.h)
         };
         self.barre(cx, barre);
 

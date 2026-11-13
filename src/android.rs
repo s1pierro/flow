@@ -322,7 +322,7 @@ fn render_loop() -> Result<(), String> {
         egl.swap();
         // Après une rotation, la nouvelle taille n'est connue qu'ici ; et un appui change
         // l'état après le dessin du widget, qu'il faut redessiner à jour.
-        again = egl.size() != (w, h) || ui.a_redessiner() || ui.gestes_en_attente();
+        again = egl.size() != (w, h) || ui.a_redessiner() || ui.gestes_en_attente() || std::mem::take(&mut text.refaire);
     }
 }
 
