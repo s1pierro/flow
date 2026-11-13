@@ -43,7 +43,8 @@ subdiviser, fusionner, créer une face, trianguler, retourner, dupliquer, suppri
 rétablir ; Fichiers ouvre désormais les `.glb` dans Mailles),
 Lieux (les lieux réels de S.A.G.E., fichiers `.reel` : les générer depuis le téléphone — jusqu'à
 20 × 20 km autour d'un point de France, largeur et longueur réglables, relief et toits LiDAR de l'IGN, eau, routes, ponts, bâtiments et
-occupation du sol d'OpenStreetMap —, les explorer sur une carte en tuiles, et les éditer :
+occupation du sol d'OpenStreetMap —, les explorer sur une carte en tuiles ou en 3D (le relief
+drapé de la carte, à niveaux de détail), et les éditer :
 bâtiments, routes et ponts, pinceaux de relief, d'eau et de sol ; annuler, rétablir. Le format
 vient de la crate partagée `sage-reel` du dépôt S.A.G.E. Un lieu généré est dérivé d'OSM (ODbL) :
 il ne se publie pas),

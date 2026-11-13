@@ -14,6 +14,7 @@ pub mod applet;
 pub mod android;
 pub mod audio;
 pub mod carte;
+pub mod relief3d;
 pub mod clavier;
 pub mod contexte;
 pub mod contextes;

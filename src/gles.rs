@@ -62,6 +62,7 @@ api!(GlApi {
     glUniform1f: fn(i32, f32);
     glUniform2f: fn(i32, f32, f32);
     glUniform3f: fn(i32, f32, f32, f32);
+    glUniform4f: fn(i32, f32, f32, f32, f32);
     glUniformMatrix4fv: fn(i32, i32, u8, *const f32);
     glGenVertexArrays: fn(i32, *mut u32);
     glBindVertexArray: fn(u32);
@@ -72,6 +73,8 @@ api!(GlApi {
     glEnableVertexAttribArray: fn(u32);
     glGenTextures: fn(i32, *mut u32);
     glDeleteTextures: fn(i32, *const u32);
+    glDeleteBuffers: fn(i32, *const u32);
+    glDeleteVertexArrays: fn(i32, *const u32);
     glBindTexture: fn(u32, u32);
     glActiveTexture: fn(u32);
     glTexParameteri: fn(u32, u32, i32);

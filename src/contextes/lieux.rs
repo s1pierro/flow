@@ -21,8 +21,14 @@
 //!   - **Eau** : un pinceau qui met de l'eau (en creusant le lit sous le niveau) ou en
 //!     retire ; le niveau de l'eau.
 //!   - **Sol** : un pinceau d'occupation du sol (bois, prés, champs, habité, zones).
-//! - **Dans la barre de la fenêtre** : la liste des lieux, le nom, enregistrer, annuler
-//!   et rétablir.
+//! - **La 3D** (`relief3d`) : le cube de la barre fait passer de la carte au relief en
+//!   3D, drapé des mêmes tuiles, et retour, sur le même point ; un doigt tourne autour,
+//!   deux doigts rapprochent et déplacent. Un outil d'édition ramène à la carte.
+//! - **Dans la barre de la fenêtre** : la liste des lieux, la 3D, le nom, enregistrer,
+//!   annuler et rétablir.
+//!
+//! Un lieu couvre un rectangle de la carte de S.A.G.E. (`Grille`, format 7) : la carte et
+//! la 3D ne montrent que lui.
 //!
 //! Un lieu généré est dérivé d'OpenStreetMap (ODbL) : il ne se publie pas.
 
@@ -33,9 +39,11 @@ use crate::draw::{Color, Rect};
 use crate::gestes::Geste;
 use crate::surface::{FenetreId, Placee};
 use crate::ui::{id, sub_id, Id};
+use crate::relief3d::Relief3d;
+use crate::sculpture::Camera;
 use crate::widgets::{Cx, Icon};
 use sage_reel::generer::{self, Demande, Reseau, Suivi};
-use sage_reel::{cote_sol, origine, toits, Batiment, Lieu, Route};
+use sage_reel::{origine, toits, Batiment, Lieu, Route};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -174,6 +182,11 @@ pub struct Lieux {
     doigt: Option<(f32, f32)>,
     zone: Rect,
     dp: f32,
+    /// La vue 3D, quand elle remplace la carte ; sa caméra relue de l'espace, en
+    /// attendant le lieu ; le doigt qui la fait tourner.
+    trois_d: Option<Relief3d>,
+    camera3d: Option<Camera>,
+    orbite: Option<(f32, f32)>,
 }
 
 impl Default for Lieux {
@@ -211,6 +224,9 @@ impl Default for Lieux {
             doigt: None,
             zone: Rect::default(),
             dp: 1.0,
+            trois_d: None,
+            camera3d: None,
+            orbite: None,
         }
     }
 }
@@ -222,6 +238,9 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         let v = e.nombres("vue");
         if v.len() == 3 && v[2] > 0.0 {
             l.vue = Some(Vue { cx: v[0] as f64, cz: v[1] as f64, echelle: v[2] });
+        }
+        if let [la, t, d, x, y, z] = e.nombres("vue3d")[..] {
+            l.camera3d = Some(Camera { lacet: la, tangage: t, distance: d, cible: [x, y, z] });
         }
     }
     l.outil = (e.nombre("outil").unwrap_or(0.0) as usize).min(OUTILS.len() - 1);
@@ -355,6 +374,16 @@ impl Lieux {
         (m(self.largeur), m(self.longueur))
     }
 
+    /// La grille du lieu à générer (ou du lieu vierge), au pas `pas`.
+    fn grille_au(&self, pas: f64) -> sage_reel::Grille {
+        let (x, z) = self.emprise_m();
+        sage_reel::Grille::emprise(pas, x, z)
+    }
+
+    fn grille(&self) -> sage_reel::Grille {
+        self.grille_au(self.pas as f64)
+    }
+
     fn lister(&mut self, c: &Commun) {
         let mut v = Vec::new();
         if let Some(d) = Lieux::dossier(c) {
@@ -380,8 +409,10 @@ impl Lieux {
     /// Ouvre un lieu tout prêt (lu, généré, vierge).
     fn ouvrir_lieu(&mut self, lieu: Lieu, chemin: Option<PathBuf>, modifie: bool) {
         self.carte = Some(Carte::new(lieu));
+        self.trois_d = None;
         if self.chemin != chemin {
             self.vue = None;
+            self.camera3d = None;
         }
         self.chemin = chemin;
         self.modifie = modifie;
@@ -395,6 +426,7 @@ impl Lieux {
 
     fn fermer_lieu(&mut self) {
         self.carte = None;
+        self.trois_d = None;
         self.chemin = None;
         self.vue = None;
         self.modifie = false;
@@ -442,7 +474,8 @@ impl Lieux {
             return;
         }
         // Un pas lâche : un lieu vierge est léger
-        self.ouvrir_lieu(Lieu::vierge(&nom, lat, lon, self.pas.max(4.0) as f64, 100.0), chemin, true);
+        let pas = self.pas.max(4.0) as f64;
+        self.ouvrir_lieu(Lieu::vierge_sur(&nom, lat, lon, pas, self.grille_au(pas), 100.0), chemin, true);
     }
 
     fn enregistrer(&mut self) {
@@ -550,35 +583,39 @@ impl Lieux {
                 (Retouche::Insere(li, k, e), z, true)
             }
             Retouche::Grille { relief, eau, sol } => {
-                let (n, m) = (l.cote, cote_sol(l.cote));
+                // Les indices sont ceux des tableaux du lieu (son rectangle de la carte)
+                let g = l.grille;
+                let (mx, mz) = g.sol();
                 let (o, p) = (origine() as f32, l.pas as f32);
                 let mut z = vide;
-                let mut etendre = |i: u32, cote: usize, pas: f32| {
-                    let (a, b) = ((i as usize % cote) as f32 * pas + o, (i as usize / cote) as f32 * pas + o);
+                let mut etendre = |(a, b): (i64, i64), pas: f32| {
+                    let (a, b) = (a as f32 * pas + o, b as f32 * pas + o);
                     z = union(z, [a - pas, b - pas, a + pas, b + pas]);
                 };
                 let mut r2 = Vec::with_capacity(relief.len());
                 for &(i, _) in &relief {
-                    r2.push((i, l.h_point((i as usize % n) as i64, (i as usize / n) as i64)));
-                    etendre(i, n, p);
+                    let (a, b) = g.point(i as usize);
+                    r2.push((i, l.h_point(a, b)));
+                    etendre((a, b), p);
                 }
                 l.poser_hauteurs(&relief.iter().map(|&(i, v)| (i as usize, v)).collect::<Vec<_>>());
                 let mut e2 = Vec::with_capacity(eau.len());
                 for &(i, v) in &eau {
-                    let (a, b) = ((i as usize % n) as i64, (i as usize / n) as i64);
+                    let (a, b) = g.point(i as usize);
                     e2.push((i, l.est_eau(a, b)));
                     l.poser_eau(a, b, v);
-                    etendre(i, n, p);
+                    etendre((a, b), p);
                 }
                 let mut s2 = Vec::with_capacity(sol.len());
-                if !sol.is_empty() && l.sol.len() != m * m {
-                    l.sol = vec![0; m * m];
+                if !sol.is_empty() && l.sol.len() != mx * mz {
+                    l.sol = vec![0; mx * mz];
                 }
                 for &(i, v) in &sol {
                     if let Some(x) = l.sol.get_mut(i as usize) {
                         s2.push((i, *x));
                         *x = v;
-                        etendre(i, m, p * 2.0);
+                        let (a, b) = ((g.a0 / 2 + i as usize % mx) as i64, (g.b0 / 2 + i as usize / mx) as i64);
+                        etendre((a, b), p * 2.0);
                     }
                 }
                 (Retouche::Grille { relief: r2, eau: e2, sol: s2 }, z, false)
@@ -653,8 +690,10 @@ impl Lieux {
     // ----- La carte
 
     fn vue_initiale(&self, zone: Rect) -> Vue {
-        let c = self.carte.as_ref().and_then(|c| c.donnees.read().ok().map(|d| d.monde())).unwrap_or((-10000.0, 20000.0));
-        Vue { cx: (c.0 + c.1 / 2.0) as f64, cz: (c.0 + c.1 / 2.0) as f64, echelle: zone.w.min(zone.h) / c.1 }
+        // Le lieu entier, au centre
+        let e = self.carte.as_ref().and_then(|c| c.donnees.read().ok().map(|d| d.lieu.etendue())).unwrap_or([-10000.0, -10000.0, 10000.0, 10000.0]);
+        let (w, h) = ((e[2] - e[0]) as f32, (e[3] - e[1]) as f32);
+        Vue { cx: (e[0] + e[2]) / 2.0, cz: (e[1] + e[3]) / 2.0, echelle: (zone.w / w).min(zone.h / h) }
     }
 
     /// Ce qu'il y a au point (x, z), en quelques lignes.
@@ -716,22 +755,24 @@ impl Lieux {
         let l = &mut d.lieu;
         let Retouche::Grille { relief, eau, sol } = retouche else { return };
         let (o, p) = (origine() as f32, l.pas as f32);
-        let n = l.cote as i64;
+        let g = l.grille;
         let zone = [x - rayon, z - rayon, x + rayon, z + rayon];
         match outil {
             RELIEF | EAU => {
                 let (a0, a1) = (((x - rayon - o) / p).floor() as i64, ((x + rayon - o) / p).ceil() as i64);
                 let (b0, b1) = (((z - rayon - o) / p).floor() as i64, ((z + rayon - o) / p).ceil() as i64);
                 let mut changes = Vec::new();
-                for b in b0.max(0)..=b1.min(n - 1) {
-                    for a in a0.max(0)..=a1.min(n - 1) {
+                // Seulement dans le lieu
+                for b in b0.max(g.b0 as i64)..=b1.min((g.b0 + g.nz) as i64 - 1) {
+                    for a in a0.max(g.a0 as i64)..=a1.min((g.a0 + g.nx) as i64 - 1) {
                         let (px, pz) = (a as f32 * p + o, b as f32 * p + o);
                         let dd = (px - x).hypot(pz - z);
                         if dd > rayon {
                             continue;
                         }
                         let w = lisse(1.0 - dd / rayon);
-                        let i = (b * n + a) as u32;
+                        let Some(i) = g.indice(a, b) else { continue };
+                        let i = i as u32;
                         let h = l.h_point(a, b);
                         let neuf = if outil == RELIEF {
                             match pinceau {
@@ -771,19 +812,21 @@ impl Lieux {
                 l.poser_hauteurs(&changes);
             }
             _ => {
-                let m = cote_sol(l.cote) as i64;
-                if l.sol.len() != (m * m) as usize {
-                    l.sol = vec![0; (m * m) as usize];
+                let (mx, mz) = g.sol();
+                if l.sol.len() != mx * mz {
+                    l.sol = vec![0; mx * mz];
                 }
+                // La grille du sol de la carte, au double pas ; le lieu commence en (sa, sb)
+                let (sa, sb) = ((g.a0 / 2) as i64, (g.b0 / 2) as i64);
                 let q = 2.0 * p;
                 let (a0, a1) = (((x - rayon - o) / q).floor() as i64, ((x + rayon - o) / q).ceil() as i64);
                 let (b0, b1) = (((z - rayon - o) / q).floor() as i64, ((z + rayon - o) / q).ceil() as i64);
-                for b in b0.max(0)..=b1.min(m - 1) {
-                    for a in a0.max(0)..=a1.min(m - 1) {
+                for b in b0.max(sb)..=b1.min(sb + mz as i64 - 1) {
+                    for a in a0.max(sa)..=a1.min(sa + mx as i64 - 1) {
                         if (a as f32 * q + o - x).hypot(b as f32 * q + o - z) > rayon {
                             continue;
                         }
-                        let i = (b * m + a) as usize;
+                        let i = (b - sb) as usize * mx + (a - sa) as usize;
                         if l.sol[i] != classe {
                             if vus.insert(i as u32) {
                                 sol.push((i as u32, l.sol[i]));
@@ -803,7 +846,7 @@ impl Lieux {
     fn recevoir(&mut self, g: Geste, zone: Rect) {
         let Some(mut vue) = self.vue else { return };
         let (min, max) = {
-            let c = self.carte.as_ref().and_then(|c| c.donnees.read().ok().map(|d| d.monde().1)).unwrap_or(20000.0);
+            let c = self.carte.as_ref().and_then(|c| c.donnees.read().ok().map(|d| d.monde().2)).unwrap_or(20000.0);
             (zone.w.min(zone.h) / c * 0.5, 8.0)
         };
         let peint = matches!(self.outil, RELIEF | EAU | SOL);
@@ -987,6 +1030,70 @@ impl Lieux {
         }
     }
 
+    /// Passe de la carte à la 3D (sur le même point), ou l'inverse.
+    fn basculer_3d(&mut self) {
+        if let Some(r) = self.trois_d.take() {
+            if let Some(v) = &mut self.vue {
+                (v.cx, v.cz) = (r.camera.cible[0] as f64, r.camera.cible[2] as f64);
+            }
+            return;
+        }
+        let Some(carte) = &self.carte else { return };
+        let Ok(d) = carte.donnees.read() else { return };
+        let mut r = Relief3d::new(&d);
+        if let Some(v) = self.vue {
+            r.camera.cible = [v.cx as f32, 0.0, v.cz as f32];
+            r.camera.distance = self.zone.w.min(self.zone.h) / v.echelle * 1.1;
+        }
+        r.poser(&d);
+        drop(d);
+        self.trois_d = Some(r);
+        self.outil = VOIR;
+        self.choix = None;
+    }
+
+    /// La vue 3D : un doigt tourne autour, deux doigts rapprochent et déplacent.
+    fn dessiner_3d(&mut self, cx: &mut Cx, zone: Rect, base: Id) {
+        if self.trois_d.is_none() {
+            let Some(carte) = &self.carte else { return };
+            let Ok(d) = carte.donnees.read() else { return };
+            let mut r = Relief3d::new(&d);
+            if let Some(c) = self.camera3d.take() {
+                r.camera = c;
+            }
+            drop(d);
+            self.trois_d = Some(r);
+        }
+        let dp = cx.dp;
+        let Some(r) = &mut self.trois_d else { return };
+        for g in cx.ui.gestes(sub_id(base, 2), zone) {
+            match g {
+                Geste::SaisieDebut { doigt, .. } => self.orbite = Some(doigt),
+                Geste::SaisieDeplace { doigt, .. } => {
+                    if let Some(a) = self.orbite {
+                        r.orbiter(doigt.0 - a.0, doigt.1 - a.1, dp);
+                    }
+                    self.orbite = Some(doigt);
+                }
+                Geste::SaisieFin { .. } | Geste::SaisieAnnulee { .. } => self.orbite = None,
+                Geste::PincementDebut { .. } => {
+                    self.pincement = 1.0;
+                    self.orbite = None;
+                }
+                Geste::Pincement { echelle, deplacement, .. } => {
+                    let k = echelle / self.pincement.max(1e-3);
+                    self.pincement = echelle;
+                    r.pincer(k, deplacement.0, deplacement.1, zone.h);
+                }
+                _ => {}
+            }
+        }
+        let Some(carte) = &mut self.carte else { return };
+        cx.clip(Some(zone));
+        r.dessiner(cx, zone, carte);
+        cx.clip(None);
+    }
+
     /// La carte et ce qui se dessine dessus.
     fn dessiner_carte(&mut self, cx: &mut Cx, zone: Rect, base: Id) {
         let d = cx.dp;
@@ -1130,13 +1237,17 @@ impl Lieux {
                         cx.paragraph(&mut b, &l);
                     }
                 } else {
-                    cx.paragraph(&mut b, "Touchez la carte pour savoir ce qu'il y a là. Deux doigts zooment.");
+                    if self.trois_d.is_some() {
+                        cx.paragraph(&mut b, "En 3D : un doigt tourne autour, deux doigts rapprochent et déplacent. Le cube de la barre revient à la carte ; un outil d'édition aussi.");
+                    } else {
+                        cx.paragraph(&mut b, "Touchez la carte pour savoir ce qu'il y a là. Deux doigts zooment. Le cube de la barre passe en 3D.");
+                    }
                 }
                 if let Ok(dn) = carte.donnees.read() {
                     let l = &dn.lieu;
                     cx.section(&mut b, "Le lieu");
                     cx.paragraph(&mut b, &format!("{} · centre {:.4}, {:.4}", l.nom, l.lat, l.lon));
-                    cx.paragraph(&mut b, &format!("{} × {} points de {} m · eau à {:.1} m", l.cote, l.cote, l.pas, l.niveau).replace('.', ","));
+                    cx.paragraph(&mut b, &format!("{} × {} points de {} m · eau à {:.1} m", l.grille.nx, l.grille.nz, l.pas, l.niveau).replace('.', ","));
                     cx.paragraph(&mut b, &format!("{} bâtiments, {} routes, {} ponts", l.batiments.len(), l.routes.len(), l.ponts.len()));
                 }
                 cx.section(&mut b, "Sources");
@@ -1427,15 +1538,13 @@ impl Lieux {
             cx.slider(&mut b, sub_id(base, 710), "Pas de la grille", &format!("{pas:.0} m"), &mut pas, 2.0, 16.0);
             self.pas = pas.round();
             let (mut lx, mut lz) = (self.largeur, self.longueur);
-            cx.slider(&mut b, sub_id(base, 712), "Largeur (est-ouest)", &format!("{lx:.1} km").replace('.', ","), &mut lx, 1.0, 20.0);
-            cx.slider(&mut b, sub_id(base, 713), "Longueur (nord-sud)", &format!("{lz:.1} km").replace('.', ","), &mut lz, 1.0, 20.0);
+            cx.slider(&mut b, sub_id(base, 714), "Largeur (est-ouest)", &format!("{lx:.1} km").replace('.', ","), &mut lx, 1.0, 20.0);
+            cx.slider(&mut b, sub_id(base, 715), "Longueur (nord-sud)", &format!("{lz:.1} km").replace('.', ","), &mut lz, 1.0, 20.0);
             (self.largeur, self.longueur) = ((lx * 2.0).round() / 2.0, (lz * 2.0).round() / 2.0);
             cx.toggle(&mut b, sub_id(base, 711), "Toits mesurés au LiDAR", &mut self.toits);
-            let n = sage_reel::cote(self.pas as f64);
-            let [a0, a1, b0, b1] = sage_reel::generer::emprise(self.pas as f64, self.emprise_m().0, self.emprise_m().1);
-            let (na, nb) = (a1 - a0 + 1, b1 - b0 + 1);
-            let zone = if (na, nb) == (n, n) { "La carte entière, 20 km de côté".to_string() } else { format!("Une zone de {} × {} km au centre de la carte de 20 km (autour, le relief se prolonge à plat, sans rien dessus)", self.largeur, self.longueur).replace('.', ",") };
-            cx.paragraph(&mut b, &format!("{zone} : {na} × {nb} points téléchargés. Le relief et le LiDAR viennent de l'IGN, le reste d'OpenStreetMap ; les toits demandent ~0,4 Go de téléchargements dans une ville. Relancer reprend ce qui est déjà téléchargé."));
+            let g = self.grille();
+            let zone = if g.est_entiere(self.pas as f64) { "La carte entière, 20 km de côté".to_string() } else { format!("{} × {} km autour du point", self.largeur, self.longueur).replace('.', ",") };
+            cx.paragraph(&mut b, &format!("{zone} : {} × {} points (le lieu vierge aussi). Le relief et le LiDAR viennent de l'IGN, le reste d'OpenStreetMap ; les toits demandent ~0,4 Go de téléchargements dans une ville. Relancer reprend ce qui est déjà téléchargé.", g.nx, g.nz));
             if cx.button(&mut b, sub_id(base, 712), "Générer") {
                 c.clavier.fermer();
                 self.generer(c);
@@ -1480,6 +1589,10 @@ impl Lieux {
                 self.enregistrer();
             }
             x -= h;
+            if bouton(cx, x, 4, Icon::Cube, true, if self.trois_d.is_some() { col.accent } else { col.texte }) {
+                self.basculer_3d();
+            }
+            x -= h;
             if bouton(cx, x, 3, Icon::List, true, col.texte) {
                 if self.modifie {
                     self.message = Some(("des retouches ne sont pas enregistrées : enregistrez, ou touchez encore la liste".into(), true));
@@ -1505,6 +1618,11 @@ impl Lieux {
         // Le message, ou l'état
         let texte = match (&self.message, &self.carte) {
             (Some((m, _)), Some(_)) => m.clone(),
+            (_, Some(carte)) if self.trois_d.is_some() => {
+                let r = self.trois_d.as_ref().unwrap();
+                let attente = if r.en_attente || carte.en_attente() { " · dessin…" } else { "" };
+                format!("3D · {} tuiles{attente}", r.dessinees)
+            }
             (_, Some(carte)) => {
                 let z = self.vue.map_or(0, |v| carte.niveau(v.echelle));
                 let attente = if carte.en_attente() { " · dessin…" } else { "" };
@@ -1541,12 +1659,15 @@ impl Contexte for Lieux {
             if let Some(v) = self.vue {
                 e.mettre("vue", format!("{} {} {}", v.cx, v.cz, v.echelle));
             }
+            if let Some(c) = self.trois_d.as_ref().map(|r| r.camera).or(self.camera3d) {
+                e.mettre("vue3d", format!("{} {} {} {} {} {}", c.lacet, c.tangage, c.distance, c.cible[0], c.cible[1], c.cible[2]));
+            }
         }
         e.mettre("outil", self.outil);
     }
 
     fn anime(&self, _c: &Commun) -> bool {
-        self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some()
+        self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some()
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
@@ -1593,7 +1714,15 @@ impl Contexte for Lieux {
                 (Rect::new(r.x, r.y, r.w, r.h - h), Rect::new(r.x, r.bottom() - h, r.w, h))
             };
             self.zone = zone;
-            self.dessiner_carte(cx, zone, base);
+            // Un outil d'édition : la carte
+            if self.trois_d.is_some() && self.outil != VOIR {
+                self.basculer_3d();
+            }
+            if self.trois_d.is_some() || self.camera3d.is_some() {
+                self.dessiner_3d(cx, zone, base);
+            } else {
+                self.dessiner_carte(cx, zone, base);
+            }
             self.panneau(cx, c, panneau, base);
         } else {
             self.accueil(cx, c, r, base, k);

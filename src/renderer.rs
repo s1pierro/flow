@@ -1,7 +1,7 @@
 //! Tout OpenGL est ici : l'interface, sur tout l'écran, et les vues 3D qu'elle
 //! contient, dessinées à leur place dans la liste (avec leur propre profondeur).
 
-use crate::draw::{Color, DrawList, Rect, Vertex, Vue3d};
+use crate::draw::{Color, DrawList, Rect, Terrain3d, Vertex, Vue3d};
 use std::cell::RefCell;
 use crate::gles::GlApi;
 use crate::text::{Text, ATLAS};
@@ -64,7 +64,53 @@ struct Tampon3d {
     vbo: u32,
     ebo: u32,
     n: i32,
+    /// La dernière image où il a servi (ceux qui ne servent plus sont libérés).
+    vu: u64,
 }
+
+const TERRAIN_VS: &str = "#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_normal;
+layout(location=2) in vec2 a_uv;
+uniform mat4 u_mvp;
+uniform vec4 u_uv;
+uniform vec3 u_oeil;
+out vec3 v_n;
+out vec2 v_uv;
+out float v_d;
+void main() {
+  v_n = a_normal;
+  v_uv = u_uv.xy + a_uv * u_uv.zw;
+  v_d = distance(a_pos, u_oeil);
+  gl_Position = u_mvp * vec4(a_pos, 1.0);
+}";
+/// La couleur vient de la carte (déjà ombrée) ; un peu de soleil en plus pour le
+/// relief vu de biais, et la brume au loin. Hors du lieu (transparent), rien.
+const TERRAIN_FS: &str = "#version 300 es
+precision highp float;
+in vec3 v_n;
+in vec2 v_uv;
+in float v_d;
+uniform sampler2D u_image;
+uniform int u_avec_image;
+uniform vec3 u_couleur;
+uniform vec3 u_ciel;
+uniform vec2 u_brume;
+out vec4 o_color;
+void main() {
+  vec3 c = u_couleur;
+  if (u_avec_image == 1) {
+    vec4 t = texture(u_image, v_uv);
+    if (t.a < 0.5) discard;
+    c = t.rgb / t.a;
+  }
+  vec3 n = normalize(v_n);
+  float s = max(dot(n, normalize(vec3(-0.5, 0.8, -0.35))), 0.0);
+  c *= 0.82 + 0.25 * s;
+  float b = smoothstep(u_brume.x, u_brume.y, v_d);
+  o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
+}";
 
 const UI_VS: &str = "#version 300 es
 precision highp float;
@@ -127,6 +173,9 @@ pub struct Renderer {
     u_mvp: i32,
     u_vue: i32,
     u_couleur: i32,
+    terrain_program: u32,
+    /// u_mvp, u_uv, u_oeil, u_avec_image, u_couleur, u_ciel, u_brume
+    u_terrain: [i32; 7],
     tampons: RefCell<Vec<Tampon3d>>,
     /// Les images sur la carte graphique : id, révision, texture, taille, et l'image
     /// où elles ont servi (celles qui ne servent plus sont libérées).
@@ -213,8 +262,12 @@ impl Renderer {
             let u_mvp = loc(maillage_program, "u_mvp");
             let u_vue = loc(maillage_program, "u_vue");
             let u_couleur = loc(maillage_program, "u_couleur");
+            let terrain_program = program(&gl, TERRAIN_VS, TERRAIN_FS)?;
+            let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume"].map(|n| loc(terrain_program, n));
+            (gl.glUseProgram)(terrain_program);
+            (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
         }
     }
 
@@ -230,10 +283,11 @@ impl Renderer {
     /// Le maillage d'une vue sur la carte graphique, envoyé s'il est nouveau ou a
     /// changé : (vao, nombre d'indices).
     unsafe fn tampon(&self, v: &Vue3d) -> (u32, i32) {
-        self.tampon_de(&v.maillage)
+        self.tampon_de(&v.maillage, false)
     }
 
-    unsafe fn tampon_de(&self, m: &crate::draw::Maillage3d) -> (u32, i32) {
+    /// `uv` : des sommets de 8 flottants (position, normale, texture), sinon 6.
+    unsafe fn tampon_de(&self, m: &crate::draw::Maillage3d, uv: bool) -> (u32, i32) {
         let gl = &self.gl;
         let mut tampons = self.tampons.borrow_mut();
         let i = match tampons.iter().position(|t| t.id == m.id) {
@@ -246,16 +300,22 @@ impl Renderer {
                 (gl.glBindVertexArray)(vao);
                 (gl.glBindBuffer)(ARRAY_BUFFER, vbo);
                 (gl.glBindBuffer)(ELEMENT_ARRAY_BUFFER, ebo);
+                let pas = if uv { 32 } else { 24 };
                 for (k, off) in [(0u32, 0usize), (1, 12)] {
                     (gl.glEnableVertexAttribArray)(k);
-                    (gl.glVertexAttribPointer)(k, 3, FLOAT, 0, 24, off as *const c_void);
+                    (gl.glVertexAttribPointer)(k, 3, FLOAT, 0, pas, off as *const c_void);
+                }
+                if uv {
+                    (gl.glEnableVertexAttribArray)(2);
+                    (gl.glVertexAttribPointer)(2, 2, FLOAT, 0, pas, 24 as *const c_void);
                 }
                 (gl.glBindVertexArray)(0);
-                tampons.push(Tampon3d { id: m.id, revision: u64::MAX, vao, vbo, ebo, n: 0 });
+                tampons.push(Tampon3d { id: m.id, revision: u64::MAX, vao, vbo, ebo, n: 0, vu: 0 });
                 tampons.len() - 1
             }
         };
         let t = &mut tampons[i];
+        t.vu = self.images_vues.get();
         if t.revision != m.revision {
             (gl.glBindVertexArray)(t.vao);
             (gl.glBindBuffer)(ARRAY_BUFFER, t.vbo);
@@ -332,7 +392,7 @@ impl Renderer {
         // Le surlignage, à la même profondeur, un peu avancé
         if let Some((m, c)) = &v.dessus {
             if !m.indices.is_empty() {
-                let (vao, n) = self.tampon_de(m);
+                let (vao, n) = self.tampon_de(m, false);
                 (gl.glEnable)(POLYGON_OFFSET_FILL);
                 (gl.glPolygonOffset)(-1.0, -2.0);
                 (gl.glDepthFunc)(LEQUAL);
@@ -344,6 +404,53 @@ impl Renderer {
             }
         }
         // Retour à l'interface
+        (gl.glDisable)(DEPTH_TEST);
+        (gl.glEnable)(BLEND);
+        (gl.glViewport)(0, 0, w as i32, h as i32);
+        (gl.glUseProgram)(self.ui_program);
+        (gl.glBindVertexArray)(self.ui_vao);
+        (gl.glBindBuffer)(ARRAY_BUFFER, self.ui_vbo);
+    }
+
+    /// Un terrain, dans son rectangle et la zone de découpe ; l'état de l'interface est
+    /// rétabli ensuite.
+    unsafe fn dessiner_terrain(&self, w: f32, h: f32, t: &Terrain3d, clip: Option<Rect>) {
+        let gl = &self.gl;
+        let r = clip.map_or(t.rect, |c| t.rect.intersect(&c));
+        if r.w < 1.0 || r.h < 1.0 || t.morceaux.is_empty() {
+            return;
+        }
+        let (x, y, cw, ch) = Self::gl_rect(r, h);
+        (gl.glEnable)(SCISSOR);
+        (gl.glScissor)(x, y, cw, ch);
+        let (x, y, vw, vh) = Self::gl_rect(t.rect, h);
+        (gl.glViewport)(x, y, vw, vh);
+        (gl.glEnable)(DEPTH_TEST);
+        (gl.glDisable)(BLEND);
+        (gl.glClear)(DEPTH_BIT);
+        (gl.glUseProgram)(self.terrain_program);
+        let u = &self.u_terrain;
+        (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+        (gl.glUniform3f)(u[2], t.oeil[0], t.oeil[1], t.oeil[2]);
+        (gl.glUniform3f)(u[5], t.ciel[0], t.ciel[1], t.ciel[2]);
+        (gl.glUniform2f)(u[6], t.brume[0], t.brume[1]);
+        for m in &t.morceaux {
+            if m.maillage.indices.is_empty() {
+                continue;
+            }
+            let (vao, n) = self.tampon_de(&m.maillage, true);
+            match &m.image {
+                Some(img) => {
+                    self.lier_image(img);
+                    (gl.glUniform1i)(u[3], 1);
+                }
+                None => (gl.glUniform1i)(u[3], 0),
+            }
+            (gl.glUniform4f)(u[1], m.uv[0], m.uv[1], m.uv[2], m.uv[3]);
+            (gl.glUniform3f)(u[4], m.couleur[0], m.couleur[1], m.couleur[2]);
+            (gl.glBindVertexArray)(vao);
+            (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+        }
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);
         (gl.glViewport)(0, 0, w as i32, h as i32);
@@ -385,6 +492,11 @@ impl Renderer {
                     self.dessiner_vue(w, h, &dl.vues3d[i], c.clip);
                     continue;
                 }
+                if let Some(i) = c.terrain {
+                    self.dessiner_terrain(w, h, &dl.terrains[i], c.clip);
+                    // Le terrain a lié ses images à l'unité 1 : l'interface y relie les siennes
+                    continue;
+                }
                 match c.clip {
                     Some(r) => {
                         let (x, y, cw, ch) = Self::gl_rect(r, h);
@@ -402,6 +514,16 @@ impl Renderer {
                 let garde = n.saturating_sub(e.4) < 120;
                 if !garde {
                     (gl.glDeleteTextures)(1, &e.2);
+                }
+                garde
+            });
+            // Les maillages aussi
+            self.tampons.borrow_mut().retain(|t| {
+                let garde = n.saturating_sub(t.vu) < 120;
+                if !garde {
+                    (gl.glDeleteVertexArrays)(1, &t.vao);
+                    (gl.glDeleteBuffers)(1, &t.vbo);
+                    (gl.glDeleteBuffers)(1, &t.ebo);
                 }
                 garde
             });

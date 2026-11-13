@@ -104,9 +104,11 @@ impl Donnees {
         self.bati = bati;
     }
 
-    /// Le coin de la carte et son côté, en mètres.
-    pub fn monde(&self) -> (f32, f32) {
-        (origine() as f32, ((self.lieu.cote - 1) as f64 * self.lieu.pas) as f32)
+    /// Le carré de la pyramide des tuiles : son coin (x, z) et son côté, en mètres. Il
+    /// part du coin du lieu et couvre son plus grand côté (un lieu peut être rectangulaire).
+    pub fn monde(&self) -> (f32, f32, f32) {
+        let [x0, z0, x1, z1] = self.lieu.etendue();
+        (x0 as f32, z0 as f32, (x1 - x0).max(z1 - z0) as f32)
     }
 
     pub fn batiments_dans(&self, b: [f32; 4]) -> Vec<u32> {
@@ -183,9 +185,9 @@ fn bilineaire(l: &Lieu, x: f64, z: f64) -> f64 {
 
 /// La boîte d'une tuile, en mètres.
 pub fn boite_tuile(d: &Donnees, (z, i, j): Cle) -> [f32; 4] {
-    let (x0, c) = d.monde();
+    let (x0, z0, c) = d.monde();
     let t = c / (1u32 << z) as f32;
-    [x0 + i as f32 * t, x0 + j as f32 * t, x0 + (i + 1) as f32 * t, x0 + (j + 1) as f32 * t]
+    [x0 + i as f32 * t, z0 + j as f32 * t, x0 + (i + 1) as f32 * t, z0 + (j + 1) as f32 * t]
 }
 
 /// Dessine une tuile : RVBA, `TUILE` × `TUILE`.
@@ -360,6 +362,17 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
             }
         }
     }
+    // Hors du lieu : transparent
+    let e = l.etendue();
+    for y in 0..n {
+        let z = b[1] as f64 + (y as f64 + 0.5) * m as f64;
+        for x in 0..n {
+            let xx = b[0] as f64 + (x as f64 + 0.5) * m as f64;
+            if xx < e[0] || xx > e[2] || z < e[1] || z > e[3] {
+                px[(y * n + x) * 4..(y * n + x) * 4 + 4].fill(0);
+            }
+        }
+    }
     px
 }
 
@@ -483,7 +496,8 @@ impl Carte {
         self.retoucher([f32::MIN, f32::MIN, f32::MAX, f32::MAX]);
     }
 
-    fn a_jour(&self, faite: u64, b: [f32; 4]) -> bool {
+    /// Ce qui a été fait à la retouche `faite` dans la boîte `b` est-il encore à jour ?
+    pub fn a_jour(&self, faite: u64, b: [f32; 4]) -> bool {
         if self.retouches.first().is_some_and(|r| r.0 > faite + 1) && faite < self.retouches[0].0 {
             // Plus vieille que ce qu'on retient
             return false;
@@ -498,15 +512,13 @@ impl Carte {
 
     /// Le niveau qui donne au moins un pixel de tuile par pixel d'écran.
     pub fn niveau(&self, echelle: f32) -> u8 {
-        let c = self.donnees.read().map_or(20000.0, |d| d.monde().1);
+        let c = self.donnees.read().map_or(20000.0, |d| d.monde().2);
         let z = (echelle * c / TUILE as f32).max(1.0).log2().ceil();
         (z as i32).clamp(0, NIVEAU_MAX as i32) as u8
     }
 
-    /// Dessine la carte vue par `vue` dans `zone`.
-    pub fn dessiner(&mut self, cx: &mut Cx, zone: Rect, vue: &Vue) {
-        self.image += 1;
-        // Les tuiles finies
+    /// Range les tuiles finies par les threads.
+    fn ranger(&mut self) {
         let faites = self.partage.faites.lock().map(|mut f| std::mem::take(&mut *f)).unwrap_or_default();
         for (cle, v, pixels) in faites {
             let id = 0x6361_7274_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
@@ -516,7 +528,73 @@ impl Carte {
                 self.tuiles.insert(cle, Tuile { image, faite: v, vue: vue_ });
             }
         }
-        let (x0, c) = match self.donnees.read() {
+    }
+
+    /// L'image de la tuile `cle` (de boîte `bt`), ou d'un ancêtre et la partie (u0, v0,
+    /// largeur, hauteur) qui la couvre ; demandée (dans `demandes`) si elle manque ou
+    /// n'est plus à jour.
+    fn image_de(&mut self, cle: Cle, bt: [f32; 4], demandes: &mut Vec<(Cle, u64)>) -> Option<(Image, [f32; 4])> {
+        if !self.tuiles.get(&cle).is_some_and(|tu| self.a_jour(tu.faite, bt)) {
+            demandes.push((cle, self.compteur));
+        }
+        let (z, i, j) = cle;
+        for k in 0..=z {
+            let (pi, pj) = (i >> k, j >> k);
+            if let Some(tu) = self.tuiles.get_mut(&(z - k, pi, pj)) {
+                tu.vue = self.image;
+                let f = 1.0 / (1 << k) as f32;
+                return Some((tu.image.clone(), [(i - (pi << k)) as f32 * f, (j - (pj << k)) as f32 * f, f, f]));
+            }
+        }
+        None
+    }
+
+    /// Les demandes (la plus importante d'abord) remplacent les anciennes, celles qui ne
+    /// se voient plus tombent ; les tuiles qui n'ont pas servi depuis longtemps
+    /// s'oublient.
+    fn envoyer(&mut self, mut demandes: Vec<(Cle, u64)>) {
+        if let Ok(mut f) = self.partage.file.lock() {
+            let en_cours = f.1.clone();
+            demandes.retain(|(k, _)| !en_cours.contains(k));
+            // La file se vide par la fin
+            demandes.reverse();
+            f.0 = demandes;
+        }
+        self.partage.signal.notify_all();
+        if self.tuiles.len() > GARDEES {
+            let mut v: Vec<(u64, Cle)> = self.tuiles.iter().filter(|(k, _)| k.0 > 0).map(|(k, t)| (t.vue, *k)).collect();
+            v.sort();
+            for (_, k) in v.iter().take(self.tuiles.len() - GARDEES) {
+                self.tuiles.remove(k);
+            }
+        }
+    }
+
+    /// Pour la 3D : les images des tuiles `cles` (la plus importante d'abord), ou d'un
+    /// ancêtre et la partie qui les couvre. La tuile du niveau 0 est toujours demandée.
+    pub fn textures(&mut self, cles: &[Cle]) -> Vec<Option<(Image, [f32; 4])>> {
+        self.image += 1;
+        self.ranger();
+        let boites: Vec<[f32; 4]> = match self.donnees.read() {
+            Ok(d) => std::iter::once((0, 0, 0)).chain(cles.iter().cloned()).map(|c| boite_tuile(&d, c)).collect(),
+            Err(_) => return vec![None; cles.len()],
+        };
+        let mut demandes = Vec::new();
+        let mut v: Vec<_> = cles.iter().zip(&boites[1..]).map(|(&c, &b)| self.image_de(c, b, &mut demandes)).collect();
+        // La racine en premier : de quoi montrer en attendant
+        let mut d0 = Vec::new();
+        self.image_de((0, 0, 0), boites[0], &mut d0);
+        d0.extend(demandes);
+        self.envoyer(d0);
+        v.shrink_to_fit();
+        v
+    }
+
+    /// Dessine la carte vue par `vue` dans `zone`.
+    pub fn dessiner(&mut self, cx: &mut Cx, zone: Rect, vue: &Vue) {
+        self.image += 1;
+        self.ranger();
+        let (x0, z0, c) = match self.donnees.read() {
             Ok(d) => d.monde(),
             Err(_) => return,
         };
@@ -525,17 +603,19 @@ impl Carte {
         let t = c / nt as f32;
         let (a, b) = (vue.monde(zone, zone.x, zone.y), vue.monde(zone, zone.right(), zone.bottom()));
         let (i0, i1) = (((a.0 - x0) / t).floor().max(0.0) as i32, (((b.0 - x0) / t).floor() as i32).min(nt - 1));
-        let (j0, j1) = (((a.1 - x0) / t).floor().max(0.0) as i32, (((b.1 - x0) / t).floor() as i32).min(nt - 1));
+        let (j0, j1) = (((a.1 - z0) / t).floor().max(0.0) as i32, (((b.1 - z0) / t).floor() as i32).min(nt - 1));
         let mut demandes = Vec::new();
         // La tuile du niveau 0 toujours, pour avoir de quoi montrer en attendant
         let racine = (0u8, 0, 0);
-        if !self.tuiles.get(&racine).is_some_and(|tu| self.a_jour(tu.faite, [x0, x0, x0 + c, x0 + c])) {
+        if !self.tuiles.get(&racine).is_some_and(|tu| self.a_jour(tu.faite, [x0, z0, x0 + c, z0 + c])) {
             demandes.push((racine, self.compteur));
         }
         cx.clip(Some(zone));
         // Le fond hors de la carte
         cx.dl.rrect(zone, 0.0, [0xD8, 0xDC, 0xD4, 255]);
-        let (ca, cb) = (vue.ecran(zone, x0, x0), vue.ecran(zone, x0 + c, x0 + c));
+        // Le fond du lieu (son rectangle, pas le carré des tuiles), en attendant les tuiles
+        let e = self.donnees.read().map_or([x0, z0, x0 + c, z0 + c], |d| { let e = d.lieu.etendue(); [e[0] as f32, e[1] as f32, e[2] as f32, e[3] as f32] });
+        let (ca, cb) = (vue.ecran(zone, e[0], e[1]), vue.ecran(zone, e[2], e[3]));
         cx.dl.rrect(Rect::new(ca[0], ca[1], cb[0] - ca[0], cb[1] - ca[1]), 0.0, [0xC8, 0xD4, 0xB8, 255]);
         if i0 <= i1 && j0 <= j1 {
             // Du centre vers les bords : les premières demandées sont au milieu
@@ -544,7 +624,7 @@ impl Carte {
             cles.sort_by(|p, q| ((q.0 as f32 - mi).powi(2) + (q.1 as f32 - mj).powi(2)).total_cmp(&((p.0 as f32 - mi).powi(2) + (p.1 as f32 - mj).powi(2))));
             for (i, j) in cles {
                 let cle = (z, i, j);
-                let bt = [x0 + i as f32 * t, x0 + j as f32 * t, x0 + (i + 1) as f32 * t, x0 + (j + 1) as f32 * t];
+                let bt = [x0 + i as f32 * t, z0 + j as f32 * t, x0 + (i + 1) as f32 * t, z0 + (j + 1) as f32 * t];
                 let (p, q) = (vue.ecran(zone, bt[0], bt[1]), vue.ecran(zone, bt[2], bt[3]));
                 // Un quart de pixel de plus : pas de joint entre les tuiles
                 let r = Rect::new(p[0].floor(), p[1].floor(), (q[0] - p[0].floor()).ceil() + 0.5, (q[1] - p[1].floor()).ceil() + 0.5);
@@ -573,23 +653,7 @@ impl Carte {
             }
         }
         cx.clip(None);
-        // Les demandes remplacent les anciennes (celles qui ne se voient plus tombent)
-        if let Ok(mut f) = self.partage.file.lock() {
-            let en_cours = f.1.clone();
-            demandes.retain(|(k, _)| !en_cours.contains(k));
-            // La file se vide par la fin : le plus important en dernier
-            demandes.reverse();
-            f.0 = demandes;
-        }
-        self.partage.signal.notify_all();
-        // Les tuiles qui n'ont pas servi depuis longtemps
-        if self.tuiles.len() > GARDEES {
-            let mut v: Vec<(u64, Cle)> = self.tuiles.iter().filter(|(k, _)| k.0 > 0).map(|(k, t)| (t.vue, *k)).collect();
-            v.sort();
-            for (_, k) in v.iter().take(self.tuiles.len() - GARDEES) {
-                self.tuiles.remove(k);
-            }
-        }
+        self.envoyer(demandes);
     }
 }
 
@@ -612,8 +676,8 @@ mod tests {
     #[test]
     fn une_tuile_montre_l_eau_la_route_et_le_batiment() {
         let d = Donnees::new(lieu());
-        let (x0, c) = d.monde();
-        assert!(x0 < 0.0 && c > 19_000.0);
+        let (x0, z0, c) = d.monde();
+        assert!(x0 < 0.0 && z0 == x0 && c > 19_000.0);
         assert_eq!(d.batiments_dans([10.0, 10.0, 20.0, 20.0]), vec![0]);
         assert!(d.batiments_dans([1000.0, 1000.0, 1100.0, 1100.0]).is_empty());
         assert_eq!(d.routes_dans([0.0, 40.0, 10.0, 60.0], false), vec![0]);
@@ -638,6 +702,20 @@ mod tests {
         let xo = origine() as f32 + 64.0 * 5.0;
         let p = pixel(tuile(xo, 0.0), xo, 0.0);
         assert!(p[2] > p[0] && p[2] > 180, "{p:?}");
+    }
+
+    #[test]
+    fn un_lieu_rectangulaire_a_ses_tuiles_transparentes_au_dela() {
+        let l = Lieu::vierge_sur("R", 49.0, 1.0, 16.0, sage_reel::Grille::emprise(16.0, 3000.0, 1000.0), 100.0);
+        let d = Donnees::new(l);
+        let (x0, z0, c) = d.monde();
+        let e = d.lieu.etendue();
+        assert_eq!((x0, z0), (e[0] as f32, e[1] as f32));
+        assert!((c - (e[2] - e[0]) as f32).abs() < 1.0);
+        // La tuile du niveau 0 : le haut opaque (le lieu), le bas transparent
+        let px = rendre(&d, (0, 0, 0));
+        assert_eq!(px[(10 * TUILE + 10) * 4 + 3], 255);
+        assert_eq!(px[((TUILE - 10) * TUILE + 10) * 4 + 3], 0);
     }
 
     #[test]

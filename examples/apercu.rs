@@ -84,6 +84,9 @@ fn main() {
         Shot { name: "lieux-loin", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-accueil", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-3d", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-3d-pres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-3d-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "images", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "images-visionneuse", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 23 },
         Shot { name: "toile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -322,7 +325,11 @@ fn main() {
             if s.name == "lieux-accueil" {
                 app.ouvrir_espace("fenetres = F1:lieux\n");
             } else {
-                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = /sdcard/bang/lieux/les-andelys.reel\nvue = {vue}\noutil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
+                // FLOW_LIEU : un autre lieu
+                let doc = std::env::var("FLOW_LIEU").unwrap_or_else(|_| "/sdcard/bang/lieux/les-andelys.reel".into());
+                // En 3D : lacet, tangage, distance, cible
+                let vue3d = match s.name { "lieux-3d" => "vue3d = 0.5 0.45 4000 0 0 0\n", "lieux-3d-pres" => "vue3d = 2.6 0.22 700 -150 0 -50\n", "lieux-3d-portrait" => "vue3d = -0.6 0.35 2500 0 0 0\n", _ => "" };
+                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}outil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
             }
         }
         if s.name == "toile" {
