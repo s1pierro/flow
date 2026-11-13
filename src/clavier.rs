@@ -632,15 +632,25 @@ impl Edition {
 /// Un champ de texte d'une ligne dans une colonne de composants. Le toucher lui donne
 /// le focus et place le curseur ; le clavier s'ouvre alors pour lui.
 pub fn champ(cx: &mut Cx, b: &mut Body, cle: Id, vide: &str, ed: &mut Edition, clavier: &mut Clavier) {
-    let (d, col) = (cx.dp, cx.couleurs());
+    let d = cx.dp;
     let r = Rect::new(b.x, b.y + (cx.theme.marge * 0.4 * d).round(), b.w, cx.commande());
+    champ_en(cx, r, Some(b.id()), b.rect(), cle, vide, ed, clavier);
+    b.y += r.h + (cx.theme.marge * 1.2 * d).round();
+}
+
+/// Le même champ, posé dans le cadre `r` hors d'une colonne (un en-tête fixe) :
+/// `scroll` est la zone que fait défiler un glissement parti du champ, `dans` le
+/// découpage où revenir après lui.
+#[allow(clippy::too_many_arguments)]
+pub fn champ_en(cx: &mut Cx, r: Rect, scroll: Option<Id>, dans: Rect, cle: Id, vide: &str, ed: &mut Edition, clavier: &mut Clavier) {
+    let (d, col) = (cx.dp, cx.couleurs());
     let focus = clavier.cible == Some(cle);
     let pad = cx.pad() * 0.75;
     // Le texte défile pour garder le curseur visible
     let avant: String = ed.texte.chars().take(ed.curseur).collect();
     let xc = cx.measure(&avant, 16.0);
     let decalage = (xc - (r.w - 2.0 * pad)).max(0.0);
-    cx.ui.region_add(cle, r, Sense::Click { scroll: Some(b.id()) });
+    cx.ui.region_add(cle, r, Sense::Click { scroll });
     if let Some((x, _)) = cx.ui.clic_en(cle) {
         clavier.ouvrir(cle);
         // Le curseur va au plus près du doigt
@@ -661,7 +671,7 @@ pub fn champ(cx: &mut Cx, b: &mut Body, cle: Id, vide: &str, ed: &mut Edition, c
     cx.dl.rrect(r, cx.theme.rayon(r.h) * 0.4, if focus { col.accent } else { col.ligne });
     cx.dl.rrect(r.inset(if focus { 2.0 } else { 1.0 } * d), cx.theme.rayon(r.h) * 0.4 - d, col.surface);
     let interieur = Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, r.h);
-    cx.clip(Some(interieur.intersect(&b.rect())));
+    cx.clip(Some(interieur.intersect(&dans)));
     if ed.texte.is_empty() {
         cx.text_at(interieur.x, r.cy(), vide, 16.0, col.pale);
     } else {
@@ -674,8 +684,7 @@ pub fn champ(cx: &mut Cx, b: &mut Body, cle: Id, vide: &str, ed: &mut Edition, c
     }
     // On revient au découpage de la colonne, pas à aucun : la suite resterait sinon
     // visible (et touchable) hors de la fenêtre
-    cx.clip(Some(b.rect()));
-    b.y += r.h + (cx.theme.marge * 1.2 * d).round();
+    cx.clip(Some(dans));
 }
 
 #[cfg(test)]
@@ -721,7 +730,7 @@ mod tests {
         }
         fn image(&mut self, dt: f32) {
             self.dl.clear();
-            let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.0, theme: Default::default() };
+            let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.0, theme: Default::default(), palette: None };
             let (_, r) = self.c.reserver(&cx, ECRAN);
             for f in self.c.saisir(&mut cx, r, dt) {
                 self.ed.appliquer(f);

@@ -18,7 +18,7 @@
 //! que Mailles ne sait pas réécrire (armatures, animations, textures) n'est pas
 //! perdu : le premier enregistrement va alors dans une copie (`nom-mailles.glb`).
 
-use crate::clavier::Edition;
+use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Maillage3d, Rect, Vue3d};
 use crate::gestes::Geste;
@@ -26,7 +26,7 @@ use crate::glb;
 use crate::maille::{self as m, Element, Mode, Objet, Selection, Transfo};
 use crate::sculpture::{self as sc, Camera, V3};
 use crate::surface::{Changement, FenetreId, Placee, Sens, Surface};
-use crate::ui::{id, sub_id, Id};
+use crate::ui::{id, sub_id, Id, Sense};
 use crate::widgets::{Cx, Icon};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,9 @@ pub const CLE: &str = "mailles";
 pub const GENRE: Genre = Genre { cle: CLE, nom: "Mailles", legende: "Éditer un .glb : sommets, arêtes, faces", icone: Icon::Maille, ouvrir, applet: None };
 
 const MAILLES: Id = id("mailles");
+const NOM: Id = id("mailles/nom");
+const NOM_CORPS: Id = id("mailles/nom-corps");
+const BOITE: Id = id("mailles/boite");
 const BROUILLONS: &str = "brouillons";
 const HISTORIQUE: usize = 40;
 
@@ -101,6 +104,11 @@ pub struct Mailles {
     gpu: Option<(u64, Arc<Vec<f32>>, Arc<Vec<u32>>, Arc<Vec<(usize, usize)>>)>,
     surligne: Option<(u64, Arc<Vec<u32>>)>,
     dp: f32,
+    /// La boîte du premier enregistrement est ouverte : le nom se saisit dans `nom` ;
+    /// l'erreur de la dernière tentative ; Entrée a été frappée.
+    boite: bool,
+    erreur: Option<String>,
+    valider: bool,
 }
 
 /// Les vues de départ : la 3D à gauche, l'arborescence et les opérations à droite.
@@ -146,6 +154,9 @@ impl Default for Mailles {
             gpu: None,
             surligne: None,
             dp: 1.0,
+            boite: false,
+            erreur: None,
+            valider: false,
         }
     }
 }
@@ -306,7 +317,7 @@ impl Mailles {
             let dossier = p.parent().map(Path::to_path_buf).unwrap_or_default();
             return (0..).map(|n| dossier.join(if n == 0 { format!("{stem}-mailles.glb") } else { format!("{stem}-mailles-{n}.glb") })).find(|q| !q.exists()).ok_or_else(|| "Aucun nom libre.".into());
         }
-        let dossier = c.racine.as_ref().map(|r| r.join("Documents").join("Mailles")).or_else(|| c.dossier.clone()).ok_or("Aucun dossier où enregistrer.")?;
+        let dossier = Mailles::dossier_neuf(c).ok_or("Aucun dossier où enregistrer.")?;
         let saisi = self.nom.texte.trim().trim_end_matches(".glb").to_string();
         if saisi.contains('/') || saisi.starts_with('.') {
             return Err("Nom de fichier invalide.".into());
@@ -319,6 +330,113 @@ impl Mailles {
             return Err(format!("{saisi}.glb existe déjà : choisissez un autre nom."));
         }
         Ok(p)
+    }
+
+    /// Où vont les nouvelles mailles : `Documents/Mailles`, ou à défaut le dossier de
+    /// Flow.
+    fn dossier_neuf(c: &Commun) -> Option<PathBuf> {
+        c.racine.as_ref().map(|r| r.join("Documents").join("Mailles")).or_else(|| c.dossier.clone())
+    }
+
+    /// La disquette : enregistre, ou pour une maille qui n'a jamais été enregistrée,
+    /// ouvre la boîte où saisir son nom (proposé : le premier `maille-N` libre).
+    fn demander_enregistrement(&mut self, k: usize, c: &mut Commun) {
+        if self.chemin.is_some() {
+            self.message = Some(match self.enregistrer(c) {
+                Ok(()) => (format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())), false),
+                Err(e) => (e, true),
+            });
+            return;
+        }
+        if self.nom.texte.trim().is_empty() {
+            let libre = Mailles::dossier_neuf(c).and_then(|d| (1..10_000).map(|n| format!("maille-{n}")).find(|n| !d.join(format!("{n}.glb")).exists()));
+            self.nom = Edition::new(&libre.unwrap_or_default());
+        }
+        self.erreur = None;
+        self.boite = true;
+        c.clavier.ouvrir(sub_id(NOM, k));
+    }
+
+    fn fermer_boite(&mut self, k: usize, c: &mut Commun) {
+        self.boite = false;
+        self.erreur = None;
+        if c.clavier.cible == Some(sub_id(NOM, k)) {
+            c.clavier.fermer();
+        }
+    }
+
+    /// Enregistre sous le nom saisi ; la boîte se ferme si c'est fait.
+    fn conclure_boite(&mut self, k: usize, c: &mut Commun) {
+        if self.nom.texte.trim().is_empty() {
+            self.erreur = Some("Donnez un nom à la maille.".into());
+            return;
+        }
+        match self.enregistrer(c) {
+            Ok(()) => {
+                self.fermer_boite(k, c);
+                self.message = Some((format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())), false));
+            }
+            Err(e) => self.erreur = Some(e),
+        }
+    }
+
+    /// La boîte du premier enregistrement, par-dessus les vues : le nom, le dossier,
+    /// Annuler et Enregistrer.
+    fn dessiner_boite(&mut self, cx: &mut Cx, c: &mut Commun, p: &Placee) {
+        let (d, col) = (cx.dp, cx.couleurs());
+        let k = p.id as usize;
+        let r = p.contenu;
+        let base = sub_id(BOITE, k);
+        cx.dl.rrect(r, 0.0, [0, 0, 0, 110]);
+        cx.ui.region_add(sub_id(base, 0), r, Sense::Sink);
+        let (hc, gap, pad) = (cx.commande(), cx.ecart(), 18.0 * d);
+        let w = (r.w - 2.0 * 12.0 * d).min(440.0 * d).max(0.0);
+        let lh = 20.0 * d * cx.theme.texte;
+        // Le dossier, à partir de la racine du stockage quand il y est
+        let dossier = Mailles::dossier_neuf(c).map_or(String::new(), |p| {
+            let court = c.racine.as_ref().and_then(|r| p.strip_prefix(r).ok()).unwrap_or(&p);
+            format!("Dans {}", court.display())
+        });
+        let h = pad + 26.0 * d * cx.theme.texte + hc + 2.0 * gap + lh + if self.erreur.is_some() { lh } else { 0.0 } + gap + hc + pad;
+        let carte = Rect::new(r.x + (r.w - w) / 2.0, r.y + (r.h * 0.12).min(60.0 * d), w, h);
+        let rayon = cx.theme.rayon(hc).min(18.0 * d);
+        cx.ombre(carte, rayon, 14.0);
+        cx.dl.rrect(carte, rayon, col.surface);
+        cx.ui.region_add(sub_id(base, 1), carte, Sense::Sink);
+        let mut y = carte.y + pad;
+        cx.clip(Some(carte));
+        cx.text_at(carte.x + pad, y + 11.0 * d * cx.theme.texte, "Enregistrer la maille", 18.0, col.texte);
+        y += 26.0 * d * cx.theme.texte;
+        let marge = (cx.theme.marge * 0.4 * d).round();
+        let zone = Rect::new(carte.x + pad - 14.0 * d, y + gap - 8.0 * d - marge, carte.w - 2.0 * pad + 28.0 * d, hc + 8.0 * d + marge + 4.0 * d);
+        let mut b = cx.body(sub_id(NOM_CORPS, k), zone, &c.scrolls);
+        clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom", &mut self.nom, &mut c.clavier);
+        cx.body_end(b, &mut c.scrolls);
+        cx.clip(Some(carte));
+        y += hc + 2.0 * gap;
+        cx.text_at(carte.x + pad, y + lh / 2.0, &format!("{dossier}, en .glb"), 14.0, col.pale);
+        y += lh;
+        if let Some(e) = &self.erreur {
+            cx.text_at(carte.x + pad, y + lh / 2.0, e, 14.0, [0xE0, 0x3A, 0x3A, 255]);
+            y += lh;
+        }
+        y += gap;
+        let mut xb = carte.right() - pad;
+        let mut choisi = None;
+        for (i, nom) in ["Annuler", "Enregistrer"].into_iter().enumerate().rev() {
+            xb -= cx.pill_width(nom);
+            if cx.pill(sub_id(base, 10 + i), xb, y, nom, i == 1) {
+                choisi = Some(i);
+            }
+            xb -= gap;
+        }
+        cx.clip(None);
+        match choisi {
+            Some(0) => self.fermer_boite(k, c),
+            Some(_) => self.conclure_boite(k, c),
+            None if std::mem::take(&mut self.valider) => self.conclure_boite(k, c),
+            None => {}
+        }
     }
 
     /// Les objets en glTF binaire : chacun dans le repère de son nœud, en triangles,
@@ -960,10 +1078,7 @@ impl Mailles {
         let case = Rect::new(x, e.y, h, h);
         let kd = sub_id(MAILLES, 20_001 + k);
         if cx.ui.click(kd, case, None) {
-            self.message = Some(match self.enregistrer(c) {
-                Ok(()) => (format!("Enregistré : {}", self.chemin.as_deref().map_or(String::new(), |p| p.display().to_string())), false),
-                Err(e) => (e, true),
-            });
+            self.demander_enregistrement(k, c);
         }
         if cx.ui.pressed(kd) {
             cx.dl.rrect(case.inset(3.0 * d), cx.theme.rayon(case.h - 6.0 * d), col.puce);
@@ -1053,6 +1168,21 @@ impl Contexte for Mailles {
         }
     }
 
+    fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
+        if cible != sub_id(NOM, f as usize) {
+            return false;
+        }
+        // Entrée enregistre (à la prochaine image, dans `dessiner_boite`)
+        if self.nom.appliquer(frappe) {
+            self.valider = self.boite;
+            if !self.boite {
+                c.clavier.fermer();
+            }
+        }
+        self.erreur = None;
+        true
+    }
+
     fn dessiner(&mut self, cx: &mut Cx, c: &mut Commun, p: &Placee) -> String {
         if !self.charge {
             self.charger();
@@ -1086,6 +1216,9 @@ impl Contexte for Mailles {
         }
         self.vues.dessus(cx, &VUES);
         self.barre(cx, c, p);
+        if self.boite {
+            self.dessiner_boite(cx, c, p);
+        }
         // Tout est dessiné dans la barre : la ligne d'état de Flow reste vide
         String::new()
     }
@@ -1180,6 +1313,39 @@ mod tests {
         let (x0, x1) = b.objets[1].boite().map(|(p, q)| (p[0], q[0])).unwrap();
         assert!(x0 > 3.0 && x1 > x0, "{x0} {x1}");
         assert_eq!(b.objets[0].faces.len(), 6, "les triangles redeviennent des quadrilatères");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn le_premier_enregistrement_demande_un_nom() {
+        let dir = std::env::temp_dir().join(format!("flow-mailles-nom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = Commun { racine: Some(dir.clone()), ..Commun::default() };
+        let mut a = pret();
+        a.executer("cube");
+        // La disquette ouvre la boîte, avec un nom libre proposé et le clavier
+        a.demander_enregistrement(1, &mut c);
+        assert!(a.boite && a.chemin.is_none());
+        assert_eq!(a.nom.texte, "maille-1");
+        assert_eq!(c.clavier.cible, Some(sub_id(NOM, 1)));
+        // Un nom vide est refusé ; un nom saisi enregistre et ferme la boîte
+        a.nom = Edition::default();
+        a.conclure_boite(1, &mut c);
+        assert!(a.boite && a.erreur.is_some());
+        a.nom = Edition::new("chaise");
+        a.conclure_boite(1, &mut c);
+        let attendu = dir.join("Documents").join("Mailles").join("chaise.glb");
+        assert!(!a.boite && attendu.exists() && a.chemin.as_deref() == Some(attendu.as_path()));
+        // Ensuite, la disquette enregistre sans rien demander
+        a.demander_enregistrement(1, &mut c);
+        assert!(!a.boite);
+        // Un nom déjà pris est refusé dans la boîte
+        let mut b = pret();
+        b.demander_enregistrement(1, &mut c);
+        assert_eq!(b.nom.texte, "maille-1");
+        b.nom = Edition::new("chaise");
+        b.conclure_boite(1, &mut c);
+        assert!(b.boite && b.erreur.as_deref().is_some_and(|e| e.contains("existe déjà")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

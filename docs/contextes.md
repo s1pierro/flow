@@ -1,7 +1,7 @@
 # Intégrer un contexte dans Flow
 
 Flow est une *application d'exploitation* : l'écran se partage en fenêtres, et chaque
-fenêtre montre un **contexte**, une sous-application (Fichiers, Disque, Radio…).
+fenêtre montre un **contexte**, une sous-application (Fichiers, Disque, Boombox…).
 L'utilisateur compose son espace de travail en partageant les fenêtres et en
 choisissant le contexte de chacune. Ce guide explique comment ajouter un contexte,
 par exemple un éditeur de texte ou de SVG.
@@ -47,7 +47,8 @@ et le lanceur prend juste leur hauteur (`places_lanceur`).
 | `src/app.rs` | L'application : fenêtres, instances, panneau latéral, barre |
 
 Les contextes existants servent d'exemples, du plus simple au plus complet :
-`aide.rs` (rien à retenir), `radio.rs` (un champ de texte et le clavier),
+`aide.rs` (rien à retenir), `boombox.rs` (un champ de texte et le clavier, un en-tête fixe aux couleurs inversées
+par `Cx::palette` et `Couleurs::inverse`),
 `mixeur.rs` (une ressource globale, une animation, deux mises en page selon la place), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
 d'ouverture, l'appui long `cx.ui.click_long`, une boîte de dialogue, un état partagé entre
 fenêtres et une opération en arrière-plan : `Commun::fichiers`, `src/operations.rs`), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré
@@ -307,12 +308,11 @@ L'espace de travail est une `Surface` (`src/surface.rs`) en deux modes :
   `clip(None)` y revient. Un contexte n'a rien à faire pour fonctionner dans les deux
   modes, tant qu'il dessine dans son `Placee`.
 
-Une fenêtre libre a une étendue (`Etendue`) : normale, agrandie (toute la surface ; sa
-place est gardée pour la rétablir) ou réduite (absente des fenêtres placées, mais son
-instance reste ouverte et recensée). Les boutons de sa barre, avant la poignée, la
-changent (`etendre`) ; la barre des tâches de l'application (`App::taches`, à droite du
-logo, une case par fenêtre) appelle `basculer` : montrer et passer devant, ou réduire
-celle de devant.
+Une fenêtre libre a une étendue (`Etendue`) : normale ou réduite (absente des fenêtres
+placées, mais son instance reste ouverte et recensée). Sa barre n'a pas de bouton pour
+la changer : c'est la barre des tâches de l'application (`App::taches`, à droite du
+logo, une case par fenêtre) qui appelle `basculer` : montrer et passer devant, ou
+réduire celle de devant.
 
 Les fenêtres et leurs instances survivent au changement de mode : seule la disposition
 change. En Free flow, partager coupe la place de la fenêtre en deux, et une fenêtre
@@ -321,7 +321,7 @@ insérée (le lanceur) se pose en cascade devant les autres.
 ## Le fichier `espace.txt`
 
 ```text
-fenetres = C0.4000(F3:fichiers,L0.5000(F2:texte,F1:radio))
+fenetres = C0.4000(F3:fichiers,L0.5000(F2:texte,F1:boombox))
 
 [fenetre 3]
 dossier = /storage/emulated/0/Download
@@ -394,7 +394,7 @@ arrière-plan, sans ouvrir de fenêtre. Un contexte en déclare un (ou aucun) da
 `Genre` :
 
 ```rust
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Radio", /* … */ ouvrir, applet: Some(applet) };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Boombox", /* … */ ouvrir, applet: Some(applet) };
 
 struct AppletRadio;
 
@@ -426,13 +426,13 @@ peut demander à montrer son contexte (`Demande::Montrer { cle }`) : si aucune
 fenêtre ne le montre, la plus grande se scinde pour lui faire place.
 
 Le choix des applets montrés se fait dans les paramètres (Interface, section Barre)
-et s'enregistre dans `interface.txt` : `applets = fichiers radio mixeur orchestre` (vide :
+et s'enregistre dans `interface.txt` : `applets = fichiers boombox mixeur orchestre` (vide :
 aucun ; les clés inconnues sont oubliées).
 
 | Applet | Dans la barre | Dans le volet |
 | --- | --- | --- |
 | Fichiers | Seulement pendant une copie, un déplacement ou une suppression : le pourcentage et un filet d'avancement | Le détail, Arrêter, Ouvrir les Fichiers |
-| Radio | Le poste (à l'accent pendant la lecture), le flux en cours, lecture ou arrêt (relance le dernier flux) ; en compact, le poste seul | L'état et le format, le volume de la piste Radio, les flux récents, Ouvrir la Radio |
+| Boombox | Le poste (à l'accent pendant la lecture), le flux en cours, lecture ou arrêt (relance le dernier flux) ; en compact, le poste seul | L'état et le format, le volume de la piste Radio, les flux récents, Ouvrir la Boombox |
 | Mixeur | L'icône (pâle si le général est à zéro) et le vumètre stéréo de la sortie | Volume, Muet et Égaliseur (allumé ou non) de chaque piste, volume général, égaliseur de la sortie, Ouvrir le Mixeur |
 | Énergie (Orchestre) | La batterie (rouge sous le seuil bas) et, au choix, le niveau, le temps restant (avant la batterie vide, ou avant la charge complète) ou les deux ; le niveau tant que le temps n'est pas connu, et seul en compact | La courbe du jour, niveau, débit, autonomie, intervalle des relevés, seuil bas, le choix de l'affichage, l'économie, Ouvrir l'Orchestre |
 

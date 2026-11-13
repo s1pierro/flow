@@ -292,7 +292,7 @@ fn render_loop() -> Result<(), String> {
 
         let (w, h) = egl.size();
         dl.clear();
-        let mut cx = Cx { ui, text: &mut text, dl: &mut dl, dp, theme: Default::default() };
+        let mut cx = Cx { ui, text: &mut text, dl: &mut dl, dp, theme: Default::default(), palette: None };
         let scene = app.frame(&mut cx, Rect::new(0.0, 0.0, w, h), dt);
         ui.end_frame();
         // Les réglages changés s'enregistrent une fois le doigt levé, pas à chaque pas

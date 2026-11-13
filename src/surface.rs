@@ -54,8 +54,6 @@ const FOND_MENU: Id = id("surface/fond-menu");
 const LIGNE_MENU: Id = id("surface/ligne-menu");
 const FOND_ID: Id = id("surface/fond-libre");
 const DEPLACER_ID: Id = id("surface/deplacer");
-const REDUIRE_ID: Id = id("surface/reduire");
-const AGRANDIR_ID: Id = id("surface/agrandir");
 
 /// Le sens d'un partage : `Colonnes`, côte à côte (la première à gauche) ; `Lignes`,
 /// l'une sur l'autre (la première en haut).
@@ -109,14 +107,12 @@ pub struct Flottante {
     pub etendue: Etendue,
 }
 
-/// Comment une fenêtre libre se montre : à sa place, sur toute la surface (elle garde
-/// sa place pour quand elle sera rétablie), ou réduite (cachée, son contexte reste
-/// ouvert ; la barre des tâches la rend).
+/// Comment une fenêtre libre se montre : à sa place, ou réduite (cachée, son contexte
+/// reste ouvert ; la barre des tâches la réduit et la rend).
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum Etendue {
     #[default]
     Normale,
-    Agrandie,
     Reduite,
 }
 
@@ -297,7 +293,7 @@ impl Surface {
     /// Les fenêtres dans le rectangle `r` : identifiant, vue et cadre.
     pub fn disposer(&self, r: Rect) -> Vec<(FenetreId, u32, Rect)> {
         if let Some(l) = &self.libres {
-            return l.iter().map(|f| (f.id, f.vue, if f.etendue == Etendue::Agrandie { r } else { cadre_libre(f.place, r) })).collect();
+            return l.iter().map(|f| (f.id, f.vue, cadre_libre(f.place, r))).collect();
         }
         let mut out = Vec::new();
         self.racine.disposer(r, &mut out);
@@ -505,7 +501,6 @@ impl Surface {
                 .map(|f| {
                     let e = match f.etendue {
                         Etendue::Normale => "",
-                        Etendue::Agrandie => " agrandie",
                         Etendue::Reduite => " reduite",
                     };
                     format!("F{}:{} {:.4} {:.4} {:.4} {:.4}{e}", f.id, nom(f.vue), f.place[0], f.place[1], f.place[2], f.place[3])
@@ -535,7 +530,8 @@ impl Surface {
                 let [x, y, w, h] = n[..] else { return None };
                 let etendue = match m.next() {
                     None => Etendue::Normale,
-                    Some("agrandie") => Etendue::Agrandie,
+                    // Les espaces d'avant la 0.37 pouvaient agrandir une fenêtre
+                    Some("agrandie") => Etendue::Normale,
                     Some("reduite") => Etendue::Reduite,
                     Some(_) => return None,
                 };
@@ -690,7 +686,7 @@ impl Surface {
             // Le bureau, puis les fenêtres qui se montrent
             cx.dl.rrect(r, 0.0, col.puce);
             let visibles: Vec<(FenetreId, u32, Rect)> = self.disposer(r).into_iter().zip(self.libres.as_ref().unwrap()).filter(|(_, f)| f.etendue != Etendue::Reduite).map(|(x, _)| x).collect();
-            self.placees = visibles.into_iter().map(|(id, vue, c)| Surface::placer(cx, id, vue, c, nom_de(vue).0, 2.0)).collect();
+            self.placees = visibles.into_iter().map(|(id, vue, c)| Surface::placer(cx, id, vue, c, nom_de(vue).0, 0.0)).collect();
             return self.placees.clone();
         }
         let cadres = self.disposer(r);
@@ -740,18 +736,15 @@ impl Surface {
         let (d, col) = (cx.dp, cx.couleurs());
         let (c, r, k) = (p.cadre, self.rect, p.id as usize);
         let (nom, icone) = vues.get(p.vue as usize).copied().unwrap_or(("?", Icon::Help));
-        let agrandie = self.etendue(p.id) == Some(Etendue::Agrandie);
-        if !agrandie {
-            cx.dl.shadow(Rect::new(c.x, c.y + 3.0 * d, c.w, c.h), 14.0 * d, 14.0 * d, col.ombre);
-            cx.dl.rrect(c.inset(-d.max(1.0)), 0.0, col.ligne);
-        }
+        cx.dl.shadow(Rect::new(c.x, c.y + 3.0 * d, c.w, c.h), 14.0 * d, 14.0 * d, col.ombre);
+        cx.dl.rrect(c.inset(-d.max(1.0)), 0.0, col.ligne);
         cx.dl.rrect(c, 0.0, col.fond);
         cx.ui.region_add(sub_id(self.k(FOND_ID), k), c, Sense::Sink);
         let hb = p.barre.h;
         let (mini_w, mini_h) = ((160.0 * d).min(r.w), (3.0 * hb).min(r.h));
         // Tirer la barre déplace la fenêtre, sans la perdre hors de la surface
         let dk = sub_id(self.k(DEPLACER_ID), k);
-        if let Some(g) = cx.ui.drag(dk, p.barre).filter(|_| !agrandie) {
+        if let Some(g) = cx.ui.drag(dk, p.barre) {
             let (_, ox, oy) = *self.deplace.get_or_insert((p.id, g.x - c.x, g.y - c.y));
             if g.moved && self.deplace.is_some_and(|t| t.0 == p.id) {
                 let garde = (80.0 * d).min(c.w);
@@ -761,26 +754,11 @@ impl Surface {
             }
         }
         self.dessiner_barre(cx, p, nom, icone);
-        // Réduire, agrandir (ou rétablir), avant la poignée
         let b = p.barre;
-        for (j, (ik, icone)) in [(REDUIRE_ID, Icon::Reduire), (AGRANDIR_ID, if agrandie { Icon::Restaurer } else { Icon::Agrandir })].into_iter().enumerate() {
-            let case = Rect::new(b.right() - (3.0 - j as f32) * b.h, b.y, b.h, b.h);
-            if case.x < p.etat.x {
-                continue;
-            }
-            let bk = sub_id(self.k(ik), k);
-            if cx.ui.click(bk, case, None) {
-                self.etendre(p.id, if j == 0 { Etendue::Reduite } else if agrandie { Etendue::Normale } else { Etendue::Agrandie });
-            }
-            if cx.ui.pressed(bk) {
-                cx.dl.rrect(case.inset(3.0 * d), cx.theme.rayon(case.h - 6.0 * d), col.puce);
-            }
-            cx.icon(case.inset(b.h * 0.27), icone, col.texte);
-        }
         // La poignée : le coin bas droit suit le doigt
         let poignee = Rect::new((b.right() - b.h).max(b.x), b.y, b.h.min(b.w), b.h);
         let pk = sub_id(self.k(POIGNEE_ID), k);
-        if let Some(g) = cx.ui.drag(pk, poignee).filter(|_| !agrandie) {
+        if let Some(g) = cx.ui.drag(pk, poignee) {
             let (_, ox, oy) = *self.tirage.get_or_insert((p.id, c.right() - g.x, c.bottom() - g.y));
             if g.moved && self.tirage.is_some_and(|t| t.0 == p.id) {
                 let w = (g.x + ox - c.x).clamp(mini_w, (r.right() - c.x).max(mini_w));
@@ -788,7 +766,7 @@ impl Surface {
                 self.placer_libre(p.id, Rect::new(c.x, c.y, w, h));
             }
         }
-        Surface::dessiner_poignee(cx, p, (!agrandie, !agrandie), cx.ui.pressed(pk));
+        Surface::dessiner_poignee(cx, p, (true, true), cx.ui.pressed(pk));
     }
 
     /// Les fenêtres libres, de l'arrière vers l'avant (rien en pavage).
@@ -817,8 +795,7 @@ impl Surface {
         }
     }
 
-    /// Réduit, agrandit ou rétablit la fenêtre libre `f` ; sauf réduite, elle passe
-    /// devant.
+    /// Réduit ou rétablit la fenêtre libre `f` ; rétablie, elle passe devant.
     pub fn etendre(&mut self, f: FenetreId, e: Etendue) {
         let Some(x) = self.libres.as_mut().and_then(|l| l.iter_mut().find(|x| x.id == f)) else { return };
         x.etendue = e;
@@ -952,7 +929,7 @@ mod tests {
         }
         fn image(&mut self) -> Vec<Placee> {
             self.dl.clear();
-            let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.0, theme: Default::default() };
+            let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.0, theme: Default::default(), palette: None };
             let p = self.s.frame(&mut cx, R, &NOMS);
             for q in &p {
                 self.s.habiller(&mut cx, q, &NOMS);
@@ -1193,26 +1170,18 @@ mod tests {
     }
 
     #[test]
-    fn reduire_agrandir_et_la_barre_des_taches() {
+    fn la_barre_des_taches_reduit_et_rend() {
         let mut b = Banc::new();
         b.s.mettre_libre(true);
         b.image();
         let n = b.s.inserer(Sens::Colonnes, true, 1);
-        let p = b.image();
-        let q = *p.iter().find(|p| p.id == n).unwrap();
-        // Les deux boutons prennent leur place avant la poignée
-        assert!(q.etat.right() <= q.barre.right() - 3.0 * q.barre.h + 0.5);
-        // Agrandir : toute la surface ; la place d'avant est gardée
-        let agr = (q.barre.right() - 1.5 * q.barre.h, q.barre.cy());
-        b.toucher(agr.0, agr.1);
-        assert_eq!(b.s.etendue(n), Some(Etendue::Agrandie));
-        let z = b.image().into_iter().find(|p| p.id == n).unwrap();
-        assert_eq!(z.cadre, R);
-        assert!(b.s.ecrire().contains(" agrandie"));
-        // Rétablir, puis réduire : elle quitte l'écran mais pas la surface
-        b.toucher(z.barre.right() - 1.5 * z.barre.h, z.barre.cy());
-        assert_eq!(b.image().into_iter().find(|p| p.id == n).unwrap().cadre, q.cadre);
-        b.toucher(q.barre.right() - 2.5 * q.barre.h, q.barre.cy());
+        let q = *b.image().iter().find(|p| p.id == n).unwrap();
+        // Plus de boutons dans la barre : l'état va jusqu'à la poignée
+        assert!(q.etat.right() >= q.barre.right() - 1.5 * q.barre.h);
+        // Les espaces d'avant agrandissaient : relus, la fenêtre est normale
+        assert!(Surface::lire(&b.s.ecrire().replacen(')', " agrandie)", 1)).is_some());
+        // Réduite : elle quitte l'écran mais pas la surface
+        b.s.basculer(n);
         assert_eq!(b.s.etendue(n), Some(Etendue::Reduite));
         assert!(b.image().iter().all(|p| p.id != n));
         assert_eq!(b.s.disposer(R).len(), 2);

@@ -21,6 +21,16 @@ pub struct Couleurs {
     pub ombre: Color,
 }
 
+impl Couleurs {
+    /// Le jeu inversé : l'accent devient le fond, le texte et les commandes prennent
+    /// la couleur posée sur l'accent ; surfaces et lignes en sont des voiles.
+    pub fn inverse(&self) -> Couleurs {
+        let (a, s) = (self.accent, self.sur_accent);
+        let voile = |t: f32| -> Color { std::array::from_fn(|i| if i == 3 { 255 } else { (a[i] as f32 + (s[i] as f32 - a[i] as f32) * t).round() as u8 }) };
+        Couleurs { fond: a, surface: voile(0.16), texte: s, pale: voile(0.7), accent: s, sur_accent: a, puce: voile(0.1), ligne: voile(0.35), ombre: self.ombre }
+    }
+}
+
 /// Les accents proposés : nom, teinte sur fond clair, teinte sur fond sombre.
 pub const ACCENTS: [(&str, Color, Color); 6] = [
     ("Indigo", [0x2A, 0x22, 0xD8, 255], [0x8B, 0x85, 0xFF, 255]),
@@ -118,6 +128,8 @@ pub enum Icon {
     Lecture,
     Pause,
     Stop,
+    /// Un rond plein : enregistrer.
+    Enregistrer,
     /// L'explorateur : un dossier, un fichier, et par nature une note, une photo, un
     /// film ; une flèche vers le dossier parent.
     Dossier,
@@ -150,11 +162,6 @@ pub enum Icon {
     Maille,
     /// Une disquette : enregistrer.
     Disquette,
-    /// Une fenêtre libre : la réduire (un trait en bas), l'agrandir (un carré), la
-    /// rétablir (deux carrés décalés).
-    Reduire,
-    Agrandir,
-    Restaurer,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -170,6 +177,9 @@ pub struct Cx<'a> {
     pub dl: &'a mut DrawList,
     pub dp: f32,
     pub theme: Theme,
+    /// Des couleurs qui remplacent celles du thème le temps d'une zone (l'en-tête
+    /// inversé de la Boombox) ; `None` : celles du thème.
+    pub palette: Option<Couleurs>,
 }
 
 /// Colonne de composants dans une zone défilante.
@@ -197,7 +207,7 @@ impl Body {
 
 impl Cx<'_> {
     pub fn couleurs(&self) -> Couleurs {
-        self.theme.couleurs()
+        self.palette.unwrap_or_else(|| self.theme.couleurs())
     }
 
     /// La hauteur des commandes, en pixels.
@@ -489,28 +499,6 @@ impl Cx<'_> {
                 let t = p(-5.5, 2.0);
                 self.dl.rrect(Rect::new(t[0], t[1], 11.0 * u, 7.0 * u), 1.0 * u, color);
             }
-            Icon::Reduire => {
-                self.dl.line(p(-7.0, 6.0), p(7.0, 6.0), 2.0 * u, color);
-            }
-            Icon::Agrandir | Icon::Restaurer => {
-                let e = 1.8 * u;
-                let carre = |dl: &mut crate::draw::DrawList, a: [f32; 2], b: [f32; 2]| {
-                    dl.line(a, [b[0], a[1]], e, color);
-                    dl.line([b[0], a[1]], b, e, color);
-                    dl.line(b, [a[0], b[1]], e, color);
-                    dl.line([a[0], b[1]], a, e, color);
-                };
-                if icon == Icon::Agrandir {
-                    carre(self.dl, p(-7.0, -7.0), p(7.0, 7.0));
-                } else {
-                    carre(self.dl, p(-7.0, -3.0), p(4.0, 8.0));
-                    // Le carré de derrière, dont on ne voit que les bords qui dépassent
-                    self.dl.line(p(-3.0, -3.0), p(-3.0, -7.0), e, color);
-                    self.dl.line(p(-3.0, -7.0), p(8.0, -7.0), e, color);
-                    self.dl.line(p(8.0, -7.0), p(8.0, 4.0), e, color);
-                    self.dl.line(p(8.0, 4.0), p(4.0, 4.0), e, color);
-                }
-            }
             Icon::Gomme => {
                 // La gomme en biais : son corps, et le bout qui efface, plus pâle
                 self.dl.line(p(-3.0, 3.0), p(6.0, -6.0), 9.0 * u, color);
@@ -577,6 +565,7 @@ impl Cx<'_> {
                 self.dl.line(p(6.5, -1.5), p(0.0, -8.0), t, color);
             }
             Icon::Stop => self.dl.rrect(Rect::new(cx - 7.0 * u, cy - 7.0 * u, 14.0 * u, 14.0 * u), 2.0 * u, color),
+            Icon::Enregistrer => self.dl.rrect(Rect::new(cx - 7.0 * u, cy - 7.0 * u, 14.0 * u, 14.0 * u), 7.0 * u, color),
             Icon::Close => {
                 self.dl.line(p(-6.0, -6.0), p(6.0, 6.0), t, color);
                 self.dl.line(p(6.0, -6.0), p(-6.0, 6.0), t, color);

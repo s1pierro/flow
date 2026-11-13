@@ -87,7 +87,7 @@ impl Reglages {
                 "gestes_appui_long" => g.appui_long = nombre(&v).map_or(g.appui_long, |x| x / 1000.0),
                 "gestes_retour" => g.retour = oui(&v).unwrap_or(g.retour),
                 "applets" => {
-                    let voulus: Vec<String> = v.split(|ch: char| ch.is_whitespace() || ch == ',').filter(|k| !k.is_empty()).map(str::to_lowercase).collect();
+                    let voulus: Vec<String> = v.split(|ch: char| ch.is_whitespace() || ch == ',').filter(|k| !k.is_empty()).map(|k| if k.eq_ignore_ascii_case("radio") { "boombox".to_string() } else { k.to_lowercase() }).collect();
                     // Les clés inconnues sont oubliées ; l'ordre est celui des contextes
                     r.applets = crate::applet::disponibles().map(|g| g.cle.to_string()).filter(|k| voulus.contains(k)).collect();
                 }
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(lu.applets, ["mixeur"]);
         // Aucun applet, des clés inconnues, un ordre quelconque
         assert!(Reglages::lire("applets =").applets.is_empty());
-        assert_eq!(Reglages::lire("applets = mixeur, inconnu radio").applets, ["radio", "mixeur"]);
+        assert_eq!(Reglages::lire("applets = mixeur, inconnu radio").applets, ["boombox", "mixeur"]);
         assert_eq!(Reglages::lire("").applets, crate::applet::par_defaut());
         assert_eq!(lu.clavier, r.clavier);
         assert_eq!(lu.gestes, r.gestes);

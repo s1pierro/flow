@@ -546,7 +546,7 @@ impl App {
                 let mut b = cx.body(id("corps-aide"), body, &c.scrolls);
                 cx.section(&mut b, "FENÊTRES");
                 cx.paragraph(&mut b, "Touchez le titre d'une fenêtre pour choisir son contexte, la partager en deux ou la fermer.");
-                cx.paragraph(&mut b, "En Free flow (Paramètres, Interface), les fenêtres flottent comme sur un bureau : tirez la barre d'une fenêtre pour la déplacer, sa poignée pour la redimensionner ; touchez-la pour la passer devant. Un contexte lancé s'ouvre dans une nouvelle fenêtre, posée en cascade. Les deux boutons avant la poignée réduisent la fenêtre et l'agrandissent à tout l'écran (ou la rétablissent). La barre des tâches, à droite du logo, montre chaque fenêtre : la toucher montre une fenêtre réduite ou cachée et la passe devant, ou réduit celle de devant.");
+                cx.paragraph(&mut b, "En Free flow (Paramètres, Interface), les fenêtres flottent comme sur un bureau : tirez la barre d'une fenêtre pour la déplacer, sa poignée pour la redimensionner ; touchez-la pour la passer devant. Un contexte lancé s'ouvre dans une nouvelle fenêtre, posée en cascade. La barre des tâches, à droite du logo, montre chaque fenêtre : la toucher montre une fenêtre réduite ou cachée et la passe devant, ou réduit celle de devant.");
                 cx.section(&mut b, "PANNEAU");
                 cx.paragraph(&mut b, "Le logo de la barre du bas ouvre la liste des contextes (à gauche en paysage, sous la barre en portrait) : en toucher un l'ajoute à l'espace de travail, à gauche en paysage, en bas en portrait, et referme la liste.");
                 cx.paragraph(&mut b, "Les liens Paramètres et À propos, en bas de la liste des contextes, ouvrent ce panneau. L'espace de travail s'adapte à la place restante.");
@@ -720,7 +720,7 @@ mod tests {
         }
         fn frame(&mut self, dt: f32) -> Scene {
             self.dl.clear();
-            let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.5, theme: Default::default() };
+            let mut cx = Cx { ui: &mut self.ui, text: &mut self.text, dl: &mut self.dl, dp: 1.5, theme: Default::default(), palette: None };
             let s = self.app.frame(&mut cx, self.ecran, dt);
             self.ui.end_frame();
             s
@@ -1022,7 +1022,7 @@ mod tests {
         let mut r = Rig::new();
         // Fichiers ne se montre que pendant une opération
         let zones = r.app.applets.zones().to_vec();
-        assert_eq!(zones.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["radio", "mixeur"]);
+        assert_eq!(zones.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["boombox", "mixeur"]);
         let z = zones[1].1;
         assert!(z.right() <= 1920.0 && z.y == 1200.0 - 72.0, "à droite, dans la barre");
         r.tap(z.cx(), z.cy());
@@ -1041,12 +1041,12 @@ mod tests {
     #[test]
     fn les_applets_retires_quittent_la_barre() {
         let mut r = Rig::new();
-        crate::applet::montrer(&mut r.app.commun, "radio", false);
+        crate::applet::montrer(&mut r.app.commun, "boombox", false);
         r.frames(1);
         assert_eq!(r.app.applets.zones().iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["mixeur"]);
         assert_eq!(r.app.reglages().applets, ["fichiers", "mixeur", "orchestre"]);
-        crate::applet::montrer(&mut r.app.commun, "radio", true);
-        assert_eq!(r.app.commun.applets, ["fichiers", "radio", "mixeur", "orchestre"]);
+        crate::applet::montrer(&mut r.app.commun, "boombox", true);
+        assert_eq!(r.app.commun.applets, ["fichiers", "boombox", "mixeur", "orchestre"]);
     }
 
     #[test]

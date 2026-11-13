@@ -16,7 +16,8 @@ Annuler et Rétablir à gauche du titre, par mot ou par ligne ;
 numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
 JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
-quand on y touche un fichier texte), Disque, Radio, Mixeur (la console audio : une tranche par piste,
+quand on y touche un fichier texte), Disque, Boombox (la radio : un en-tête aux couleurs inversées porte les modes Flux, Magnéto et
+Bibliothèque, la lecture, l'enregistrement et l'adresse du flux ; les flux récents défilent dessous), Mixeur (la console audio : une tranche par piste,
 un égaliseur paramétrique à cinq bandes par piste et sur la sortie, réglé en tirant les poignées de sa courbe), Encre (dessin à
 main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts ; chaque trait
 fini est simplifié sans perte), SVG (éditeur
@@ -38,14 +39,14 @@ recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`), A
 gestes) sont dans le panneau latéral. Deux façons de disposer les fenêtres (Paramètres, Interface) :
 **Full flow**, où elles se partagent tout l'espace, et **Free flow**, où chacune flotte à sa place
 comme sur un bureau (tirer la barre la déplace, la poignée la redimensionne, la toucher la passe
-devant ; deux boutons la réduisent ou l'agrandissent, et une barre des tâches à côté du logo
-retrouve chaque fenêtre). Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
+devant ; une barre des tâches à côté du logo réduit
+ou retrouve chaque fenêtre). Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document.
 
 La barre du bas accueille les **applets** des contextes, à la façon du tableau de
 bord de GNOME 2 : ils pilotent ce qui tourne en arrière-plan sans ouvrir de fenêtre.
-Radio (le flux en cours, lecture ou arrêt), Mixeur (le vumètre de la sortie),
+Boombox (le flux en cours, lecture ou arrêt), Mixeur (le vumètre de la sortie),
 Fichiers (l'avancement d'une copie) et Énergie (la batterie : niveau, temps restant
 avant la batterie vide ou la charge complète, ou les deux, au choix) ; toucher un applet ouvre son volet (volumes,
 flux récents, Arrêter…). Les applets montrés se choisissent dans les paramètres.

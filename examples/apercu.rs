@@ -74,7 +74,10 @@ fn main() {
         Shot { name: "libre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "libre-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mailles", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
+        Shot { name: "mailles-nom", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 21 },
         Shot { name: "mailles-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
+        Shot { name: "boombox", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "boombox-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "applets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -105,7 +108,7 @@ fn main() {
             use flow::surface::Sens;
             app.surface.partager(1, Sens::Colonnes, 0.6);
             let liste = app.surface.partager(1, Sens::Lignes, 0.55).unwrap();
-            app.surface.changer_vue(liste, indice("radio").unwrap());
+            app.surface.changer_vue(liste, indice("boombox").unwrap());
             app.surface.changer_vue(1, indice("aide").unwrap());
         }
 
@@ -176,7 +179,7 @@ fn main() {
                 o.relever(niveau, charge, t - (age * 3600.0) as u64);
             }
             o.reglages.affichage = flow::orchestre::AffichageBatterie::LesDeux;
-            app.applets.ouvert = Some(if s.name == "applets" { "orchestre" } else { "radio" });
+            app.applets.ouvert = Some(if s.name == "applets" { "orchestre" } else { "boombox" });
         }
         if s.name.starts_with("lanceur") {
             // Le lanceur ouvert, à gauche, à côté d'un texte ; en sombre, sur fond noir
@@ -281,6 +284,12 @@ fn main() {
             app.ouvrir_espace(&format!("fenetres = F1:svg\n[fenetre 1]\ndocument = {}\n", f.display()));
             app.commun.theme.sombre = s.name == "svg-portrait";
         }
+        if s.name.starts_with("boombox") {
+            // La Boombox à côté de l'explorateur ; en portrait, seule et en sombre
+            let esp = if s.name == "boombox" { "fenetres = C0.4500(F1:fichiers,F2:boombox)\n[fenetre 2]\nadresse = https://icecast.radiofrance.fr/fip-midfi.mp3\n" } else { "fenetres = F1:radio\n" };
+            app.ouvrir_espace(esp);
+            app.commun.theme.sombre = s.name == "boombox-portrait";
+        }
         if s.name.starts_with("argile") {
             // Une boule fraîche, quelques coups de pinceau (en sombre pour le portrait)
             app.ouvrir_espace("fenetres = F1:argile\n");
@@ -288,9 +297,9 @@ fn main() {
         }
         if s.name.starts_with("libre") {
             // Free flow : trois fenêtres qui se chevauchent, Mailles devant
-            // (en paysage, une Radio réduite ; en portrait, Mailles agrandie)
-            let mailles = if s.name == "libre" { "0.2800 0.3200 0.5500 0.6400" } else { "0.2800 0.3200 0.5500 0.6400 agrandie" };
-            app.ouvrir_espace(&format!("fenetres = libre(F4:radio 0.1 0.1 0.4 0.4 reduite;F1:fichiers 0.0300 0.0400 0.4500 0.7500;F2:aide 0.5200 0.0600 0.4500 0.5000;F3:mailles {mailles})\n[fenetre 3]\nmode = faces\n"));
+            // (en paysage, une Boombox réduite )
+            let mailles = if s.name == "libre" { "0.2800 0.3200 0.5500 0.6400" } else { "0.2800 0.3200 0.5500 0.6400" };
+            app.ouvrir_espace(&format!("fenetres = libre(F4:boombox 0.1 0.1 0.4 0.4 reduite;F1:fichiers 0.0300 0.0400 0.4500 0.7500;F2:aide 0.5200 0.0600 0.4500 0.5000;F3:mailles {mailles})\n[fenetre 3]\nmode = faces\n"));
             app.commun.theme.sombre = s.name == "libre-portrait";
         }
         if s.name.starts_with("mailles") {
@@ -341,6 +350,9 @@ fn main() {
                     ui.event(Event::Down { id: 0, x, y }, t)
                 }
                 (20, 11) => ui.event(Event::Up { id: 0 }, t),
+                // La disquette d'une maille jamais enregistrée
+                (21, 10) => ui.event(Event::Down { id: 0, x: 1731.0, y: 1100.0 }, t),
+                (21, 11) => ui.event(Event::Up { id: 0 }, t),
                 (5, 10) => ui.event(Event::Down { id: 0, x: 1850.0, y: 136.0 }, t),
                 (5, 11) => ui.event(Event::Up { id: 0 }, t),
                 (6, 10) => ui.event(Event::Down { id: 0, x: SVG_TAP.0, y: SVG_TAP.1 }, t),
@@ -401,7 +413,7 @@ fn main() {
                 }
             }
             dl.clear();
-            let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: s.dp, theme: Default::default() };
+            let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: s.dp, theme: Default::default(), palette: None };
             scene = Some(app.frame(&mut cx, screen, 0.05));
             ui.end_frame();
             if s.disque.is_some() {
