@@ -417,6 +417,13 @@ pub fn installation(methode: &str, arg: Option<&str>) -> Option<String> {
     appeler("fr.s1pierro.flow.Installation", &CONTEXTE, methode, arg)
 }
 
+/// Télécharge par `fr.s1pierro.flow.Reseau` (« url\nchemin[\nformulaire] ») : "" si tout
+/// va bien, l'erreur sinon ; rien hors d'Android. Bloque jusqu'à la fin : à appeler
+/// depuis un thread de travail.
+pub fn reseau(arg: &str) -> Option<String> {
+    appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "telecharger", Some(arg))
+}
+
 /// Comme `installation`, pour `fr.s1pierro.flow.Toile`, qui reçoit l'activité.
 pub fn toile(methode: &str, arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Toile", &ACTIVITE, methode, Some(arg))

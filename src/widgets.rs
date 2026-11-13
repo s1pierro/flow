@@ -169,6 +169,8 @@ pub enum Icon {
     Maille,
     /// Une disquette : enregistrer.
     Disquette,
+    /// Une carte pliée : les lieux réels.
+    Carte,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -200,6 +202,12 @@ pub struct Body {
 }
 
 impl Body {
+    /// Une colonne posée à la main, sans zone défilante (une rangée de puces fixe) :
+    /// `id` sert aux gestes des composants, `rect` à la découpe.
+    pub fn fixe(id: Id, rect: Rect, x: f32, w: f32, y: f32) -> Body {
+        Body { x, w, y, top: rect.y, id, rect }
+    }
+
     /// L'identifiant de la zone défilante, pour qu'un glissement parti d'un composant
     /// la fasse défiler.
     pub fn id(&self) -> Id {
@@ -493,6 +501,15 @@ impl Cx<'_> {
                 for q in v.iter().chain([&o]) {
                     self.dl.rrect(Rect::new(q[0] - 2.0 * u, q[1] - 2.0 * u, 4.0 * u, 4.0 * u), 2.0 * u, color);
                 }
+            }
+            Icon::Carte => {
+                let v = [p(-10.0, -6.0), p(-3.5, -9.0), p(3.5, -6.0), p(10.0, -9.0), p(10.0, 6.0), p(3.5, 9.0), p(-3.5, 6.0), p(-10.0, 9.0)];
+                for i in 0..8 {
+                    self.dl.line(v[i], v[(i + 1) % 8], 1.8 * u, color);
+                }
+                self.dl.line(p(-3.5, -9.0), p(-3.5, 6.0), 1.5 * u, color);
+                self.dl.line(p(3.5, -6.0), p(3.5, 9.0), 1.5 * u, color);
+                self.dl.rrect(Rect::new(cx - 1.8 * u + 6.5 * u, cy - 4.5 * u, 3.6 * u, 3.6 * u), 1.8 * u, color);
             }
             Icon::Disquette => {
                 // Le boîtier au coin coupé, le volet de métal en haut, l'étiquette en bas

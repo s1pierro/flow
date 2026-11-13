@@ -80,6 +80,10 @@ fn main() {
         Shot { name: "boombox", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "boombox-magneto", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 22 },
         Shot { name: "boombox-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-loin", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-accueil", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "images", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "images-visionneuse", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 23 },
         Shot { name: "toile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -311,6 +315,16 @@ fn main() {
             app.commun.theme.arrondi = 0.0;
             app.commun.theme.accent = 3;
         }
+        if s.name.starts_with("lieux") {
+            // Les Andelys (s'il est là) : le bourg de près, toute la carte, en portrait ;
+            // l'accueil sur le dossier des lieux
+            let vue = match s.name { "lieux-loin" => "0 0 0.05", "lieux-portrait" => "-300 -100 1.6", _ => "-200 0 0.9" };
+            if s.name == "lieux-accueil" {
+                app.ouvrir_espace("fenetres = F1:lieux\n");
+            } else {
+                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = /sdcard/bang/lieux/les-andelys.reel\nvue = {vue}\noutil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
+            }
+        }
         if s.name == "toile" {
             app.ouvrir_espace("fenetres = C0.4500(F1:fichiers,F2:toile)\n[fenetre 2]\nadresse = file:///sdcard/site/index.html\n");
         }
@@ -446,6 +460,10 @@ fn main() {
             let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: s.dp, theme: Default::default(), palette: None };
             scene = Some(app.frame(&mut cx, screen, 0.05));
             ui.end_frame();
+            if s.name.starts_with("lieux") {
+                // Laisse la lecture et le dessin des tuiles finir
+                std::thread::sleep(std::time::Duration::from_millis(if i < 3 { 600 } else { 40 }));
+            }
             if s.name.starts_with("images") {
                 // Laisse le décodage finir
                 std::thread::sleep(std::time::Duration::from_millis(30));

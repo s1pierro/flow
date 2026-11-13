@@ -13,6 +13,7 @@ pub mod app;
 pub mod applet;
 pub mod android;
 pub mod audio;
+pub mod carte;
 pub mod clavier;
 pub mod contexte;
 pub mod contextes;
