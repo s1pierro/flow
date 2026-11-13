@@ -281,6 +281,12 @@ fn render_loop() -> Result<(), String> {
             if let Some(d) = fichier.as_ref().and_then(|f| f.chemin.parent()) {
                 app.historique_en(d.join(crate::radio::HISTORIQUE));
             }
+            // Une fois par lancement : le dernier flux écouté en veille, pour le tampon
+            // du magnétophone de la Boombox
+            static VEILLE: Once = Once::new();
+            if app.commun.veille && !app.commun.historique.liste.is_empty() {
+                VEILLE.call_once(|| crate::contextes::boombox::veiller_au_lancement(&app.commun));
+            }
         }
 
         for (e, t) in events {

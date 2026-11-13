@@ -148,6 +148,13 @@ pub enum Icon {
     Orchestre,
     /// L'Accueil : une maison.
     Maison,
+    /// La Toile : un globe (un cercle, un méridien, l'équateur).
+    Toile,
+    /// Des chevrons : page précédente, page suivante.
+    Precedent,
+    Suivant,
+    /// Une flèche en rond : recharger.
+    Recharger,
     /// Partager une fenêtre en deux colonnes, ou en deux lignes.
     ScinderColonnes,
     ScinderLignes,
@@ -558,6 +565,31 @@ impl Cx<'_> {
                 for (a0, a1) in [(-q, 0.55), (0.55, 2.2), (2.2, 3.0 * q)] {
                     self.dl.secteur([cx, cy], 4.5 * u, 10.5 * u, a0, a1, 1.6 * u, color);
                 }
+            }
+            Icon::Toile => {
+                let e = 1.8 * u;
+                let pi = std::f32::consts::PI;
+                self.dl.secteur(p(0.0, 0.0), 9.0 * u - e / 2.0, 9.0 * u + e / 2.0, 0.0, 2.0 * pi, 0.0, color);
+                self.dl.line(p(-9.0, 0.0), p(9.0, 0.0), e, color);
+                self.dl.line(p(0.0, -9.0), p(0.0, 9.0), e, color);
+                for s in [-1.0f32, 1.0] {
+                    self.dl.line(p(0.0, -9.0), p(4.5 * s, -4.5), e, color);
+                    self.dl.line(p(4.5 * s, -4.5), p(4.5 * s, 4.5), e, color);
+                    self.dl.line(p(4.5 * s, 4.5), p(0.0, 9.0), e, color);
+                }
+            }
+            Icon::Precedent | Icon::Suivant => {
+                let s = if icon == Icon::Precedent { 1.0 } else { -1.0 };
+                self.dl.line(p(3.5 * s, -8.0), p(-4.5 * s, 0.0), t, color);
+                self.dl.line(p(-4.5 * s, 0.0), p(3.5 * s, 8.0), t, color);
+            }
+            Icon::Recharger => {
+                let e = 1.9 * u;
+                let pi = std::f32::consts::PI;
+                // Trois quarts de cercle, et la pointe au bout, en haut à droite
+                self.dl.secteur(p(0.0, 0.0), 7.5 * u - e / 2.0, 7.5 * u + e / 2.0, -0.3 * pi, 1.2 * pi, 0.0, color);
+                self.dl.line(p(4.4, -6.1), p(9.7, -6.6), e, color);
+                self.dl.line(p(4.4, -6.1), p(5.6, -0.9), e, color);
             }
             Icon::Haut => {
                 self.dl.line(p(0.0, 8.0), p(0.0, -8.0), t, color);

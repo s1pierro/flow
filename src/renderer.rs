@@ -86,10 +86,15 @@ const UI_FS: &str = "#version 300 es
 precision highp float;
 in vec2 v_local; in vec4 v_shape; in vec2 v_uv; in vec4 v_color;
 uniform sampler2D u_atlas;
+uniform sampler2D u_image;
 out vec4 o_color;
 void main() {
   float a;
-  if (v_shape.z < -1.5) {
+  if (v_shape.z < -2.5) {
+    // Une image, déjà prémultipliée
+    o_color = texture(u_image, v_uv) * v_color.a;
+    return;
+  } else if (v_shape.z < -1.5) {
     // Secteur d'anneau : rayons (x, y), angles (uv), écart sur les bords droits (w)
     float r = length(v_local);
     float dr = max(v_shape.x - r, r - v_shape.y);
@@ -123,6 +128,10 @@ pub struct Renderer {
     u_vue: i32,
     u_couleur: i32,
     tampons: RefCell<Vec<Tampon3d>>,
+    /// Les images sur la carte graphique : id, révision, texture, taille, et l'image
+    /// où elles ont servi (celles qui ne servent plus sont libérées).
+    textures: RefCell<Vec<(u64, u64, u32, (u32, u32), u64)>>,
+    images_vues: std::cell::Cell<u64>,
 }
 
 fn cstr(s: &str) -> CString {
@@ -167,6 +176,9 @@ impl Renderer {
             let ui_program = program(&gl, UI_VS, UI_FS)?;
             let loc = |p: u32, n: &str| (gl.glGetUniformLocation)(p, cstr(n).as_ptr());
             let u_size = loc(ui_program, "u_size");
+            (gl.glUseProgram)(ui_program);
+            (gl.glUniform1i)(loc(ui_program, "u_atlas"), 0);
+            (gl.glUniform1i)(loc(ui_program, "u_image"), 1);
 
             let (mut ui_vao, mut ui_vbo) = (0, 0);
             (gl.glGenVertexArrays)(1, &mut ui_vao);
@@ -202,7 +214,7 @@ impl Renderer {
             let u_vue = loc(maillage_program, "u_vue");
             let u_couleur = loc(maillage_program, "u_couleur");
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, tampons: RefCell::new(Vec::new()) })
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
         }
     }
 
@@ -255,6 +267,43 @@ impl Renderer {
             t.n = m.indices.len() as i32;
         }
         (t.vao, t.n)
+    }
+
+    /// Lie l'image à l'unité 1, envoyée si elle est nouvelle ou a changé.
+    unsafe fn lier_image(&self, img: &crate::draw::Image) {
+        let gl = &self.gl;
+        let n = self.images_vues.get();
+        let mut t = self.textures.borrow_mut();
+        (gl.glActiveTexture)(0x84C1);
+        let i = match t.iter().position(|x| x.0 == img.id) {
+            Some(i) => i,
+            None => {
+                let mut tex = 0;
+                (gl.glGenTextures)(1, &mut tex);
+                (gl.glBindTexture)(TEXTURE_2D, tex);
+                for (k, v) in [(0x2801, 0x2601), (0x2800, 0x2601), (0x2802, 0x812F), (0x2803, 0x812F)] {
+                    (gl.glTexParameteri)(TEXTURE_2D, k, v);
+                }
+                t.push((img.id, u64::MAX, tex, (0, 0), n));
+                t.len() - 1
+            }
+        };
+        let e = &mut t[i];
+        e.4 = n;
+        (gl.glBindTexture)(TEXTURE_2D, e.2);
+        let (w, h) = (img.largeur, img.hauteur);
+        if e.1 != img.revision && img.pixels.len() >= (w * h * 4) as usize && w > 0 && h > 0 {
+            (gl.glPixelStorei)(0x0CF5, 4);
+            if e.3 != (w, h) {
+                (gl.glTexImage2D)(TEXTURE_2D, 0, 0x8058, w as i32, h as i32, 0, 0x1908, UBYTE, img.pixels.as_ptr() as *const c_void);
+                e.3 = (w, h);
+            } else {
+                (gl.glTexSubImage2D)(TEXTURE_2D, 0, 0, 0, w as i32, h as i32, 0x1908, UBYTE, img.pixels.as_ptr() as *const c_void);
+            }
+            (gl.glPixelStorei)(0x0CF5, 1);
+            e.1 = img.revision;
+        }
+        (gl.glActiveTexture)(0x84C0);
     }
 
     /// Une vue 3D, dans son rectangle et la zone de découpe ; l'état de l'interface
@@ -327,7 +376,11 @@ impl Renderer {
             (gl.glBindVertexArray)(self.ui_vao);
             (gl.glBindBuffer)(ARRAY_BUFFER, self.ui_vbo);
             (gl.glBufferData)(ARRAY_BUFFER, (dl.vertices.len() * size_of::<Vertex>()) as isize, dl.vertices.as_ptr() as *const c_void, 0x88E0);
+            self.images_vues.set(self.images_vues.get() + 1);
             for c in &dl.cmds {
+                if let Some(i) = c.image {
+                    self.lier_image(&dl.images[i]);
+                }
                 if let Some(i) = c.vue3d {
                     self.dessiner_vue(w, h, &dl.vues3d[i], c.clip);
                     continue;
@@ -343,6 +396,15 @@ impl Renderer {
                 (gl.glDrawArrays)(TRIANGLES, c.first as i32, c.count as i32);
             }
             (gl.glBindVertexArray)(0);
+            // Les textures des images qui n'ont pas servi depuis un moment
+            let n = self.images_vues.get();
+            self.textures.borrow_mut().retain(|e| {
+                let garde = n.saturating_sub(e.4) < 120;
+                if !garde {
+                    (gl.glDeleteTextures)(1, &e.2);
+                }
+                garde
+            });
         }
     }
 }

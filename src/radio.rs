@@ -3,6 +3,10 @@
 //! stéréo et poussé dans l'anneau de [`crate::audio`].
 //!
 //! Tout se passe dans un thread : l'ouverture d'un flux bloque plusieurs secondes.
+//!
+//! Ce que décode la radio passe aussi par le magnétophone (`crate::magneto`). Un flux
+//! peut être lu en **veille** : décodé pour le tampon du magnétophone, sans être
+//! entendu ni annoncé ; le jouer ensuite le rend audible sans reconnexion.
 
 use crate::audio::{aaudio, bibliotheque};
 use crate::mixage::{commande, mixeur, service, Annonce, Voie};
@@ -76,9 +80,10 @@ pub fn reveiller() {
 }
 
 /// Change l'état d'une session, et l'annonce à la notification tant que la session
-/// n'a pas été arrêtée (un thread lâché ne doit plus rien annoncer).
-fn noter(etat: &Mutex<Etat>, e: Etat, url: &str, piste: &str, stop: &AtomicBool) {
-    if !stop.load(Ordering::Relaxed) {
+/// n'a pas été arrêtée (un thread lâché ne doit plus rien annoncer) et qu'elle est
+/// audible (une veille reste muette).
+fn noter(etat: &Mutex<Etat>, e: Etat, url: &str, piste: &str, stop: &AtomicBool, audible: &AtomicBool) {
+    if !stop.load(Ordering::Relaxed) && audible.load(Ordering::Relaxed) {
         let a = match &e {
             Etat::Lecture { .. } => Some(Some((service::LECTURE, e.detail()))),
             Etat::Erreur(m) => Some(Some((service::ERREUR, m.clone()))),
@@ -103,7 +108,7 @@ pub const PISTE_FICHIER: &str = "Fichier";
 fn global(l: &'static OnceLock<Mutex<Lecteur>>, piste: &'static str, direct: bool, f: fn(i32)) -> MutexGuard<'static, Lecteur> {
     let m = l.get_or_init(|| {
         mixeur().ecouter(piste, f);
-        Mutex::new(Lecteur { piste, direct, session: None, adresse: None, dernier: None, suspendu: false })
+        Mutex::new(Lecteur { piste, direct, session: None, adresse: None, dernier: None, suspendu: false, veille: None })
     });
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -169,6 +174,8 @@ impl Etat {
 struct Session {
     etat: Arc<Mutex<Etat>>,
     stop: Arc<AtomicBool>,
+    /// Faux pendant une veille : le flux est décodé, pas joué.
+    audible: Arc<AtomicBool>,
 }
 
 /// Un lecteur : au plus un flux à la fois, sur sa piste du mixeur.
@@ -183,10 +190,20 @@ pub struct Lecteur {
     pub dernier: Option<String>,
     /// Coupé par la pause de la notification : la reprise le relance.
     suspendu: bool,
+    /// Le flux décodé en veille, pour le tampon du magnétophone.
+    pub veille: Option<String>,
 }
 
 impl Lecteur {
+    /// L'état de ce qu'on entend : une veille compte pour un arrêt.
     pub fn etat(&self) -> Etat {
+        if self.veille.is_some() {
+            return Etat::Arret;
+        }
+        self.etat_session()
+    }
+
+    fn etat_session(&self) -> Etat {
         self.session.as_ref().and_then(|s| s.etat.lock().ok().map(|e| e.clone())).unwrap_or(Etat::Arret)
     }
 
@@ -207,34 +224,78 @@ impl Lecteur {
         }
     }
 
+    /// L'état d'une veille, s'il y en a une.
+    pub fn etat_veille(&self) -> Option<Etat> {
+        self.veille.as_ref().map(|_| self.etat_session())
+    }
+
+    /// Décode le flux en silence, pour le tampon du magnétophone, si rien ne joue.
+    pub fn veiller(&mut self, adresse: &str) {
+        if self.session.is_some() || adresse.trim().is_empty() {
+            return;
+        }
+        self.lancer(adresse, false);
+        self.veille = Some(adresse.trim().to_string());
+    }
+
+    /// Arrête la veille, s'il y en a une ; une lecture audible continue.
+    pub fn quitter_veille(&mut self) {
+        if self.veille.is_some() {
+            self.couper();
+        }
+    }
+
     pub fn jouer(&mut self, adresse: &str) {
-        self.couper();
-        let s = Session { etat: Arc::new(Mutex::new(Etat::Connexion)), stop: Arc::new(AtomicBool::new(false)) };
-        let (etat, stop) = (s.etat.clone(), s.stop.clone());
-        let url = adresse.trim().to_string();
-        let (piste, direct) = (self.piste, self.direct);
-        std::thread::spawn(move || {
-            // setDataSource sur une adresse réseau exige un thread connu de Java
-            let vm = crate::acces::vm();
-            let attache = unsafe { crate::acces::attacher(vm) }.is_some();
-            let fin = match unsafe { lire(&url, piste, &etat, &stop) } {
-                Ok(()) if stop.load(Ordering::Relaxed) || !direct => Etat::Arret,
-                // Un direct ne devrait jamais finir
-                Ok(()) => Etat::Erreur("fin du flux".into()),
-                Err(e) => Etat::Erreur(e),
-            };
-            noter(&etat, fin, &url, piste, &stop);
-            if attache {
-                unsafe { crate::acces::detacher(vm) };
+        // Le flux en veille devient audible, sans reconnexion
+        if let (Some(v), Some(s)) = (&self.veille, &self.session) {
+            if v == adresse.trim() && !matches!(self.etat_session(), Etat::Erreur(_)) {
+                s.audible.store(true, Ordering::Relaxed);
+                let lit = self.etat_session();
+                self.veille = None;
+                self.suspendu = false;
+                let a = adresse.trim().to_string();
+                let annonce = match &lit {
+                    Etat::Lecture { .. } => Annonce { etat: service::LECTURE, titre: titre(&a).to_string(), texte: lit.detail() },
+                    _ => Annonce { etat: service::CONNEXION, titre: titre(&a).to_string(), texte: "Connexion…".into() },
+                };
+                mixeur().annoncer(self.piste, Some(annonce));
+                self.adresse = Some(a.clone());
+                self.dernier = Some(a);
+                return;
             }
-        });
-        self.session = Some(s);
+        }
+        self.lancer(adresse, true);
         let a = adresse.trim().to_string();
         self.suspendu = false;
         let texte = if self.direct { "Connexion…" } else { "Ouverture…" };
         mixeur().annoncer(self.piste, Some(Annonce { etat: service::CONNEXION, titre: titre(&a).to_string(), texte: texte.into() }));
         self.adresse = Some(a.clone());
         self.dernier = Some(a);
+    }
+
+    /// Ouvre une session sur le flux, audible ou en veille.
+    fn lancer(&mut self, adresse: &str, audible: bool) {
+        self.couper();
+        let s = Session { etat: Arc::new(Mutex::new(Etat::Connexion)), stop: Arc::new(AtomicBool::new(false)), audible: Arc::new(AtomicBool::new(audible)) };
+        let (etat, stop, aud) = (s.etat.clone(), s.stop.clone(), s.audible.clone());
+        let url = adresse.trim().to_string();
+        let (piste, direct) = (self.piste, self.direct);
+        std::thread::spawn(move || {
+            // setDataSource sur une adresse réseau exige un thread connu de Java
+            let vm = crate::acces::vm();
+            let attache = unsafe { crate::acces::attacher(vm) }.is_some();
+            let fin = match unsafe { lire(&url, piste, &etat, &stop, &aud) } {
+                Ok(()) if stop.load(Ordering::Relaxed) || !direct => Etat::Arret,
+                // Un direct ne devrait jamais finir
+                Ok(()) => Etat::Erreur("fin du flux".into()),
+                Err(e) => Etat::Erreur(e),
+            };
+            noter(&etat, fin, &url, piste, &stop, &aud);
+            if attache {
+                unsafe { crate::acces::detacher(vm) };
+            }
+        });
+        self.session = Some(s);
     }
 
     /// Coupe le flux. Le thread n'est pas attendu (il peut être bloqué dans
@@ -244,6 +305,7 @@ impl Lecteur {
             s.stop.store(true, Ordering::Relaxed);
         }
         self.adresse = None;
+        self.veille = None;
     }
 
     /// Arrête la lecture et retire son annonce.
@@ -303,7 +365,7 @@ impl Drop for Garde<'_> {
     }
 }
 
-unsafe fn lire(url: &str, piste_mix: &str, etat: &Mutex<Etat>, stop: &AtomicBool) -> Result<(), String> {
+unsafe fn lire(url: &str, piste_mix: &str, etat: &Mutex<Etat>, stop: &AtomicBool, audible: &AtomicBool) -> Result<(), String> {
     let m = media()?;
     aaudio()?;
     let ex = (m.AMediaExtractor_new)();
@@ -361,11 +423,14 @@ unsafe fn lire(url: &str, piste_mix: &str, etat: &Mutex<Etat>, stop: &AtomicBool
     }
 
     let codec = mime.trim_start_matches("audio/").to_string();
-    // Une voie de la piste du lecteur, à la fréquence du flux
-    let voie: Voie = mixeur().ouvrir(piste_mix, frequence as u32)?;
+    // Une voie de la piste du lecteur, à la fréquence du flux, ouverte quand le flux
+    // devient audible
+    let mut voie: Option<Voie> = None;
     let mut f32s: Vec<f32> = Vec::new();
     let mut entree_finie = false;
-    let mut annonce = false;
+    let (mut vu, mut annonce) = (false, false);
+    // La radio passe par le magnétophone ; les fichiers, non
+    let magneto = piste_mix == PISTE;
 
     while !stop.load(Ordering::Relaxed) {
         // Entrée : un échantillon compressé du réseau vers le décodeur
@@ -395,7 +460,9 @@ unsafe fn lire(url: &str, piste_mix: &str, etat: &Mutex<Etat>, stop: &AtomicBool
             (m.AMediaFormat_delete)(f);
             canaux = ca;
             frequence = fr;
-            voie.regler_frequence(fr as u32);
+            if let Some(v) = &voie {
+                v.regler_frequence(fr as u32);
+            }
         } else if idx >= 0 {
             let mut taille = 0usize;
             let buf = (m.AMediaCodec_getOutputBuffer)(g.codec, idx as usize, &mut taille);
@@ -405,16 +472,28 @@ unsafe fn lire(url: &str, piste_mix: &str, etat: &Mutex<Etat>, stop: &AtomicBool
                 vers_stereo(pcm, canaux.max(1) as usize, &mut f32s);
             }
             (m.AMediaCodec_releaseOutputBuffer)(g.codec, idx as usize, false);
-            // Le premier son décodé : la lecture commence vraiment
-            if !annonce && !f32s.is_empty() {
-                annonce = true;
-                noter(etat, Etat::Lecture { codec: codec.clone(), frequence, canaux }, url, piste_mix, stop);
+            let entendu = audible.load(Ordering::Relaxed);
+            // Le premier son décodé : la lecture commence vraiment (et s'annonce dès
+            // qu'elle est audible)
+            if !f32s.is_empty() && (!vu || (entendu && !annonce)) {
+                vu = true;
+                annonce |= entendu;
+                noter(etat, Etat::Lecture { codec: codec.clone(), frequence, canaux }, url, piste_mix, stop, audible);
             }
-            // Pousse tout, en attendant que le rappel fasse de la place
-            voie.pousser(&f32s, stop);
+            if magneto && !f32s.is_empty() {
+                crate::magneto::magneto().recevoir(url.trim(), frequence as u32, &f32s);
+            }
+            if entendu && voie.is_none() {
+                voie = Some(mixeur().ouvrir(piste_mix, frequence as u32)?);
+            }
+            // Pousse tout, en attendant que le rappel fasse de la place ; en veille,
+            // c'est le réseau qui donne la cadence
+            if let Some(v) = &voie {
+                v.pousser(&f32s, stop);
+            }
             if info.flags & FIN_DE_FLUX != 0 {
                 // Laisse finir ce qui reste dans l'anneau
-                while voie.rempli() > 0 && !stop.load(Ordering::Relaxed) {
+                while voie.as_ref().is_some_and(|v| v.rempli() > 0) && !stop.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 return Ok(());

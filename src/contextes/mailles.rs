@@ -38,7 +38,6 @@ pub const GENRE: Genre = Genre { cle: CLE, nom: "Mailles", legende: "Éditer un 
 
 const MAILLES: Id = id("mailles");
 const NOM: Id = id("mailles/nom");
-const NOM_CORPS: Id = id("mailles/nom-corps");
 const BOITE: Id = id("mailles/boite");
 const BROUILLONS: &str = "brouillons";
 const HISTORIQUE: usize = 40;
@@ -409,9 +408,10 @@ impl Mailles {
         y += 26.0 * d * cx.theme.texte;
         let marge = (cx.theme.marge * 0.4 * d).round();
         let zone = Rect::new(carte.x + pad - 14.0 * d, y + gap - 8.0 * d - marge, carte.w - 2.0 * pad + 28.0 * d, hc + 8.0 * d + marge + 4.0 * d);
-        let mut b = cx.body(sub_id(NOM_CORPS, k), zone, &c.scrolls);
-        clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom", &mut self.nom, &mut c.clavier);
-        cx.body_end(b, &mut c.scrolls);
+        // Posé à sa place, hors d'une colonne : rien ne le fait défiler
+        let ch = Rect::new(zone.x + 14.0 * d, zone.y + 8.0 * d + (cx.theme.marge * 0.4 * d).round(), (zone.w - 28.0 * d).max(0.0), cx.commande());
+        clavier::champ_en(cx, ch, None, zone, sub_id(NOM, k), "Nom", &mut self.nom, &mut c.clavier);
+        cx.clip(None);
         cx.clip(Some(carte));
         y += hc + 2.0 * gap;
         cx.text_at(carte.x + pad, y + lh / 2.0, &format!("{dossier}, en .glb"), 14.0, col.pale);

@@ -71,6 +71,7 @@ api!(GlApi {
     glVertexAttribPointer: fn(u32, i32, u32, u8, i32, *const c_void);
     glEnableVertexAttribArray: fn(u32);
     glGenTextures: fn(i32, *mut u32);
+    glDeleteTextures: fn(i32, *const u32);
     glBindTexture: fn(u32, u32);
     glActiveTexture: fn(u32);
     glTexParameteri: fn(u32, u32, i32);

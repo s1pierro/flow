@@ -10,14 +10,21 @@ composer son espace de travail à son goût. Née d'une copie de
 Contextes : Accueil (les contextes en cartes, celui des fenêtres nées du menu), Fichiers (les
 entrées en cartes : empreinte des dossiers, badge du type MIME des fichiers ; recherche, tri par nom, date,
 taille ou type ; créer, renommer ; sélection à l'appui long, copier, couper, coller et supprimer, en
-arrière-plan avec avancement ; un .apk touché s'installe, se met à jour ou ouvre son application, par l'installateur d'Android), Texte (éditeur aux gestes : glisser sélectionne au curseur déporté, appui choisit un mot, appui long propose
+arrière-plan avec avancement ; un .apk touché s'installe, se met à jour ou ouvre son application, par l'installateur d'Android ; les images
+(JPEG, PNG, WebP, GIF, BMP, HEIC, AVIF), décodées par Android, ont leur vignette, et une image touchée s'ouvre en grand :
+pincer zoome, glisser déplace ou passe à la suivante, toucher un bord aussi), Texte (éditeur aux gestes : glisser sélectionne au curseur déporté, appui choisit un mot, appui long propose
 Coller, deux doigts font défiler et pincer change la taille, Copier/Couper/Coller au-dessus de la sélection, une poignée à chaque bout pour l'ajuster ;
 Annuler et Rétablir à gauche du titre, par mot ou par ligne ;
 numéros de ligne, blocs entre accolades repliables et coloration
 syntaxique pilotée par des dictionnaires en texte dans `Flow/syntaxes/` : Rust, C, C++,
 JavaScript, CSS, HTML, SVG, Markdown, TOML, JSON, Python ; on en ajoute en déposant un fichier, qui prend aussi la place de l'explorateur
 quand on y touche un fichier texte), Disque, Boombox (la radio : un en-tête aux couleurs inversées porte les modes Flux, Magnéto et
-Bibliothèque, la lecture, l'enregistrement et l'adresse du flux ; les flux récents défilent dessous), Mixeur (la console audio : une tranche par piste,
+Bibliothèque, la lecture, l'enregistrement et l'adresse du flux ; les flux récents défilent dessous ; au lancement, le dernier flux
+écouté est décodé en silence et ses cinq dernières minutes restent en mémoire, si bien que le bouton rouge peut enregistrer
+en .wav à partir du passé, dans Music/Boombox ; le Magnéto liste et joue les enregistrements, et coupe la veille, qui consomme environ 60 Mo de données par heure), Toile (les pages web, HTML, CSS et JavaScript, par le
+moteur d'Android : précédent, suivant, recharger, adresse ou chemin ; Fichiers y ouvre les .html, dont le bouton Source ouvre
+le fichier dans l'éditeur Texte à côté, et la page se recharge à chaque enregistrement ; la console JavaScript s'affiche dans la
+ligne d'état), Mixeur (la console audio : une tranche par piste,
 un égaliseur paramétrique à cinq bandes par piste et sur la sortie, réglé en tirant les poignées de sa courbe), Encre (dessin à
 main levée, enregistré en SVG : épaisseur, couleur, gomme, navigation à deux doigts ; chaque trait
 fini est simplifié sans perte), SVG (éditeur

@@ -37,7 +37,6 @@ pub const GENRE: Genre = Genre { cle: CLE, nom: "Argile", legende: "Sculpture 3D
 
 const ARGILE: Id = id("argile");
 const NOM: Id = id("argile/nom");
-const NOM_CORPS: Id = id("argile/nom-corps");
 const BROUILLONS: &str = "brouillons";
 const HISTORIQUE: usize = 30;
 /// La finesse d'une nouvelle boule (20 480 triangles).
@@ -550,9 +549,10 @@ impl Argile {
         } else {
             let pad = 14.0 * d;
             let zone = Rect::new(x0 - pad, r.y + m - 8.0 * d - (cx.theme.marge * 0.4 * d).round(), x1 - x0 + 2.0 * pad, r.h);
-            let mut b = cx.body(sub_id(NOM_CORPS, k), zone, &c.scrolls);
-            clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom de la sculpture", &mut self.nom, &mut c.clavier);
-            cx.body_end(b, &mut c.scrolls);
+            // Posé à sa place, hors d'une colonne : rien ne le fait défiler
+            let ch = Rect::new(zone.x + 14.0 * d, zone.y + 8.0 * d + (cx.theme.marge * 0.4 * d).round(), (zone.w - 28.0 * d).max(0.0), cx.commande());
+            clavier::champ_en(cx, ch, None, zone, sub_id(NOM, k), "Nom de la sculpture", &mut self.nom, &mut c.clavier);
+            cx.clip(None);
         }
         cx.dl.rrect(Rect::new(r.x, r.bottom() - d, r.w, d.max(1.0)), 0.0, col.ligne);
     }

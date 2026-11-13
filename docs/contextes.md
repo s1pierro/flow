@@ -48,7 +48,12 @@ et le lanceur prend juste leur hauteur (`places_lanceur`).
 
 Les contextes existants servent d'exemples, du plus simple au plus complet :
 `aide.rs` (rien à retenir), `boombox.rs` (un champ de texte et le clavier, un en-tête fixe aux couleurs inversées
-par `Cx::palette` et `Couleurs::inverse`),
+par `Cx::palette` et `Couleurs::inverse`, une ressource globale partagée avec un thread : le
+magnétophone de `magneto.rs`, nourri par le lecteur de `radio.rs`, qui sait décoder un flux en
+veille), `toile.rs` (une ressource Java par instance, libérée par `Drop` ; une image affichée par
+`DrawList::image` ; les doigts relayés depuis une zone `Sense::Drag` ; `Demande::OuvrirACote`),
+`visionneuse.rs` (la visionneuse d'images de Fichiers : des images décodées en tâche de fond par
+`images::demander`, dessinées par `DrawList::image` et `image_partie`, et une zone à gestes),
 `mixeur.rs` (une ressource globale, une animation, deux mises en page selon la place), `fichiers.rs` (un dossier par fenêtre, relu au retour, une demande
 d'ouverture, l'appui long `cx.ui.click_long`, une boîte de dialogue, un état partagé entre
 fenêtres et une opération en arrière-plan : `Commun::fichiers`, `src/operations.rs`), `disque.rs` (une ressource partagée dans `Commun`, un état enregistré

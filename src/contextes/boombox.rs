@@ -4,14 +4,24 @@
 //! Flux, les derniers flux écoutés, qui défilent). Le volume de la piste Radio se règle
 //! dans le contexte Mixeur. Le lecteur (`radio::lecteur()`) et l'historique sont
 //! partagés ; l'adresse saisie et le mode sont propres à chaque fenêtre.
+//!
+//! Au lancement de Flow, le dernier flux écouté est décodé en veille (sans être
+//! entendu ; la veille se coupe dans le Magnéto, réglage `boombox_veille` de
+//! `interface.txt`) : le magnétophone (`crate::magneto`) en garde les cinq dernières minutes.
+//! Le bouton rouge enregistre en `.wav` dans `Music/Boombox` ; quand le tampon garde
+//! du flux en cours, il propose de commencer dans le passé. Le mode Magnéto liste les
+//! enregistrements, qui se jouent sur la piste Fichier.
 
 use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::Rect;
+use crate::magneto::{self, magneto, Enregistrement};
 use crate::mixage::mixeur;
 use crate::radio::{self, Etat as Lecture};
 use crate::surface::{FenetreId, Placee};
-use crate::ui::{id, sub_id, Id};
+use crate::ui::{id, sub_id, Id, Sense};
+use std::path::PathBuf;
+use std::time::Instant;
 use crate::widgets::{Cx, Icon};
 
 pub const CLE: &str = "boombox";
@@ -22,6 +32,10 @@ const ONGLETS: Id = id("boombox-onglets");
 const LIRE: Id = id("boombox-lire");
 const ENREGISTRER: Id = id("boombox-enregistrer");
 const CHAMP: Id = id("radio-adresse");
+const CHOIX: Id = id("boombox-choix");
+
+/// Les départs proposés dans le passé, en secondes.
+const DEPARTS: [f32; 4] = [30.0, 60.0, 120.0, 300.0];
 
 const ROUGE: [u8; 4] = [0xE0, 0x3A, 0x3A, 255];
 
@@ -45,11 +59,17 @@ pub struct Boombox {
     mode: Mode,
     /// Un mot passager, montré à la place de l'état de la lecture.
     note: Option<String>,
+    /// Le bouton rouge, sous lequel s'ouvre le choix du départ.
+    ancre: Rect,
+    /// Le choix du départ de l'enregistrement est ouvert.
+    choix: bool,
+    /// Les enregistrements du dossier, et quand ils ont été lus.
+    liste: Option<(Instant, Vec<Enregistrement>)>,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     let mode = e.texte("mode").and_then(|m| MODES.iter().find(|x| x.2 == m)).map_or(Mode::Flux, |x| x.0);
-    Box::new(Boombox { adresse: Edition::new(e.texte("adresse").unwrap_or("")), mode, note: None })
+    Box::new(Boombox { adresse: Edition::new(e.texte("adresse").unwrap_or("")), mode, note: None, ancre: Rect::new(0.0, 0.0, 0.0, 0.0), choix: false, liste: None })
 }
 
 /// Joue un flux et le place en tête de l'historique.
@@ -64,7 +84,123 @@ fn jouer(c: &mut Commun, adresse: &str) {
     }
 }
 
+/// Le dossier des enregistrements : `Music/Boombox` du stockage, ou à défaut à côté
+/// des réglages de Flow.
+pub fn dossier(c: &Commun) -> Option<PathBuf> {
+    c.racine.as_ref().map(|r| r.join("Music").join("Boombox")).or_else(|| c.dossier.as_ref().map(|d| d.join("Boombox")))
+}
+
+/// Au lancement de Flow : le dernier flux écouté passe en veille, pour le tampon.
+pub fn veiller_au_lancement(c: &Commun) {
+    if let Some(a) = c.historique.liste.first() {
+        radio::lecteur().veiller(a);
+    }
+}
+
+/// Le flux dont on peut enregistrer : celui qui joue, ou celui en veille.
+fn source() -> Option<String> {
+    let l = radio::lecteur();
+    l.adresse.clone().filter(|_| l.actif()).or_else(|| l.veille.clone())
+}
+
 impl Boombox {
+    /// Commence un enregistrement du flux en cours, avec `passe_s` secondes du tampon.
+    fn enregistrer(&mut self, c: &Commun, passe_s: f32) {
+        self.choix = false;
+        let (Some(url), Some(d)) = (source(), dossier(c)) else {
+            self.note = Some("Rien à enregistrer : lancez un flux.".into());
+            return;
+        };
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let ((j, mo, a), (h, mi)) = (crate::android::date_de(t), crate::android::heure_de(t));
+        let nom = format!("{}-{a:04}-{mo:02}-{j:02}-{h:02}{mi:02}", magneto::nom_de(&url));
+        self.note = match magneto().commencer(&d, &nom, passe_s) {
+            Ok(_) => None,
+            Err(e) => Some(format!("Enregistrement impossible : {e}")),
+        };
+    }
+
+    /// Clôt l'enregistrement en cours et le dit.
+    fn finir(&mut self) {
+        if let Some((p, s)) = magneto().arreter() {
+            let nom = p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            self.note = Some(format!("Enregistré : {nom} ({})", magneto::duree(s)));
+            self.liste = None;
+        }
+    }
+
+    /// Le bouton rouge : arrête l'enregistrement, ou en commence un, en proposant de
+    /// partir du passé quand le tampon garde au moins quelques secondes du flux.
+    fn bouton_rouge(&mut self, c: &Commun) {
+        if magneto().prise.is_some() {
+            self.finir();
+            return;
+        }
+        let Some(url) = source() else {
+            self.note = Some("Rien à enregistrer : lancez un flux.".into());
+            return;
+        };
+        if magneto().passe_s(&url) >= 5.0 {
+            self.choix = !self.choix;
+        } else {
+            self.enregistrer(c, 0.0);
+        }
+    }
+
+    /// Le choix du départ, sous le bouton rouge : maintenant, ou une part du tampon.
+    fn dessiner_choix(&mut self, cx: &mut Cx, c: &Commun, r: Rect, ancre: Rect, k: usize) {
+        let Some(url) = source() else {
+            self.choix = false;
+            return;
+        };
+        let passe = magneto().passe_s(&url);
+        let (d, col, h) = (cx.dp, cx.couleurs(), cx.commande());
+        let mut options: Vec<(f32, String)> = vec![(0.0, "Maintenant".into())];
+        for s in DEPARTS.into_iter().filter(|&s| s <= passe + 0.5) {
+            options.push((s, format!("Il y a {}", if s < 60.0 { format!("{s:.0} s") } else { format!("{:.0} min", s / 60.0) })));
+        }
+        if options.last().is_some_and(|o| o.0 + 1.0 < passe) {
+            options.push((passe, format!("Tout le tampon ({})", magneto::duree(passe))));
+        }
+        let base = sub_id(CHOIX, k);
+        // Toucher à côté referme
+        if cx.ui.click(sub_id(base, 0), r, None) {
+            self.choix = false;
+        }
+        let pad = cx.pad() * 0.75;
+        let titre = 24.0 * d * cx.theme.texte;
+        let mut w = cx.measure("Enregistrer depuis", 13.0);
+        for o in &options {
+            w = w.max(cx.measure(&o.1, 15.0));
+        }
+        let w = w + 2.0 * pad;
+        let carte = Rect::new(ancre.x.min(r.right() - w - 8.0 * d).max(r.x), ancre.bottom() + 6.0 * d, w.min(r.w), pad + titre + options.len() as f32 * h + pad * 0.5);
+        let rayon = cx.theme.rayon(h).min(14.0 * d);
+        cx.ombre(carte, rayon, 14.0);
+        cx.dl.rrect(carte, rayon, col.surface);
+        cx.ui.region_add(sub_id(base, 1), carte, Sense::Sink);
+        cx.clip(Some(carte.intersect(&r)));
+        cx.text_at(carte.x + pad, carte.y + pad + titre * 0.4, "Enregistrer depuis", 13.0, col.pale);
+        let mut y = carte.y + pad + titre;
+        let mut voulu = None;
+        for (i, (s, nom)) in options.iter().enumerate() {
+            let ligne = Rect::new(carte.x, y, carte.w, h);
+            let id = sub_id(base, 2 + i);
+            if cx.ui.click(id, ligne, None) {
+                voulu = Some(*s);
+            }
+            if cx.ui.pressed(id) {
+                cx.dl.rrect(ligne.inset(3.0 * d), rayon * 0.5, col.puce);
+            }
+            cx.text_at(carte.x + pad, ligne.cy(), nom, 15.0, if i == 0 { col.texte } else { col.accent });
+            y += h;
+        }
+        cx.clip(None);
+        if let Some(s) = voulu {
+            self.enregistrer(c, s);
+        }
+    }
+
     /// La hauteur de l'en-tête : les onglets, la ligne lecture et adresse, l'état.
     fn hauteur_tete(cx: &Cx) -> f32 {
         let m = cx.ecart();
@@ -94,8 +230,10 @@ impl Boombox {
         };
         if cx.pastille(sub_id(LIRE, k), x0, y, if actif { Icon::Stop } else { Icon::Lecture }, actif) {
             self.note = None;
+            self.choix = false;
             if actif {
                 radio::lecteur().arreter();
+                self.finir();
             } else {
                 let a = if self.adresse.texte.trim().is_empty() { c.historique.liste.first().cloned().unwrap_or_default() } else { self.adresse.texte.clone() };
                 jouer(c, &a);
@@ -103,20 +241,39 @@ impl Boombox {
         }
         let g = (m * 0.6).round();
         let xr = x0 + h + g;
-        if cx.pastille(sub_id(ENREGISTRER, k), xr, y, Icon::Enregistrer, false) {
-            self.note = Some("L'enregistrement n'est pas encore branché.".into());
+        let prise = magneto().prise.as_ref().map(|p| (p.duree_s(), p.chemin.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
+        if cx.pastille(sub_id(ENREGISTRER, k), xr, y, Icon::Enregistrer, prise.is_some()) {
+            self.bouton_rouge(c);
         }
         let ic = Rect::new(xr, y, h, h);
-        cx.icon(ic.inset((cx.pad() * 0.6).min(h * 0.35)), Icon::Enregistrer, ROUGE);
+        // Enregistrement en cours : un carré rouge pour l'arrêter
+        cx.icon(ic.inset((cx.pad() * 0.6).min(h * 0.35)), if prise.is_some() { Icon::Stop } else { Icon::Enregistrer }, ROUGE);
+        self.ancre = ic;
         let xc = xr + h + g;
         let champ = Rect::new(xc, y, (tete.right() - m - xc).max(0.0), h);
         clavier::champ_en(cx, champ, None, tete, sub_id(CHAMP, k), "Adresse du flux (http…)", &mut self.adresse, &mut c.clavier);
         y += h + m;
         // L'état de la lecture, ou la note
         let lh = (22.0 * cx.dp * cx.theme.texte).round();
+        let erreur_magneto = magneto().erreur.clone();
+        let veille = {
+            let l = radio::lecteur();
+            l.etat_veille().zip(l.veille.clone())
+        };
         let (titre, detail, erreur) = match (&self.note, &etat) {
             (Some(n), _) => (n.clone(), String::new(), false),
-            (None, Lecture::Arret) => ("Arrêt".to_string(), String::new(), false),
+            _ if prise.is_some() => {
+                let (s, nom) = prise.clone().unwrap_or_default();
+                (format!("Enregistrement {}", magneto::duree(s)), nom, true)
+            }
+            _ if erreur_magneto.is_some() => ("Magnéto".to_string(), erreur_magneto.clone().unwrap_or_default(), true),
+            (None, Lecture::Arret) => match &veille {
+                Some((Lecture::Erreur(_), _)) | None => ("Arrêt".to_string(), String::new(), false),
+                Some((_, url)) => {
+                    let passe = magneto().passe_s(url);
+                    ("En veille".to_string(), format!("tampon {} · {}", magneto::duree(passe), radio::courte(url)), false)
+                }
+            },
             (None, Lecture::Connexion) => ("Connexion…".to_string(), en_cours.as_deref().map(radio::courte).unwrap_or("").to_string(), false),
             (None, Lecture::Lecture { .. }) => (en_cours.as_deref().map(radio::titre).unwrap_or("Lecture").to_string(), etat.detail(), false),
             (None, Lecture::Erreur(e)) => ("Erreur".to_string(), e.clone(), true),
@@ -154,9 +311,9 @@ impl Contexte for Boombox {
         }
     }
 
-    /// La ligne d'état (le tampon) suit la lecture.
+    /// La ligne d'état (le tampon, la durée d'un enregistrement) suit la lecture.
     fn anime(&self, _c: &Commun) -> bool {
-        mixeur().actif() && !mixeur().en_pause()
+        (mixeur().actif() && !mixeur().en_pause()) || magneto().prise.is_some()
     }
 
     /// Entrée lance le flux saisi.
@@ -209,8 +366,58 @@ impl Contexte for Boombox {
                 }
             }
             Mode::Magneto => {
-                cx.section(&mut b, "MAGNÉTO");
-                cx.paragraph(&mut b, "Les enregistrements des flux viendront ici : le bouton rouge de l'en-tête enregistrera ce qui joue.");
+                cx.section(&mut b, "TAMPON");
+                let passe = source().map(|u| {
+                    let s = magneto().passe_s(&u);
+                    (u, s)
+                });
+                let t = match passe {
+                    Some((u, s)) if s > 0.0 => format!("{} de {} en mémoire (cinq minutes au plus) : le bouton rouge peut commencer dans le passé.", magneto::duree(s), radio::courte(&u)),
+                    _ if c.veille => "Vide. Au lancement de Flow, la Boombox se connecte en silence au dernier flux écouté et en garde les cinq dernières minutes.".into(),
+                    _ => "Vide. Le tampon se remplit pendant l'écoute d'un flux ; avec la veille, dès le lancement de Flow.".into(),
+                };
+                cx.paragraph(&mut b, &t);
+                // La veille coûte des données : elle se coupe ici (et dans interface.txt)
+                let avant = c.veille;
+                cx.toggle(&mut b, sub_id(scroll, 50), "Veille au lancement", &mut c.veille);
+                if c.veille != avant {
+                    if c.veille {
+                        veiller_au_lancement(c);
+                    } else {
+                        radio::lecteur().quitter_veille();
+                    }
+                }
+                cx.paragraph(&mut b, "Environ 60 Mo de données par heure tant que Flow tourne.");
+                cx.section(&mut b, "ENREGISTREMENTS");
+                let d = dossier(c);
+                if self.liste.as_ref().is_none_or(|(t, _)| t.elapsed().as_secs_f32() > 2.0) {
+                    self.liste = Some((Instant::now(), d.as_deref().map(magneto::lister).unwrap_or_default()));
+                }
+                let liste = self.liste.as_ref().map(|x| x.1.clone()).unwrap_or_default();
+                let (fichier, fichier_actif) = {
+                    let l = radio::lecteur_fichiers();
+                    (l.adresse.clone(), l.actif())
+                };
+                let mut choisi = None;
+                for (i, e) in liste.iter().enumerate() {
+                    let joue = fichier_actif && fichier.as_deref() == Some(&*e.chemin.to_string_lossy());
+                    if cx.row(&mut b, sub_id(scroll, 100 + i), &format!("{} · {}", e.nom, magneto::duree(e.duree_s)), None, joue) {
+                        choisi = Some((e.chemin.clone(), joue));
+                    }
+                }
+                // Toucher joue (sur la piste Fichier) ; toucher celui qui joue l'arrête
+                match choisi {
+                    Some((_, true)) => radio::lecteur_fichiers().arreter(),
+                    Some((p, false)) => radio::lecteur_fichiers().jouer(&p.to_string_lossy()),
+                    None => {}
+                }
+                if liste.is_empty() {
+                    cx.paragraph(&mut b, "Aucun enregistrement pour l'instant.");
+                }
+                if let Some(d) = &d {
+                    let court = c.racine.as_ref().and_then(|r| d.strip_prefix(r).ok()).unwrap_or(d);
+                    cx.paragraph(&mut b, &format!("Dans {}, en .wav.", court.display()));
+                }
             }
             Mode::Bibliotheque => {
                 cx.section(&mut b, "BIBLIOTHÈQUE");
@@ -218,6 +425,10 @@ impl Contexte for Boombox {
             }
         }
         cx.body_end(b, &mut c.scrolls);
+        if self.choix {
+            let a = self.ancre;
+            self.dessiner_choix(cx, c, r, a, k);
+        }
         match etat {
             Lecture::Lecture { .. } => {
                 let t = mixeur().pistes().into_iter().find(|p| p.nom == radio::PISTE).map_or(0.0, |p| p.tampon);

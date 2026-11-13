@@ -77,7 +77,11 @@ fn main() {
         Shot { name: "mailles-nom", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 21 },
         Shot { name: "mailles-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
         Shot { name: "boombox", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "boombox-magneto", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 22 },
         Shot { name: "boombox-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "images", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "images-visionneuse", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 23 },
+        Shot { name: "toile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "applets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -286,9 +290,28 @@ fn main() {
         }
         if s.name.starts_with("boombox") {
             // La Boombox à côté de l'explorateur ; en portrait, seule et en sombre
-            let esp = if s.name == "boombox" { "fenetres = C0.4500(F1:fichiers,F2:boombox)\n[fenetre 2]\nadresse = https://icecast.radiofrance.fr/fip-midfi.mp3\n" } else { "fenetres = F1:radio\n" };
+            let esp = if s.name == "boombox-magneto" {
+                // Deux minutes et demie de flux dans le tampon (à 100 Hz), puis le bouton rouge
+                let url = "https://icecast.radiofrance.fr/fip-midfi.mp3";
+                flow::radio::lecteur().veiller(url);
+                flow::magneto::magneto().recevoir(url, 100, &vec![0.0; 2 * 100 * 150]);
+                "fenetres = C0.4500(F1:fichiers,F2:boombox)\n[fenetre 2]\nmode = magneto\n"
+            } else if s.name == "boombox" { "fenetres = C0.4500(F1:fichiers,F2:boombox)\n[fenetre 2]\nadresse = https://icecast.radiofrance.fr/fip-midfi.mp3\n" } else { "fenetres = F1:radio\n" };
             app.ouvrir_espace(esp);
             app.commun.theme.sombre = s.name == "boombox-portrait";
+        }
+        if s.name.starts_with("images") {
+            // Trois images de ~/apercu-images, décodées par Android
+            let d = std::env::var("HOME").unwrap_or_default() + "/apercu-images";
+            app.racine_en(Some(d.into()));
+            app.ouvrir_espace("fenetres = F1:fichiers\n");
+            // Un thème compact, aux coins droits : le champ doit rester aligné
+            app.commun.theme.marge = 3.0;
+            app.commun.theme.arrondi = 0.0;
+            app.commun.theme.accent = 3;
+        }
+        if s.name == "toile" {
+            app.ouvrir_espace("fenetres = C0.4500(F1:fichiers,F2:toile)\n[fenetre 2]\nadresse = file:///sdcard/site/index.html\n");
         }
         if s.name.starts_with("argile") {
             // Une boule fraîche, quelques coups de pinceau (en sombre pour le portrait)
@@ -353,6 +376,12 @@ fn main() {
                 // La disquette d'une maille jamais enregistrée
                 (21, 10) => ui.event(Event::Down { id: 0, x: 1731.0, y: 1100.0 }, t),
                 (21, 11) => ui.event(Event::Up { id: 0 }, t),
+                // Une image de Fichiers (la deuxième carte), puis un pincement
+                (23, 10) => ui.event(Event::Down { id: 0, x: 1200.0, y: 265.0 }, t),
+                (23, 11) => ui.event(Event::Up { id: 0 }, t),
+                // Le bouton rouge de la Boombox
+                (22, 10) => ui.event(Event::Down { id: 0, x: 996.0, y: 138.0 }, t),
+                (22, 11) => ui.event(Event::Up { id: 0 }, t),
                 (5, 10) => ui.event(Event::Down { id: 0, x: 1850.0, y: 136.0 }, t),
                 (5, 11) => ui.event(Event::Up { id: 0 }, t),
                 (6, 10) => ui.event(Event::Down { id: 0, x: SVG_TAP.0, y: SVG_TAP.1 }, t),
@@ -416,9 +445,36 @@ fn main() {
             let mut cx = Cx { ui: &mut ui, text: &mut text, dl: &mut dl, dp: s.dp, theme: Default::default(), palette: None };
             scene = Some(app.frame(&mut cx, screen, 0.05));
             ui.end_frame();
+            if s.name.starts_with("images") {
+                // Laisse le décodage finir
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
             if s.disque.is_some() {
                 // Laisse l'analyse finir
                 std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+        }
+        if s.name == "toile" {
+            // Hors d'Android la page reste vide : une mire, à la place de la page, pour
+            // vérifier le chemin des images (dégradé et damier, alpha prémultiplié)
+            if let Some(p) = app.surface.placees().iter().find(|p| p.id == 2) {
+                let (iw, ih) = (400u32, 300u32);
+                let mut px = vec![0u8; (iw * ih * 4) as usize];
+                for y in 0..ih {
+                    for x in 0..iw {
+                        let i = ((y * iw + x) * 4) as usize;
+                        let damier = ((x / 25) + (y / 25)) % 2 == 0;
+                        px[i] = (x * 255 / iw) as u8;
+                        px[i + 1] = (y * 255 / ih) as u8;
+                        px[i + 2] = if damier { 200 } else { 60 };
+                        px[i + 3] = 255;
+                    }
+                }
+                let z = p.contenu;
+                dl.set_clip(Some(z));
+                dl.image(flow::draw::Rect::new(z.x + 40.0, z.y + 140.0, iw as f32, ih as f32), flow::draw::Image { id: 1, revision: 1, largeur: iw, hauteur: ih, pixels: std::sync::Arc::new(px) });
+                dl.set_clip(None);
+                dl.rrect(flow::draw::Rect::new(z.x + 60.0, z.y + 160.0, 80.0, 40.0), 8.0, [255, 0, 0, 255]);
             }
         }
         render.draw(w, h, scene.unwrap().fond, &dl, &mut text);

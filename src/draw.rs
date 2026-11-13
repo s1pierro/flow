@@ -61,6 +61,19 @@ pub struct Cmd {
     pub count: usize,
     pub clip: Option<Rect>,
     pub vue3d: Option<usize>,
+    /// Une image (un indice dans `DrawList::images`) : ses six sommets la portent.
+    pub image: Option<usize>,
+}
+
+/// Une image RVBA (alpha prémultiplié), `largeur` × `hauteur`. Le moteur de rendu la
+/// garde sur la carte graphique tant que (`id`, `revision`) ne change pas.
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub id: u64,
+    pub revision: u64,
+    pub largeur: u32,
+    pub hauteur: u32,
+    pub pixels: std::sync::Arc<Vec<u8>>,
 }
 
 /// Un maillage à dessiner en 3D : par sommet, position puis normale (6 flottants),
@@ -94,6 +107,7 @@ pub struct DrawList {
     pub vertices: Vec<Vertex>,
     pub cmds: Vec<Cmd>,
     pub vues3d: Vec<Vue3d>,
+    pub images: Vec<Image>,
     clip: Option<Rect>,
 }
 
@@ -102,6 +116,7 @@ impl DrawList {
         self.vertices.clear();
         self.cmds.clear();
         self.vues3d.clear();
+        self.images.clear();
         self.clip = None;
     }
 
@@ -112,8 +127,8 @@ impl DrawList {
     fn push(&mut self, q: [Vertex; 4]) {
         let clip = self.clip;
         match self.cmds.last_mut() {
-            Some(c) if c.clip == clip && c.vue3d.is_none() => c.count += 6,
-            _ => self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip, vue3d: None }),
+            Some(c) if c.clip == clip && c.vue3d.is_none() && c.image.is_none() => c.count += 6,
+            _ => self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip, vue3d: None, image: None }),
         }
         self.vertices.extend_from_slice(&[q[0], q[1], q[2], q[2], q[1], q[3]]);
     }
@@ -138,7 +153,22 @@ impl DrawList {
     pub fn vue3d(&mut self, v: Vue3d) {
         let clip = self.clip;
         self.vues3d.push(v);
-        self.cmds.push(Cmd { first: self.vertices.len(), count: 0, clip, vue3d: Some(self.vues3d.len() - 1) });
+        self.cmds.push(Cmd { first: self.vertices.len(), count: 0, clip, vue3d: Some(self.vues3d.len() - 1), image: None });
+    }
+
+    /// Une image étirée dans `r`, dans la zone de découpe courante.
+    pub fn image(&mut self, r: Rect, img: Image) {
+        self.image_partie(r, img, [0.0, 0.0], [1.0, 1.0]);
+    }
+
+    /// La partie `uv0`–`uv1` (de 0 à 1) d'une image, étirée dans `r`.
+    pub fn image_partie(&mut self, r: Rect, img: Image, uv0: [f32; 2], uv1: [f32; 2]) {
+        let clip = self.clip;
+        self.images.push(img);
+        self.cmds.push(Cmd { first: self.vertices.len(), count: 6, clip, vue3d: None, image: Some(self.images.len() - 1) });
+        let v = |x: f32, y: f32, u: f32, w: f32| Vertex { pos: [x, y], local: [0.0, 0.0], shape: [0.0, 0.0, -3.0, 0.0], uv: [u, w], color: [255, 255, 255, 255] };
+        let q = [v(r.x, r.y, uv0[0], uv0[1]), v(r.right(), r.y, uv1[0], uv0[1]), v(r.x, r.bottom(), uv0[0], uv1[1]), v(r.right(), r.bottom(), uv1[0], uv1[1])];
+        self.vertices.extend_from_slice(&[q[0], q[1], q[2], q[2], q[1], q[3]]);
     }
 
     pub fn rrect(&mut self, r: Rect, radius: f32, color: Color) {

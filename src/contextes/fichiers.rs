@@ -29,6 +29,8 @@ use crate::disque;
 use crate::draw::Rect;
 use crate::clavier::{self, Edition, Frappe};
 use crate::explorateur::{self, Dossier, Famille, Nature, Tri};
+use crate::images::{self, Reponse};
+use super::visionneuse::{self, Issue, Visionneuse};
 use crate::operations::{self, Sorte};
 use crate::paquets;
 use crate::radio;
@@ -43,10 +45,8 @@ pub const GENRE: Genre = Genre { cle: CLE, nom: "Fichiers", legende: "Parcourir 
 
 const FICHIERS: Id = id("fichiers");
 const RECHERCHE: Id = id("fichiers/recherche");
-const RECHERCHE_CORPS: Id = id("fichiers/recherche-corps");
 const OUTIL: Id = id("fichiers/outil");
 const NOM: Id = id("fichiers/nom");
-const NOM_CORPS: Id = id("fichiers/nom-corps");
 const DIALOGUE: Id = id("fichiers/dialogue");
 /// Le rapport largeur sur hauteur des cartes.
 const RAPPORT: f32 = 3.5;
@@ -142,6 +142,8 @@ pub struct Fichiers {
     message: Option<(String, bool)>,
     /// La génération des opérations déjà vue (`Manutention::generation`).
     generation: u64,
+    /// Une image ouverte en grand, et les autres images du dossier.
+    visionneuse: Option<Visionneuse>,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -476,10 +478,10 @@ impl Contexte for Fichiers {
             let w = if seule { place } else { flex - gap };
             let marge = (cx.theme.marge * 0.4 * d).round();
             let zone = Rect::new(r.x + pad - 14.0 * d, y0 - 8.0 * d - marge, w + 28.0 * d, hc + 8.0 * d + marge + 4.0 * d);
-            let corps = sub_id(RECHERCHE_CORPS, k);
-            let mut bc = cx.body(corps, zone, &c.scrolls);
-            clavier::champ(cx, &mut bc, sub_id(RECHERCHE, k), "Rechercher", &mut self.recherche, &mut c.clavier);
-            cx.body_end(bc, &mut c.scrolls);
+            // Posé à sa place, hors d'une colonne : rien ne le fait défiler
+            let ch = Rect::new(zone.x + 14.0 * d, zone.y + 8.0 * d + (cx.theme.marge * 0.4 * d).round(), (zone.w - 28.0 * d).max(0.0), cx.commande());
+            clavier::champ_en(cx, ch, None, zone, sub_id(RECHERCHE, k), "Rechercher", &mut self.recherche, &mut c.clavier);
+            cx.clip(None);
         }
         let mut choisi = None;
         for (i, (o, nom)) in outils.iter().enumerate() {
@@ -533,6 +535,7 @@ impl Contexte for Fichiers {
         let maintenant = disque::maintenant();
         let entrees: Vec<&explorateur::Entree> = dossier.entrees.iter().filter(|e| visibles.contains(&e.nom)).collect();
         let mut basculer: Option<String> = None;
+        let mut ouvrir_image: Option<Visionneuse> = None;
         for (i, e) in entrees.iter().enumerate() {
             let carte = Rect::new(b.x + (i % colonnes) as f32 * (large + ecart), b.y + (i / colonnes) as f32 * (haute + ecart), large, haute);
             if carte.bottom() < vue.y || carte.y > vue.bottom() {
@@ -580,7 +583,16 @@ impl Contexte for Fichiers {
                 }
             } else {
                 let (type_mime, famille) = explorateur::mime(&e.nom);
-                badge(cx, carre, &explorateur::badge(&e.nom), famille);
+                // Une image : sa vignette, recadrée au carré, dès qu'elle est décodée
+                match images::lisible(&e.nom).then(|| images::demander(&chemin, e.modifie, visionneuse::VIGNETTE)) {
+                    Some(Reponse::Prete(img, _)) => {
+                        let (l, h) = (img.largeur as f32, img.hauteur as f32);
+                        let (u, v) = if l > h { ((l - h) / l / 2.0, 0.0) } else { (0.0, (h - l) / h / 2.0) };
+                        cx.dl.rrect(carre, cote * 0.12, col.puce);
+                        cx.dl.image_partie(carre, img, [u, v], [1.0 - u, 1.0 - v]);
+                    }
+                    _ => badge(cx, carre, &explorateur::badge(&e.nom), famille),
+                }
                 format!("{type_mime} · {}", explorateur::taille(e.taille))
             };
             let date = e.modifie.and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| date(t.as_secs(), maintenant));
@@ -607,6 +619,18 @@ impl Contexte for Fichiers {
                     Nature::Dossier => aller = Some(chemin),
                     Nature::Audio if joue => radio::lecteur_fichiers().arreter(),
                     Nature::Audio => radio::lecteur_fichiers().jouer(&chemin.to_string_lossy()),
+                    // Une image : en grand, avec les autres images du dossier
+                    Nature::Image if images::lisible(&e.nom) => {
+                        let liste: Vec<_> = entrees.iter().filter(|x| images::lisible(&x.nom)).map(|x| (dossier.chemin.join(&x.nom), x.modifie)).collect();
+                        let i = liste.iter().position(|x| x.0 == chemin).unwrap_or(0);
+                        ouvrir_image = Some(Visionneuse::new(liste, i));
+                    }
+                    // Une page web s'ouvre dans la Toile (son bouton Source l'édite)
+                    _ if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("html") || x.eq_ignore_ascii_case("htm")) => {
+                        let mut etat = Etat::default();
+                        etat.mettre("document", chemin.display());
+                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::toile::CLE, etat });
+                    }
                     Nature::Texte => {
                         let mut etat = Etat::default();
                         etat.mettre("document", chemin.display());
@@ -641,6 +665,9 @@ impl Contexte for Fichiers {
             self.caches = caches;
             aller = Some(dossier.chemin.clone());
         }
+        if let Some(v) = ouvrir_image {
+            self.visionneuse = Some(v);
+        }
         if let Some(nom) = basculer {
             if !self.selection.remove(&nom) {
                 self.selection.insert(nom);
@@ -650,6 +677,15 @@ impl Contexte for Fichiers {
         if let Some(ch) = aller {
             self.message = None;
             self.aller(ch);
+        }
+
+        // La visionneuse, par-dessus la liste
+        if let Some(mut v) = self.visionneuse.take() {
+            let (etat, issue) = v.dessiner(cx, r, sub_id(base, 999_996));
+            if !matches!(issue, Issue::Fermer) {
+                self.visionneuse = Some(v);
+                return etat;
+            }
         }
 
         // La boîte de dialogue, par-dessus la fenêtre
@@ -755,10 +791,10 @@ impl Fichiers {
         if saisie {
             let marge = (cx.theme.marge * 0.4 * d).round();
             let zone = Rect::new(carte.x + pad - 14.0 * d, y + gap - 8.0 * d - marge, carte.w - 2.0 * pad + 28.0 * d, hc + 8.0 * d + marge + 4.0 * d);
-            let corps = sub_id(NOM_CORPS, k);
-            let mut b = cx.body(corps, zone, &c.scrolls);
-            clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom", &mut self.nom, &mut c.clavier);
-            cx.body_end(b, &mut c.scrolls);
+            // Posé à sa place, hors d'une colonne : rien ne le fait défiler
+            let ch = Rect::new(zone.x + 14.0 * d, zone.y + 8.0 * d + (cx.theme.marge * 0.4 * d).round(), (zone.w - 28.0 * d).max(0.0), cx.commande());
+            clavier::champ_en(cx, ch, None, zone, sub_id(NOM, k), "Nom", &mut self.nom, &mut c.clavier);
+            cx.clip(None);
             cx.clip(Some(carte));
             y += hc + 2.0 * gap;
         }

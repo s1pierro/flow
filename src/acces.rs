@@ -42,6 +42,8 @@ const RELEASE_STRING_UTF_CHARS: usize = 170;
 const NEW_OBJECT_ARRAY: usize = 172;
 const SET_OBJECT_ARRAY_ELEMENT: usize = 174;
 const EXCEPTION_CHECK: usize = 228;
+const GET_DIRECT_BUFFER_ADDRESS: usize = 230;
+const GET_DIRECT_BUFFER_CAPACITY: usize = 231;
 
 /// Android 11 : l'API où apparaît l'accès à tous les fichiers.
 const R: i32 = 30;
@@ -330,10 +332,14 @@ pub unsafe fn racine(env: *mut c_void) -> Option<String> {
 }
 
 const NEW_GLOBAL_REF: usize = 21;
+const DELETE_GLOBAL_REF: usize = 22;
 
 /// Le contexte de l'application (référence globale), qui survit à l'activité : c'est
 /// lui qui pilote le service de lecture.
 static CONTEXTE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// L'activité (référence globale) : la Toile y attache ses pages.
+static ACTIVITE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Note le contexte de l'application.
 ///
@@ -345,6 +351,14 @@ pub unsafe fn noter_contexte(env: *mut c_void, activite: Obj) {
     if let Some(c) = c {
         let global: unsafe extern "C" fn(*mut c_void, Obj) -> Obj = j.f(NEW_GLOBAL_REF);
         CONTEXTE.store(global(env, c) as usize, std::sync::atomic::Ordering::Relaxed);
+    }
+    if !activite.is_null() {
+        let global: unsafe extern "C" fn(*mut c_void, Obj) -> Obj = j.f(NEW_GLOBAL_REF);
+        let ancienne = ACTIVITE.swap(global(env, activite) as usize, std::sync::atomic::Ordering::Relaxed);
+        if ancienne != 0 {
+            let del: unsafe extern "C" fn(*mut c_void, Obj) = j.f(DELETE_GLOBAL_REF);
+            del(env, ancienne as Obj);
+        }
     }
 }
 
@@ -400,7 +414,19 @@ pub fn service(etat: i32, titre: &str, texte: &str) {
 /// thread. La classe est celle de l'application : on la charge par son chargeur (le
 /// `FindClass` d'un thread natif ne voit que les classes du système).
 pub fn installation(methode: &str, arg: Option<&str>) -> Option<String> {
-    let contexte = CONTEXTE.load(std::sync::atomic::Ordering::Relaxed) as Obj;
+    appeler("fr.s1pierro.flow.Installation", &CONTEXTE, methode, arg)
+}
+
+/// Comme `installation`, pour `fr.s1pierro.flow.Toile`, qui reçoit l'activité.
+pub fn toile(methode: &str, arg: &str) -> Option<String> {
+    appeler("fr.s1pierro.flow.Toile", &ACTIVITE, methode, Some(arg))
+}
+
+/// Le thread courant attaché à Java le temps de `f`, dans un cadre de références
+/// locales libéré ensuite ; avec la classe `classe` de l'application et l'objet
+/// `contexte`.
+fn avec_classe<T>(classe: &str, contexte: &std::sync::atomic::AtomicUsize, f: impl FnOnce(&Jni, Obj, Obj) -> Option<T>) -> Option<T> {
+    let contexte = contexte.load(std::sync::atomic::Ordering::Relaxed) as Obj;
     if contexte.is_null() {
         return None;
     }
@@ -418,18 +444,8 @@ pub fn installation(methode: &str, arg: Option<&str>) -> Option<String> {
             let kc = j.classe_de(contexte);
             let chargeur = j.objet(contexte, j.methode(kc, "getClassLoader", "()Ljava/lang/ClassLoader;", false)?, &[])?;
             let charger = j.methode(j.classe_de(chargeur), "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", false)?;
-            let k = j.objet(chargeur, charger, &[j.texte("fr.s1pierro.flow.Installation")? as Val])?;
-            let s = match arg {
-                Some(a) => {
-                    let m = j.methode(k, methode, "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;", true)?;
-                    j.objet_statique(k, m, &[contexte as Val, j.texte16(a)? as Val])?
-                }
-                None => {
-                    let m = j.methode(k, methode, "(Landroid/content/Context;)Ljava/lang/String;", true)?;
-                    j.objet_statique(k, m, &[contexte as Val])?
-                }
-            };
-            j.lire_texte16(s)
+            let k = j.objet(chargeur, charger, &[j.texte(classe)? as Val])?;
+            f(&j, k, contexte)
         })();
         let pop: unsafe extern "C" fn(*mut c_void, Obj) -> Obj = j.f(POP_LOCAL_FRAME);
         pop(env, std::ptr::null_mut());
@@ -438,6 +454,42 @@ pub fn installation(methode: &str, arg: Option<&str>) -> Option<String> {
         }
         r
     }
+}
+
+/// Une méthode statique `(Context[, String]) -> String` de la classe.
+fn appeler(classe: &str, contexte: &std::sync::atomic::AtomicUsize, methode: &str, arg: Option<&str>) -> Option<String> {
+    avec_classe(classe, contexte, |j, k, contexte| unsafe {
+        let s = match arg {
+            Some(a) => {
+                let m = j.methode(k, methode, "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;", true)?;
+                j.objet_statique(k, m, &[contexte as Val, j.texte16(a)? as Val])?
+            }
+            None => {
+                let m = j.methode(k, methode, "(Landroid/content/Context;)Ljava/lang/String;", true)?;
+                j.objet_statique(k, m, &[contexte as Val])?
+            }
+        };
+        j.lire_texte16(s)
+    })
+}
+
+/// L'image de la page `id` de la Toile (RGBA prémultiplié), copiée dans `dest` :
+/// faux s'il n'y en a pas encore.
+pub fn toile_pixels(id: &str, dest: &mut Vec<u8>) -> bool {
+    avec_classe("fr.s1pierro.flow.Toile", &ACTIVITE, |j, k, _| unsafe {
+        let m = j.methode(k, "pixels", "(Ljava/lang/String;)Ljava/nio/ByteBuffer;", true)?;
+        let b = j.objet_statique(k, m, &[j.texte(id)? as Val])?;
+        let adr: unsafe extern "C" fn(*mut c_void, Obj) -> *const u8 = j.f(GET_DIRECT_BUFFER_ADDRESS);
+        let cap: unsafe extern "C" fn(*mut c_void, Obj) -> i64 = j.f(GET_DIRECT_BUFFER_CAPACITY);
+        let (p, n) = (adr(j.env, b), cap(j.env, b));
+        if p.is_null() || n <= 0 {
+            return None;
+        }
+        dest.clear();
+        dest.extend_from_slice(std::slice::from_raw_parts(p, n as usize));
+        Some(())
+    })
+    .is_some()
 }
 
 /// Le texte du presse-papier d'Android (son premier élément, converti en texte), ou

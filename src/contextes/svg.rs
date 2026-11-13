@@ -57,9 +57,7 @@ pub const GENRE: Genre = Genre { cle: CLE, nom: "SVG", legende: "Dessin vectorie
 
 const SVG: Id = id("svg");
 const NOM: Id = id("svg/nom");
-const NOM_CORPS: Id = id("svg/nom-corps");
 const SAISIE: Id = id("svg/saisie");
-const SAISIE_CORPS: Id = id("svg/saisie-corps");
 const POIGNEE: Id = id("svg/poignee");
 const BROUILLONS: &str = "brouillons";
 const ZOOM: (f32, f32) = (0.02, 50.0);
@@ -1380,9 +1378,10 @@ impl Svg {
         } else {
             let pad = 14.0 * d;
             let zone = Rect::new(x0 - pad, r.y + m - 8.0 * d - (cx.theme.marge * 0.4 * d).round(), x1 - x0 + 2.0 * pad, r.h);
-            let mut b = cx.body(sub_id(NOM_CORPS, k), zone, &c.scrolls);
-            clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom du dessin", &mut self.nom, &mut c.clavier);
-            cx.body_end(b, &mut c.scrolls);
+            // Posé à sa place, hors d'une colonne : rien ne le fait défiler
+            let ch = Rect::new(zone.x + 14.0 * d, zone.y + 8.0 * d + (cx.theme.marge * 0.4 * d).round(), (zone.w - 28.0 * d).max(0.0), cx.commande());
+            clavier::champ_en(cx, ch, None, zone, sub_id(NOM, k), "Nom du dessin", &mut self.nom, &mut c.clavier);
+            cx.clip(None);
         }
         cx.dl.rrect(Rect::new(r.x, r.bottom() - d, r.w, d.max(1.0)), 0.0, col.ligne);
     }
@@ -1399,9 +1398,10 @@ impl Svg {
         cx.ui.region_add(sub_id(SAISIE, 1_000 + k), carte, Sense::Sink);
         let marge = (cx.theme.marge * 0.4 * d).round();
         let zone = Rect::new(carte.x + pad - 14.0 * d, carte.y + pad - 8.0 * d - marge, carte.w - 2.0 * pad + 28.0 * d, hc + 8.0 * d + marge + 4.0 * d);
-        let mut b = cx.body(sub_id(SAISIE_CORPS, k), zone, &c.scrolls);
-        clavier::champ(cx, &mut b, sub_id(SAISIE, k), "Texte à poser", &mut self.saisie, &mut c.clavier);
-        cx.body_end(b, &mut c.scrolls);
+        // Posé à sa place, hors d'une colonne : rien ne le fait défiler
+        let ch = Rect::new(zone.x + 14.0 * d, zone.y + 8.0 * d + (cx.theme.marge * 0.4 * d).round(), (zone.w - 28.0 * d).max(0.0), cx.commande());
+        clavier::champ_en(cx, ch, None, zone, sub_id(SAISIE, k), "Texte à poser", &mut self.saisie, &mut c.clavier);
+        cx.clip(None);
         let y = carte.y + pad + hc + gap;
         let mut x = carte.right() - pad;
         for (i, (nom, poser)) in [("Poser", true), ("Annuler", false)].into_iter().enumerate() {

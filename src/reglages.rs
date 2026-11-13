@@ -23,11 +23,14 @@ pub struct Reglages {
     pub gestes: ReglagesGestes,
     /// Les applets montrés dans la barre : les clés de leurs contextes.
     pub applets: Vec<String>,
+    /// Au lancement, la Boombox décode en silence le dernier flux écouté (le tampon du
+    /// magnétophone).
+    pub veille: bool,
 }
 
 impl Default for Reglages {
     fn default() -> Reglages {
-        Reglages { theme: Theme::default(), clavier: ReglagesClavier::default(), gestes: ReglagesGestes::default(), applets: crate::applet::par_defaut() }
+        Reglages { theme: Theme::default(), clavier: ReglagesClavier::default(), gestes: ReglagesGestes::default(), applets: crate::applet::par_defaut(), veille: true }
     }
 }
 
@@ -86,6 +89,7 @@ impl Reglages {
                 "gestes_appui" => g.appui = nombre(&v).map_or(g.appui, |x| x / 1000.0),
                 "gestes_appui_long" => g.appui_long = nombre(&v).map_or(g.appui_long, |x| x / 1000.0),
                 "gestes_retour" => g.retour = oui(&v).unwrap_or(g.retour),
+                "boombox_veille" => r.veille = oui(&v).unwrap_or(r.veille),
                 "applets" => {
                     let voulus: Vec<String> = v.split(|ch: char| ch.is_whitespace() || ch == ',').filter(|k| !k.is_empty()).map(|k| if k.eq_ignore_ascii_case("radio") { "boombox".to_string() } else { k.to_lowercase() }).collect();
                     // Les clés inconnues sont oubliées ; l'ordre est celui des contextes
@@ -150,7 +154,9 @@ impl Reglages {
         s += &format!("gestes_retour = {}\n\n", if g.retour { "oui" } else { "non" });
         let tous: Vec<String> = crate::applet::par_defaut();
         s += &format!("# Applets de la barre, séparés par des espaces (vide : aucun) : {}\n", tous.join(", "));
-        s += &format!("applets = {}\n", self.applets.join(" "));
+        s += &format!("applets = {}\n\n", self.applets.join(" "));
+        s += "# Boombox : au lancement, décoder en silence le dernier flux écouté pour en garder\n# les cinq dernières minutes (environ 60 Mo de données par heure) : oui ou non\n";
+        s += &format!("boombox_veille = {}\n", if self.veille { "oui" } else { "non" });
         s
     }
 }
@@ -210,9 +216,11 @@ mod tests {
             clavier: ReglagesClavier { disposition: Disposition::Qwerty, touche: 58.0, appui_long: 0.5, apercu: false, flottant: true, position: (0.25, 0.5) },
             gestes: ReglagesGestes { dist: 80.0, appui: 0.4, appui_long: 1.2, retour: false },
             applets: vec!["mixeur".into()],
+            veille: false,
         };
         let lu = Reglages::lire(&r.ecrire());
         assert_eq!(lu.applets, ["mixeur"]);
+        assert!(!lu.veille && Reglages::lire("").veille);
         // Aucun applet, des clés inconnues, un ordre quelconque
         assert!(Reglages::lire("applets =").applets.is_empty());
         assert_eq!(Reglages::lire("applets = mixeur, inconnu radio").applets, ["boombox", "mixeur"]);

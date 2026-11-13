@@ -156,7 +156,7 @@ impl App {
 
     /// Les réglages de l'interface à enregistrer : l'apparence et le clavier.
     pub fn reglages(&self) -> Reglages {
-        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes, applets: self.commun.applets.clone() }
+        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes, applets: self.commun.applets.clone(), veille: self.commun.veille }
     }
 
     /// Applique des réglages relus.
@@ -165,6 +165,7 @@ impl App {
         self.commun.clavier.reglages = r.clavier;
         self.commun.gestes = r.gestes;
         self.commun.applets = r.applets;
+        self.commun.veille = r.veille;
     }
 
     /// L'espace de travail en texte : la disposition et l'état de chaque fenêtre.
@@ -239,6 +240,19 @@ impl App {
                     ancienne.mettre_a_l_abri(&self.commun);
                 }
                 self.surface.changer_vue(depuis, vue);
+            }
+            Demande::OuvrirACote { depuis, cle, etat } => {
+                if let Some(doc) = etat.texte("document").map(Path::new) {
+                    if self.fenetres.values().any(|i| i.cle() == cle && i.document() == Some(doc)) {
+                        return;
+                    }
+                }
+                let Some(vue) = contextes::indice(cle) else { return };
+                let Some(p) = self.surface.placees().iter().find(|p| p.id == depuis).copied() else { return };
+                let sens = if p.cadre.w >= p.cadre.h { crate::surface::Sens::Colonnes } else { crate::surface::Sens::Lignes };
+                let Some(n) = self.surface.partager(depuis, sens, 0.5) else { return };
+                self.fenetres.insert(n, (contextes::genre(vue).ouvrir)(&etat));
+                self.surface.changer_vue(n, vue);
             }
             Demande::Montrer { cle } => {
                 let Some(vue) = contextes::indice(cle) else { return };
