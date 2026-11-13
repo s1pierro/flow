@@ -292,6 +292,14 @@ fn render_loop() -> Result<(), String> {
         for (e, t) in events {
             ui.event(e, t);
         }
+        // Les doigts d'une télécommande, comme ceux de l'écran
+        {
+            let (w, h) = egl.size();
+            let t = now();
+            for (e, d) in crate::telecommande::evenements(w, h) {
+                ui.event(e, t + d);
+            }
+        }
         ui.horloge(now());
         let dt = last.elapsed().as_secs_f32().min(0.05);
         last = Instant::now();

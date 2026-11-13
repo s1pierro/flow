@@ -101,8 +101,9 @@ pub struct Morceau3d {
 }
 
 /// Un terrain vu par `mvp` dans un rectangle de l'écran : ses morceaux texturés (les
-/// pixels transparents de l'image ne se dessinent pas), noyés dans la brume (couleur
-/// `ciel`) de `brume[0]` à `brume[1]` mètres de l'œil.
+/// pixels transparents de l'image ne se dessinent pas), et des volumes colorés (`bati` :
+/// sommets de 9 flottants, position, normale, couleur de 0 à 1), noyés dans la brume
+/// (couleur `ciel`) de `brume[0]` à `brume[1]` mètres de l'œil.
 #[derive(Clone, Debug)]
 pub struct Terrain3d {
     pub rect: Rect,
@@ -111,6 +112,7 @@ pub struct Terrain3d {
     pub ciel: [f32; 3],
     pub brume: [f32; 2],
     pub morceaux: Vec<Morceau3d>,
+    pub bati: Vec<Maillage3d>,
 }
 
 /// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la

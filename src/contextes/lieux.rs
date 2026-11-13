@@ -22,7 +22,8 @@
 //!     retire ; le niveau de l'eau.
 //!   - **Sol** : un pinceau d'occupation du sol (bois, prés, champs, habité, zones).
 //! - **La 3D** (`relief3d`) : le cube de la barre fait passer de la carte au relief en
-//!   3D, drapé des mêmes tuiles, et retour, sur le même point ; un doigt tourne autour,
+//!   3D, drapé des mêmes tuiles, les bâtiments en volume près de l'œil, et retour, sur
+//!   le même point ; un doigt tourne autour,
 //!   deux doigts rapprochent et déplacent. Un outil d'édition ramène à la carte.
 //! - **Dans la barre de la fenêtre** : la liste des lieux, la 3D, le nom, enregistrer,
 //!   annuler et rétablir.
@@ -1621,7 +1622,7 @@ impl Lieux {
             (_, Some(carte)) if self.trois_d.is_some() => {
                 let r = self.trois_d.as_ref().unwrap();
                 let attente = if r.en_attente || carte.en_attente() { " · dessin…" } else { "" };
-                format!("3D · {} tuiles{attente}", r.dessinees)
+                format!("3D · {} tuiles · {} de bâti{attente}", r.dessinees, r.bati_dessinees)
             }
             (_, Some(carte)) => {
                 let z = self.vue.map_or(0, |v| carte.niveau(v.echelle));

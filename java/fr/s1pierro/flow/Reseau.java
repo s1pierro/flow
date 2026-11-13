@@ -1,6 +1,8 @@
 package fr.s1pierro.flow;
 
 import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.os.Build;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -15,6 +17,41 @@ import java.net.URL;
  * (acces::installation), depuis ses propres threads : la méthode bloque jusqu'à la fin.
  */
 public class Reseau {
+    private static WifiManager.WifiLock wifi;
+    private static WifiManager.MulticastLock diffusion;
+
+    /**
+     * « 1 » : garde le Wi-Fi éveillé en faible latence (sans l'économie d'énergie qui
+     * retarde les paquets) et laisse passer les diffusions (la découverte de la
+     * télécommande) ; « 0 » : rend les deux. Rend "" si tout va bien, sinon l'erreur.
+     */
+    public static synchronized String verrous(Context c, String arg) {
+        try {
+            WifiManager w = (WifiManager) c.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (w == null) return "pas de Wi-Fi";
+            if ("1".equals(arg)) {
+                if (wifi == null) {
+                    int mode = Build.VERSION.SDK_INT >= 29 ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                    wifi = w.createWifiLock(mode, "flow-telecommande");
+                    wifi.setReferenceCounted(false);
+                    wifi.acquire();
+                }
+                if (diffusion == null) {
+                    diffusion = w.createMulticastLock("flow-telecommande");
+                    diffusion.setReferenceCounted(false);
+                    diffusion.acquire();
+                }
+            } else {
+                if (wifi != null) { wifi.release(); wifi = null; }
+                if (diffusion != null) { diffusion.release(); diffusion = null; }
+            }
+            return "";
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            return e.getClass().getSimpleName() + (m == null ? "" : " : " + m);
+        }
+    }
+
     /**
      * « url\nchemin[\nformulaire] » : télécharge l'adresse dans le fichier (d'abord à
      * côté, puis renommé : il est entier ou absent), par GET, ou par POST du formulaire

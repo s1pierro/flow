@@ -424,6 +424,12 @@ pub fn reseau(arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "telecharger", Some(arg))
 }
 
+/// Les verrous Wi-Fi de la télécommande (faible latence, diffusions) : pris (`true`)
+/// ou rendus ; "" si tout va bien, l'erreur sinon ; rien hors d'Android.
+pub fn verrous_wifi(pris: bool) -> Option<String> {
+    appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "verrous", Some(if pris { "1" } else { "0" }))
+}
+
 /// Comme `installation`, pour `fr.s1pierro.flow.Toile`, qui reçoit l'activité.
 pub fn toile(methode: &str, arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Toile", &ACTIVITE, methode, Some(arg))

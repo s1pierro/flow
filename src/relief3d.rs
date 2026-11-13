@@ -14,11 +14,16 @@
 //!   visible jusque-là. Ceux qui ne servent plus s'oublient.
 //! - **Les textures** sont les tuiles de la carte (`Carte::textures`), demandées aux
 //!   mêmes threads ; en attendant, la partie d'un ancêtre.
+//! - **Les bâtiments** se montent en volume (`toits::monter` : murs et pans du toit)
+//!   près de l'œil, à moins de `BATI_RAYON`, par tuiles d'environ 300 m : chacun dans
+//!   celle qui contient son centre. Ils se font dans le même temps que le relief, après
+//!   lui, et se périment de même.
 
 use crate::carte::{boite_tuile, Carte, Cle, Donnees, NIVEAU_MAX};
 use crate::draw::{Maillage3d, Morceau3d, Rect, Terrain3d};
 use crate::sculpture::{produit, Camera, CHAMP};
 use crate::widgets::Cx;
+use sage_reel::{teintes_bati, toits};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,6 +36,10 @@ const PRES: f32 = 2.4;
 const BUDGET: f64 = 0.008;
 /// Les maillages gardés au plus.
 const GARDES: usize = 600;
+/// Les bâtiments se montent jusqu'à cette distance de l'œil (m).
+pub const BATI_RAYON: f32 = 2000.0;
+/// Le côté visé des tuiles de bâtiments (m).
+const BATI_TUILE: f32 = 300.0;
 /// Le ciel, et la brume au loin.
 pub const CIEL: [f32; 3] = [0.80, 0.86, 0.92];
 
@@ -47,11 +56,14 @@ struct Morceau {
 pub struct Relief3d {
     pub camera: Camera,
     morceaux: HashMap<Cle, Morceau>,
+    batis: HashMap<Cle, Morceau>,
     image: u64,
     num: u64,
     revision: u64,
-    /// Les tuiles dessinées à la dernière image (pour les essais).
+    /// Les tuiles dessinées à la dernière image, et les tuiles de bâtiments (pour les
+    /// essais et la barre).
     pub dessinees: usize,
+    pub bati_dessinees: usize,
     /// Des maillages restent à faire.
     pub en_attente: bool,
 }
@@ -63,7 +75,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, en_attente: false }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -152,6 +164,40 @@ impl Relief3d {
         v.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// Les tuiles de bâtiments à montrer (à moins de `BATI_RAYON` de l'œil, dans le
+    /// champ), de la plus proche à la plus lointaine.
+    fn choisir_bati(&self, d: &Donnees, mvp: &[f32; 16]) -> Vec<Cle> {
+        let l = &d.lieu;
+        let (x0, z0, c) = d.monde();
+        let e = l.etendue();
+        let z = niveau_bati(c);
+        let t = c / (1u32 << z) as f32;
+        let (hmin, hmax) = (l.base, l.base + 65535.0 * l.echelle + 80.0);
+        let o = self.camera.oeil();
+        let n = (1i32 << z) - 1;
+        let (i0, i1) = (((o[0] - BATI_RAYON - x0) / t).floor().max(0.0) as i32, (((o[0] + BATI_RAYON - x0) / t).floor() as i32).min(n));
+        let (j0, j1) = (((o[2] - BATI_RAYON - z0) / t).floor().max(0.0) as i32, (((o[2] + BATI_RAYON - z0) / t).floor() as i32).min(n));
+        let mut v = Vec::new();
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let cle = (z, i, j);
+                let b = boite_tuile(d, cle);
+                if (b[0] as f64) > e[2] || (b[2] as f64) < e[0] || (b[1] as f64) > e[3] || (b[3] as f64) < e[1] || dehors(mvp, b, hmin, hmax) {
+                    continue;
+                }
+                let dx = (b[0] - o[0]).max(0.0).max(o[0] - b[2]);
+                let dz = (b[1] - o[2]).max(0.0).max(o[2] - b[3]);
+                let dy = (o[1] - hmax).max(0.0);
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist < BATI_RAYON {
+                    v.push((dist, cle));
+                }
+            }
+        }
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v.into_iter().map(|(_, c)| c).collect()
+    }
+
     /// Dessine le lieu de `carte` dans `zone`.
     pub fn dessiner(&mut self, cx: &mut Cx, zone: Rect, carte: &mut Carte) {
         self.image += 1;
@@ -199,6 +245,36 @@ impl Relief3d {
             self.morceaux.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image });
         }
         self.en_attente = faits.len() < a_faire.iter().map(|x| x.2).collect::<HashSet<_>>().len();
+        // Les bâtiments, dans le temps qui reste
+        let voulus = self.choisir_bati(&d, &mvp);
+        for &cle in &voulus {
+            let perime = match self.batis.get(&cle) {
+                Some(m) => !carte.a_jour(m.faite, boite_tuile(&d, cle)),
+                None => true,
+            };
+            if !perime {
+                continue;
+            }
+            if debut.elapsed().as_secs_f64() > BUDGET {
+                self.en_attente = true;
+                break;
+            }
+            let (sommets, indices) = fabriquer_bati(&d, cle);
+            self.revision += 1;
+            let id = 0x6261_7469_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
+            let maillage = Maillage3d { id, revision: self.revision, sommets: Arc::new(sommets), indices: Arc::new(indices) };
+            self.batis.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image });
+        }
+        let mut bati = Vec::new();
+        for cle in &voulus {
+            if let Some(m) = self.batis.get_mut(cle) {
+                m.vu = self.image;
+                if !m.maillage.indices.is_empty() {
+                    bati.push(m.maillage.clone());
+                }
+            }
+        }
+        self.bati_dessinees = bati.len();
         drop(d);
         // Ce qui se dessine : la tuile, ou son ancêtre le plus proche déjà fait
         let mut montrees: Vec<Cle> = Vec::new();
@@ -224,8 +300,15 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati });
         // Les maillages qui n'ont pas servi depuis longtemps
+        if self.batis.len() > GARDES / 2 {
+            let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();
+            v.sort();
+            for (_, k) in v.iter().take(self.batis.len() - GARDES / 2) {
+                self.batis.remove(k);
+            }
+        }
         if self.morceaux.len() > GARDES {
             let mut v: Vec<(u64, Cle)> = self.morceaux.iter().filter(|(k, _)| k.0 > 0).map(|(k, m)| (m.vu, *k)).collect();
             v.sort();
@@ -234,6 +317,34 @@ impl Relief3d {
             }
         }
     }
+}
+
+/// Le niveau des tuiles de bâtiments : des tuiles d'au moins `BATI_TUILE` mètres.
+fn niveau_bati(c: f32) -> u8 {
+    ((c / BATI_TUILE).log2().floor().max(0.0) as u8).min(NIVEAU_MAX)
+}
+
+/// Les bâtiments de la tuile `cle` (ceux dont le centre y tombe), en volume : sommets de
+/// 9 flottants (position, normale, couleur) et triangles.
+pub fn fabriquer_bati(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
+    let b = boite_tuile(d, cle);
+    let l = &d.lieu;
+    let mut v = Vec::new();
+    for k in d.batiments_dans(b) {
+        let bt = &l.batiments[k as usize];
+        let c = bt.centre();
+        if c[0] < b[0] || c[0] >= b[2] || c[1] < b[1] || c[1] >= b[3] || bt.contour.len() < 3 {
+            continue;
+        }
+        let (murs, toit) = teintes_bati(bt.genre);
+        toits::monter(bt, murs, toit, &mut |p, n, coul| {
+            for q in p {
+                v.extend_from_slice(&[q[0], q[1], q[2], n[0], n[1], n[2], coul[0], coul[1], coul[2]]);
+            }
+        });
+    }
+    let ind = (0..(v.len() / 9) as u32).collect();
+    (v, ind)
 }
 
 /// La boîte (en x, z ; de `hmin` à `hmax` en hauteur) est-elle hors du champ ?
@@ -336,6 +447,36 @@ mod tests {
         // Les jupes sous le bord
         let j = n * n * 8;
         assert!(v[j + 1] < v[1] - 1.0);
+    }
+
+    #[test]
+    fn les_batiments_se_montent_une_fois_dans_leur_tuile() {
+        use sage_reel::{Batiment, MAISON};
+        let pas = 4.0;
+        let g = Grille::emprise(pas, 2000.0, 2000.0);
+        let h = vec![10.0; g.points()];
+        let carre = |x: f32, z: f32| vec![[x, z], [x + 10.0, z], [x + 10.0, z + 8.0], [x, z + 8.0]];
+        let b = vec![Batiment::plat(MAISON, 9.0, 16.0, carre(0.0, 0.0)), Batiment::plat(MAISON, 9.0, 16.0, carre(500.0, 300.0))];
+        let d = Donnees::new(Lieu::sur("B", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), b, Vec::new()));
+        let (_, _, c) = d.monde();
+        let z = niveau_bati(c);
+        let t = c / (1u32 << z) as f32;
+        assert!(t >= BATI_TUILE && t < BATI_TUILE * 2.0, "{t}");
+        // Chaque bâtiment dans une seule tuile : 2 en tout sur toutes les tuiles
+        let n = 1i32 << z;
+        let mut murs = 0;
+        let mut hauts = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let (v, ind) = fabriquer_bati(&d, (z, i, j));
+                assert_eq!(ind.len(), v.len() / 9);
+                // Un toit plat : deux triangles vers le haut par bâtiment
+                murs += v.chunks(27).filter(|t| t[4] > 0.9).count();
+                hauts.extend(v.chunks(9).map(|s| s[1]));
+            }
+        }
+        assert_eq!(murs, 4);
+        assert!(hauts.iter().all(|&y| (y - 9.0).abs() < 1e-3 || (y - 16.0).abs() < 1e-3));
     }
 
     #[test]

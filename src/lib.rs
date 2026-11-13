@@ -43,6 +43,7 @@ pub mod glb;
 pub mod images;
 pub mod syntaxe;
 pub mod tampon;
+pub mod telecommande;
 pub mod text;
 pub mod ui;
 pub mod widgets;

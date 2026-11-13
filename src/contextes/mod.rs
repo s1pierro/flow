@@ -16,6 +16,7 @@ pub mod svg;
 pub mod argile;
 pub mod boombox;
 pub mod mailles;
+pub mod telecommande;
 pub mod texte;
 pub mod toile;
 pub mod visionneuse;
@@ -28,7 +29,7 @@ use crate::widgets::{Body, Cx, Icon};
 /// Les contextes, dans l'ordre du menu des fenêtres. Le premier est celui de la
 /// première fenêtre ; leur place ne compte pas pour l'enregistrement (c'est la clé qui
 /// est retenue), on peut donc les réordonner.
-pub const GENRES: &[Genre] = &[accueil::GENRE, fichiers::GENRE, texte::GENRE, svg::GENRE, argile::GENRE, mailles::GENRE, lieux::GENRE, disque::GENRE, boombox::GENRE, toile::GENRE, mixeur::GENRE, encre::GENRE, orchestre::GENRE, aide::GENRE];
+pub const GENRES: &[Genre] = &[accueil::GENRE, fichiers::GENRE, texte::GENRE, svg::GENRE, argile::GENRE, mailles::GENRE, lieux::GENRE, disque::GENRE, boombox::GENRE, toile::GENRE, mixeur::GENRE, encre::GENRE, orchestre::GENRE, telecommande::GENRE, aide::GENRE];
 
 /// Le contexte d'une fenêtre dont la clé est inconnue (fichier d'une autre version).
 pub const REPLI: &str = aide::CLE;

@@ -85,6 +85,40 @@ void main() {
   v_d = distance(a_pos, u_oeil);
   gl_Position = u_mvp * vec4(a_pos, 1.0);
 }";
+const BATI_VS: &str = "#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_normal;
+layout(location=2) in vec3 a_couleur;
+uniform mat4 u_mvp;
+uniform vec3 u_oeil;
+out vec3 v_n;
+out vec3 v_c;
+out float v_d;
+void main() {
+  v_n = a_normal;
+  v_c = a_couleur;
+  v_d = distance(a_pos, u_oeil);
+  gl_Position = u_mvp * vec4(a_pos, 1.0);
+}";
+/// Les volumes : le même soleil que le relief, un ciel qui éclaire d'en haut, la brume.
+const BATI_FS: &str = "#version 300 es
+precision highp float;
+in vec3 v_n;
+in vec3 v_c;
+in float v_d;
+uniform vec3 u_ciel;
+uniform vec2 u_brume;
+out vec4 o_color;
+void main() {
+  vec3 n = normalize(v_n);
+  float s = max(dot(n, normalize(vec3(-0.5, 0.8, -0.35))), 0.0);
+  float h = 0.5 + 0.5 * n.y;
+  // Le soleil vient du nord-ouest : les murs au sud gardent le jour du ciel
+  vec3 c = v_c * (0.62 + 0.34 * s + 0.12 * h);
+  float b = smoothstep(u_brume.x, u_brume.y, v_d);
+  o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
+}";
 /// La couleur vient de la carte (déjà ombrée) ; un peu de soleil en plus pour le
 /// relief vu de biais, et la brume au loin. Hors du lieu (transparent), rien.
 const TERRAIN_FS: &str = "#version 300 es
@@ -176,6 +210,9 @@ pub struct Renderer {
     terrain_program: u32,
     /// u_mvp, u_uv, u_oeil, u_avec_image, u_couleur, u_ciel, u_brume
     u_terrain: [i32; 7],
+    bati_program: u32,
+    /// u_mvp, u_oeil, u_ciel, u_brume
+    u_bati: [i32; 4],
     tampons: RefCell<Vec<Tampon3d>>,
     /// Les images sur la carte graphique : id, révision, texture, taille, et l'image
     /// où elles ont servi (celles qui ne servent plus sont libérées).
@@ -266,8 +303,10 @@ impl Renderer {
             let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume"].map(|n| loc(terrain_program, n));
             (gl.glUseProgram)(terrain_program);
             (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
+            let bati_program = program(&gl, BATI_VS, BATI_FS)?;
+            let u_bati = ["u_mvp", "u_oeil", "u_ciel", "u_brume"].map(|n| loc(bati_program, n));
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, bati_program, u_bati, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
         }
     }
 
@@ -283,11 +322,12 @@ impl Renderer {
     /// Le maillage d'une vue sur la carte graphique, envoyé s'il est nouveau ou a
     /// changé : (vao, nombre d'indices).
     unsafe fn tampon(&self, v: &Vue3d) -> (u32, i32) {
-        self.tampon_de(&v.maillage, false)
+        self.tampon_de(&v.maillage, 6)
     }
 
-    /// `uv` : des sommets de 8 flottants (position, normale, texture), sinon 6.
-    unsafe fn tampon_de(&self, m: &crate::draw::Maillage3d, uv: bool) -> (u32, i32) {
+    /// `flottants` par sommet : 6 (position, normale), 8 (et la texture), 9 (et la
+    /// couleur).
+    unsafe fn tampon_de(&self, m: &crate::draw::Maillage3d, flottants: i32) -> (u32, i32) {
         let gl = &self.gl;
         let mut tampons = self.tampons.borrow_mut();
         let i = match tampons.iter().position(|t| t.id == m.id) {
@@ -300,14 +340,14 @@ impl Renderer {
                 (gl.glBindVertexArray)(vao);
                 (gl.glBindBuffer)(ARRAY_BUFFER, vbo);
                 (gl.glBindBuffer)(ELEMENT_ARRAY_BUFFER, ebo);
-                let pas = if uv { 32 } else { 24 };
+                let pas = flottants * 4;
                 for (k, off) in [(0u32, 0usize), (1, 12)] {
                     (gl.glEnableVertexAttribArray)(k);
                     (gl.glVertexAttribPointer)(k, 3, FLOAT, 0, pas, off as *const c_void);
                 }
-                if uv {
+                if flottants > 6 {
                     (gl.glEnableVertexAttribArray)(2);
-                    (gl.glVertexAttribPointer)(2, 2, FLOAT, 0, pas, 24 as *const c_void);
+                    (gl.glVertexAttribPointer)(2, flottants - 6, FLOAT, 0, pas, 24 as *const c_void);
                 }
                 (gl.glBindVertexArray)(0);
                 tampons.push(Tampon3d { id: m.id, revision: u64::MAX, vao, vbo, ebo, n: 0, vu: 0 });
@@ -392,7 +432,7 @@ impl Renderer {
         // Le surlignage, à la même profondeur, un peu avancé
         if let Some((m, c)) = &v.dessus {
             if !m.indices.is_empty() {
-                let (vao, n) = self.tampon_de(m, false);
+                let (vao, n) = self.tampon_de(m, 6);
                 (gl.glEnable)(POLYGON_OFFSET_FILL);
                 (gl.glPolygonOffset)(-1.0, -2.0);
                 (gl.glDepthFunc)(LEQUAL);
@@ -417,7 +457,7 @@ impl Renderer {
     unsafe fn dessiner_terrain(&self, w: f32, h: f32, t: &Terrain3d, clip: Option<Rect>) {
         let gl = &self.gl;
         let r = clip.map_or(t.rect, |c| t.rect.intersect(&c));
-        if r.w < 1.0 || r.h < 1.0 || t.morceaux.is_empty() {
+        if r.w < 1.0 || r.h < 1.0 || (t.morceaux.is_empty() && t.bati.is_empty()) {
             return;
         }
         let (x, y, cw, ch) = Self::gl_rect(r, h);
@@ -438,7 +478,7 @@ impl Renderer {
             if m.maillage.indices.is_empty() {
                 continue;
             }
-            let (vao, n) = self.tampon_de(&m.maillage, true);
+            let (vao, n) = self.tampon_de(&m.maillage, 8);
             match &m.image {
                 Some(img) => {
                     self.lier_image(img);
@@ -450,6 +490,23 @@ impl Renderer {
             (gl.glUniform3f)(u[4], m.couleur[0], m.couleur[1], m.couleur[2]);
             (gl.glBindVertexArray)(vao);
             (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+        }
+        // Les volumes, dans la même profondeur
+        if !t.bati.is_empty() {
+            (gl.glUseProgram)(self.bati_program);
+            let u = &self.u_bati;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform3f)(u[1], t.oeil[0], t.oeil[1], t.oeil[2]);
+            (gl.glUniform3f)(u[2], t.ciel[0], t.ciel[1], t.ciel[2]);
+            (gl.glUniform2f)(u[3], t.brume[0], t.brume[1]);
+            for m in &t.bati {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                let (vao, n) = self.tampon_de(m, 9);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+            }
         }
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);

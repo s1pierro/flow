@@ -235,7 +235,8 @@ impl Clavier {
 
     /// La hauteur du clavier ouvert, en pixels (0 s'il est fermé).
     pub fn hauteur(&self, cx: &Cx) -> f32 {
-        if !self.ouvert() {
+        // Une télécommande sert de clavier : celui de l'écran se cache, la cible reste
+        if !self.ouvert() || crate::telecommande::clavier_distant() {
             return 0.0;
         }
         let d = cx.dp;

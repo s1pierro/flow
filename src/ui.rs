@@ -377,6 +377,12 @@ impl Ui {
         &self.appuis
     }
 
+    /// Les doigts posés sur la zone `id` (à gestes, à glisser ou à cliquer) :
+    /// (identifiant, x, y), là où ils sont maintenant.
+    pub fn doigts_sur(&self, id: Id) -> Vec<(i32, f32, f32)> {
+        self.pointers.iter().filter(|p| p.owner == Owner::Gestes(id) || p.owner == Owner::Widget(id)).map(|p| (p.id, p.x, p.y)).collect()
+    }
+
     /// Le nombre de doigts posés.
     pub fn doigts(&self) -> usize {
         self.pointers.len()

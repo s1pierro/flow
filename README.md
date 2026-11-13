@@ -44,12 +44,15 @@ rétablir ; Fichiers ouvre désormais les `.glb` dans Mailles),
 Lieux (les lieux réels de S.A.G.E., fichiers `.reel` : les générer depuis le téléphone — jusqu'à
 20 × 20 km autour d'un point de France, largeur et longueur réglables, relief et toits LiDAR de l'IGN, eau, routes, ponts, bâtiments et
 occupation du sol d'OpenStreetMap —, les explorer sur une carte en tuiles ou en 3D (le relief
-drapé de la carte, à niveaux de détail), et les éditer :
+drapé de la carte, à niveaux de détail, les bâtiments en volume), et les éditer :
 bâtiments, routes et ponts, pinceaux de relief, d'eau et de sol ; annuler, rétablir. Le format
 vient de la crate partagée `sage-reel` du dépôt S.A.G.E. Un lieu généré est dérivé d'OSM (ODbL) :
 il ne se publie pas),
 Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie surveillée,
-recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`), Aide. Les paramètres de l'application (apparence, clavier,
+recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`),
+Télécommande (piloter un autre Flow par le Wi-Fi local — découverte sur le réseau, liaison par
+un code à quatre chiffres, puis pavé tactile avec curseur, écran en miroir à plusieurs doigts ou
+clavier ; l'aller-retour mesuré s'affiche — ou se laisser piloter), Aide. Les paramètres de l'application (apparence, clavier,
 gestes) sont dans le panneau latéral. Deux façons de disposer les fenêtres (Paramètres, Interface) :
 **Full flow**, où elles se partagent tout l'espace, et **Free flow**, où chacune flotte à sa place
 comme sur un bureau (tirer la barre la déplace, la poignée la redimensionne, la toucher la passe

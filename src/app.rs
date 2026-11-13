@@ -140,6 +140,7 @@ impl App {
     pub fn animating(&self) -> bool {
         self.shell.animating()
             || self.commun.clavier.anime()
+            || crate::telecommande::anime()
             || self.applets.anime(&self.commun)
             || self.surface.placees().iter().any(|p| self.fenetres.get(&p.id).is_some_and(|i| i.anime(&self.commun)))
     }
@@ -275,7 +276,10 @@ impl App {
     /// Les frappes du clavier vont au champ ciblé : celui d'essai du panneau des
     /// paramètres, ou celui de l'instance qui le possède.
     fn frappes(&mut self, cx: &mut Cx, zone: Rect, dt: f32) {
-        for frappe in self.commun.clavier.saisir(cx, zone, dt) {
+        let mut frappes = self.commun.clavier.saisir(cx, zone, dt);
+        // Et celles d'une télécommande
+        frappes.extend(crate::telecommande::frappes());
+        for frappe in frappes {
             let Some(cible) = self.commun.clavier.cible else { continue };
             if cible == parametres::ESSAI {
                 if self.essai.appliquer(frappe) {
@@ -418,6 +422,19 @@ impl App {
         // Le retour visuel des gestes, par-dessus tout
         let apercus = cx.ui.gestes_actifs();
         crate::gestes::dessiner_retour(cx, &self.commun.gestes, &apercus);
+        // Le curseur d'une télécommande en mode pavé, par-dessus le reste
+        if let Some((x, y, tenu)) = crate::telecommande::curseur() {
+            let d = cx.dp;
+            let col = cx.couleurs();
+            let (a, b) = ([x, y], [x + 7.0 * d, y + 17.0 * d]);
+            let c = [x + 13.0 * d, y + 11.0 * d];
+            for (p, q) in [(a, b), (b, c), (c, a)] {
+                cx.dl.line(p, q, 4.5 * d, [0, 0, 0, 200]);
+            }
+            for (p, q) in [(a, b), (b, c), (c, a)] {
+                cx.dl.line(p, q, 2.0 * d, if tenu { col.accent } else { [255, 255, 255, 255] });
+            }
+        }
         Scene { workspace: l.workspace, fond: cx.couleurs().fond }
     }
 

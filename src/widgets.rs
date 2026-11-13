@@ -171,6 +171,8 @@ pub enum Icon {
     Disquette,
     /// Une carte pliée : les lieux réels.
     Carte,
+    /// Un téléphone qui émet : la télécommande.
+    Telecommande,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -501,6 +503,17 @@ impl Cx<'_> {
                 for q in v.iter().chain([&o]) {
                     self.dl.rrect(Rect::new(q[0] - 2.0 * u, q[1] - 2.0 * u, 4.0 * u, 4.0 * u), 2.0 * u, color);
                 }
+            }
+            Icon::Telecommande => {
+                // Le téléphone, son bouton, et deux ondes au-dessus
+                let c = [p(-5.0, -1.0), p(5.0, -1.0), p(5.0, 10.0), p(-5.0, 10.0)];
+                for i in 0..4 {
+                    self.dl.line(c[i], c[(i + 1) % 4], 1.8 * u, color);
+                }
+                self.dl.rrect(Rect::new(cx - 1.2 * u, cy + 6.0 * u, 2.4 * u, 2.4 * u), 1.2 * u, color);
+                let h = std::f32::consts::FRAC_PI_2;
+                self.dl.secteur(p(0.0, -1.0), 4.0 * u, 5.8 * u, -h - 0.75, -h + 0.75, 0.0, color);
+                self.dl.secteur(p(0.0, -1.0), 8.2 * u, 10.0 * u, -h - 0.7, -h + 0.7, 0.0, color);
             }
             Icon::Carte => {
                 let v = [p(-10.0, -6.0), p(-3.5, -9.0), p(3.5, -6.0), p(10.0, -9.0), p(10.0, 6.0), p(3.5, 9.0), p(-3.5, 6.0), p(-10.0, 9.0)];
