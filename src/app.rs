@@ -19,7 +19,7 @@ use crate::espace::Espace;
 use crate::parametres;
 use crate::reglages::Reglages;
 use crate::shell::{Layout, Shell, Side};
-use crate::surface::{Changement, FenetreId, Placee, Surface};
+use crate::surface::{Changement, Etendue, FenetreId, Flottante, Placee, Surface};
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Cx, Icon};
 use std::collections::HashMap;
@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 const BARRE: Id = id("barre-application");
 const LOGO: Id = id("logo");
+const TACHES: Id = id("barre-taches");
 const LANCEUR: Id = id("lanceur");
 const LANCEUR_LIGNE: Id = id("lanceur-ligne");
 
@@ -307,12 +308,13 @@ impl App {
     }
 
     /// Déclare à l'orchestrateur les instances ouvertes, dans l'ordre des fenêtres.
-    fn recenser(&mut self, placees: &[Placee]) {
+    fn recenser(&mut self) {
         let o = &mut self.commun.orchestre;
         o.instances.clear();
-        for p in placees {
-            if let Some(i) = self.fenetres.get(&p.id) {
-                o.instances.push(crate::orchestre::Instance { fenetre: p.id, cle: i.cle(), document: i.document().map(Path::to_path_buf) });
+        // Toutes les fenêtres, réduites comprises : leur contexte reste ouvert
+        for (f, _, _) in self.surface.disposer(Rect::default()) {
+            if let Some(i) = self.fenetres.get(&f) {
+                o.instances.push(crate::orchestre::Instance { fenetre: f, cle: i.cle(), document: i.document().map(Path::to_path_buf) });
             }
         }
     }
@@ -368,7 +370,7 @@ impl App {
         }
         // L'orchestrateur : le recensement des instances ouvertes, puis ses tâches
         // (empreintes, enregistrements)
-        self.recenser(&placees);
+        self.recenser();
         self.commun.orchestrer(cx.ui.doigts() == 0);
         for d in std::mem::take(&mut self.commun.demandes) {
             self.traiter(d);
@@ -424,8 +426,58 @@ impl App {
             cx.text_at(x, r.cy(), &s, 15.0, col.texte);
             x -= cx.pad();
         }
-        let debut = r.x + r.h + cx.pad();
+        let mut debut = r.x + r.h + cx.pad();
+        // En fenêtres libres, la barre des tâches : une case par fenêtre, à droite du
+        // logo ; elle prend au plus la moitié de la place
+        if self.surface.libre() {
+            debut = self.taches(cx, Rect::new(debut, r.y, ((x - debut) / 2.0).max(0.0), r.h));
+        }
         self.applets.barre(cx, &mut self.commun, Rect::new(debut, r.y, (x - debut).max(0.0), r.h));
+    }
+
+    /// La barre des tâches du Free flow : l'icône du contexte de chaque fenêtre, par
+    /// ordre d'ouverture ; à l'accent celle de devant, pâle une fenêtre réduite, un
+    /// trait sous celles qui se montrent. La toucher montre la fenêtre (et la passe
+    /// devant), ou réduit celle de devant. Renvoie où la barre s'arrête.
+    fn taches(&mut self, cx: &mut Cx, r: Rect) -> f32 {
+        let (d, col) = (cx.dp, cx.couleurs());
+        let mut l: Vec<Flottante> = self.surface.libres().to_vec();
+        l.sort_by_key(|f| f.id);
+        if l.is_empty() || r.w < r.h * 0.6 {
+            return r.x;
+        }
+        let w = (r.w / l.len() as f32).clamp(r.h * 0.6, r.h);
+        let devant = self.surface.devant();
+        let vues = contextes::vues();
+        let mut x = r.x;
+        let mut touchee = None;
+        for f in &l {
+            if x + w > r.right() + 0.5 {
+                break;
+            }
+            let case = Rect::new(x, r.y, w, r.h);
+            let k = sub_id(TACHES, f.id as usize);
+            if cx.ui.click(k, case, None) {
+                touchee = Some(f.id);
+            }
+            if cx.ui.pressed(k) {
+                cx.dl.rrect(case.inset(3.0 * d), cx.theme.rayon(case.h - 6.0 * d), col.puce);
+            }
+            let reduite = f.etendue == Etendue::Reduite;
+            let teinte = if Some(f.id) == devant { col.accent } else if reduite { col.ligne } else { col.texte };
+            let icone = vues.get(f.vue as usize).map_or(Icon::Help, |v| v.1);
+            let ic = (r.h * 0.5).min(w * 0.7);
+            cx.icon(Rect::new(case.cx() - ic / 2.0, case.cy() - ic / 2.0, ic, ic), icone, teinte);
+            if !reduite {
+                let tw = (w * 0.4).round();
+                cx.dl.rrect(Rect::new(case.cx() - tw / 2.0, case.bottom() - 6.0 * d, tw, 2.5 * d), 1.25 * d, teinte);
+            }
+            x += w;
+        }
+        if let Some(f) = touchee {
+            self.surface.basculer(f);
+        }
+        x + cx.pad()
     }
 
     fn panel_frame(&self, cx: &mut Cx, id: Id, r: Rect, side: Side, landscape: bool) {
@@ -494,7 +546,7 @@ impl App {
                 let mut b = cx.body(id("corps-aide"), body, &c.scrolls);
                 cx.section(&mut b, "FENÊTRES");
                 cx.paragraph(&mut b, "Touchez le titre d'une fenêtre pour choisir son contexte, la partager en deux ou la fermer.");
-                cx.paragraph(&mut b, "En Free flow (Paramètres, Interface), les fenêtres flottent comme sur un bureau : tirez la barre d'une fenêtre pour la déplacer, sa poignée pour la redimensionner ; touchez-la pour la passer devant. Un contexte lancé s'ouvre dans une nouvelle fenêtre, posée en cascade.");
+                cx.paragraph(&mut b, "En Free flow (Paramètres, Interface), les fenêtres flottent comme sur un bureau : tirez la barre d'une fenêtre pour la déplacer, sa poignée pour la redimensionner ; touchez-la pour la passer devant. Un contexte lancé s'ouvre dans une nouvelle fenêtre, posée en cascade. Les deux boutons avant la poignée réduisent la fenêtre et l'agrandissent à tout l'écran (ou la rétablissent). La barre des tâches, à droite du logo, montre chaque fenêtre : la toucher montre une fenêtre réduite ou cachée et la passe devant, ou réduit celle de devant.");
                 cx.section(&mut b, "PANNEAU");
                 cx.paragraph(&mut b, "Le logo de la barre du bas ouvre la liste des contextes (à gauche en paysage, sous la barre en portrait) : en toucher un l'ajoute à l'espace de travail, à gauche en paysage, en bas en portrait, et referme la liste.");
                 cx.paragraph(&mut b, "Les liens Paramètres et À propos, en bas de la liste des contextes, ouvrent ce panneau. L'espace de travail s'adapte à la place restante.");

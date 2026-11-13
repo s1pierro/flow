@@ -288,7 +288,9 @@ fn main() {
         }
         if s.name.starts_with("libre") {
             // Free flow : trois fenêtres qui se chevauchent, Mailles devant
-            app.ouvrir_espace("fenetres = libre(F1:fichiers 0.0300 0.0400 0.4500 0.7500;F2:aide 0.5200 0.0600 0.4500 0.5000;F3:mailles 0.2800 0.3200 0.5500 0.6400)\n[fenetre 3]\nmode = faces\n");
+            // (en paysage, une Radio réduite ; en portrait, Mailles agrandie)
+            let mailles = if s.name == "libre" { "0.2800 0.3200 0.5500 0.6400" } else { "0.2800 0.3200 0.5500 0.6400 agrandie" };
+            app.ouvrir_espace(&format!("fenetres = libre(F4:radio 0.1 0.1 0.4 0.4 reduite;F1:fichiers 0.0300 0.0400 0.4500 0.7500;F2:aide 0.5200 0.0600 0.4500 0.5000;F3:mailles {mailles})\n[fenetre 3]\nmode = faces\n"));
             app.commun.theme.sombre = s.name == "libre-portrait";
         }
         if s.name.starts_with("mailles") {

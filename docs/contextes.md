@@ -307,6 +307,13 @@ L'espace de travail est une `Surface` (`src/surface.rs`) en deux modes :
   `clip(None)` y revient. Un contexte n'a rien à faire pour fonctionner dans les deux
   modes, tant qu'il dessine dans son `Placee`.
 
+Une fenêtre libre a une étendue (`Etendue`) : normale, agrandie (toute la surface ; sa
+place est gardée pour la rétablir) ou réduite (absente des fenêtres placées, mais son
+instance reste ouverte et recensée). Les boutons de sa barre, avant la poignée, la
+changent (`etendre`) ; la barre des tâches de l'application (`App::taches`, à droite du
+logo, une case par fenêtre) appelle `basculer` : montrer et passer devant, ou réduire
+celle de devant.
+
 Les fenêtres et leurs instances survivent au changement de mode : seule la disposition
 change. En Free flow, partager coupe la place de la fenêtre en deux, et une fenêtre
 insérée (le lanceur) se pose en cascade devant les autres.
@@ -327,8 +334,8 @@ document = /storage/emulated/0/Notes/idees.txt
 - `fenetres` : `F<numéro>:<clé>` pour une fenêtre ; `C<part>(…,…)` pour deux
   fenêtres côte à côte, `L<part>(…,…)` pour l'une sur l'autre.
   En Free flow : `libre(F1:fichiers 0.05 0.05 0.5 0.6;F2:texte …)`, chaque fenêtre
-  suivie de sa place (x, y, largeur, hauteur, en part de l'espace), de l'arrière vers
-  l'avant.
+  suivie de sa place (x, y, largeur, hauteur, en part de l'espace) et, s'il y a lieu,
+  de `agrandie` ou `reduite`, de l'arrière vers l'avant.
 - `[commun]` : ce qui est partagé et doit être retrouvé (vide pour l'instant).
 - `[fenetre N]` : l'état de la fenêtre N, tel que son contexte l'écrit.
 

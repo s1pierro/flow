@@ -150,6 +150,11 @@ pub enum Icon {
     Maille,
     /// Une disquette : enregistrer.
     Disquette,
+    /// Une fenêtre libre : la réduire (un trait en bas), l'agrandir (un carré), la
+    /// rétablir (deux carrés décalés).
+    Reduire,
+    Agrandir,
+    Restaurer,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -483,6 +488,28 @@ impl Cx<'_> {
                 self.dl.rrect(Rect::new(v[0], v[1], 8.5 * u, 6.0 * u), 1.0 * u, color);
                 let t = p(-5.5, 2.0);
                 self.dl.rrect(Rect::new(t[0], t[1], 11.0 * u, 7.0 * u), 1.0 * u, color);
+            }
+            Icon::Reduire => {
+                self.dl.line(p(-7.0, 6.0), p(7.0, 6.0), 2.0 * u, color);
+            }
+            Icon::Agrandir | Icon::Restaurer => {
+                let e = 1.8 * u;
+                let carre = |dl: &mut crate::draw::DrawList, a: [f32; 2], b: [f32; 2]| {
+                    dl.line(a, [b[0], a[1]], e, color);
+                    dl.line([b[0], a[1]], b, e, color);
+                    dl.line(b, [a[0], b[1]], e, color);
+                    dl.line([a[0], b[1]], a, e, color);
+                };
+                if icon == Icon::Agrandir {
+                    carre(self.dl, p(-7.0, -7.0), p(7.0, 7.0));
+                } else {
+                    carre(self.dl, p(-7.0, -3.0), p(4.0, 8.0));
+                    // Le carré de derrière, dont on ne voit que les bords qui dépassent
+                    self.dl.line(p(-3.0, -3.0), p(-3.0, -7.0), e, color);
+                    self.dl.line(p(-3.0, -7.0), p(8.0, -7.0), e, color);
+                    self.dl.line(p(8.0, -7.0), p(8.0, 4.0), e, color);
+                    self.dl.line(p(8.0, 4.0), p(4.0, 4.0), e, color);
+                }
             }
             Icon::Gomme => {
                 // La gomme en biais : son corps, et le bout qui efface, plus pâle

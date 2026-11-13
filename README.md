@@ -38,7 +38,8 @@ recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`), A
 gestes) sont dans le panneau latéral. Deux façons de disposer les fenêtres (Paramètres, Interface) :
 **Full flow**, où elles se partagent tout l'espace, et **Free flow**, où chacune flotte à sa place
 comme sur un bureau (tirer la barre la déplace, la poignée la redimensionne, la toucher la passe
-devant). Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
+devant ; deux boutons la réduisent ou l'agrandissent, et une barre des tâches à côté du logo
+retrouve chaque fenêtre). Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document.
 
