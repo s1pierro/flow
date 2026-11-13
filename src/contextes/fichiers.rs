@@ -626,7 +626,7 @@ impl Contexte for Fichiers {
                     _ if chemin.extension().is_some_and(|x| x.eq_ignore_ascii_case("glb")) => {
                         let mut etat = Etat::default();
                         etat.mettre("document", chemin.display());
-                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::argile::CLE, etat });
+                        c.demandes.push(Demande::Ouvrir { depuis: p.id, cle: super::mailles::CLE, etat });
                     }
                     _ => {}
                 }

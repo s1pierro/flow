@@ -23,6 +23,7 @@ pub mod espace;
 pub mod explorateur;
 pub mod gestes;
 pub mod gles;
+pub mod maille;
 pub mod mixage;
 pub mod operations;
 pub mod orchestre;

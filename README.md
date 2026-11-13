@@ -28,9 +28,17 @@ ou B-spline à nœuds automatiques et courbure continue ; en aperçu) ; duplique
 supprimer, monter, descendre ; annuler, rétablir ; la source colorée à côté, synchronisée), Argile
 (sculpture 3D comme de la terre : gonfler, creuser, lisser, aplatir, pincer, tirer, avec symétrie ;
 la forme tourne au doigt, se subdivise pour les détails et s'enregistre en glTF binaire `.glb`),
+Mailles (éditer la géométrie d'un `.glb` : sommets, arêtes, faces ; la fenêtre se partage en vues
+comme l'espace de travail — Vue 3D, Arborescence des objets, tableau des Opérations — et une
+barre rapide propose ce que la sélection permet : déplacer, tourner, échelle, extruder,
+subdiviser, fusionner, créer une face, trianguler, retourner, dupliquer, supprimer ; annuler,
+rétablir ; Fichiers ouvre désormais les `.glb` dans Mailles),
 Orchestre (l'orchestrateur : empreintes du stockage tenues à jour, batterie surveillée,
 recensement des contextes, journal ; ses réglages dans `Flow/orchestre.txt`), Aide. Les paramètres de l'application (apparence, clavier,
-gestes) sont dans le panneau latéral. Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
+gestes) sont dans le panneau latéral. Deux façons de disposer les fenêtres (Paramètres, Interface) :
+**Full flow**, où elles se partagent tout l'espace, et **Free flow**, où chacune flotte à sa place
+comme sur un bureau (tirer la barre la déplace, la poignée la redimensionne, la toucher la passe
+devant). Chaque fenêtre a sa propre instance, avec son propre état : deux fenêtres
 Fichiers parcourent chacune leur dossier, deux fenêtres Texte éditent chacune leur
 document.
 

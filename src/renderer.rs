@@ -19,6 +19,9 @@ const SCISSOR: u32 = 0x0C11;
 const COLOR_BIT: u32 = 0x4000;
 const DEPTH_BIT: u32 = 0x0100;
 const DEPTH_TEST: u32 = 0x0B71;
+const POLYGON_OFFSET_FILL: u32 = 0x8037;
+const LESS: u32 = 0x0201;
+const LEQUAL: u32 = 0x0203;
 const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const UINT: u32 = 0x1405;
 
@@ -215,8 +218,11 @@ impl Renderer {
     /// Le maillage d'une vue sur la carte graphique, envoyé s'il est nouveau ou a
     /// changé : (vao, nombre d'indices).
     unsafe fn tampon(&self, v: &Vue3d) -> (u32, i32) {
+        self.tampon_de(&v.maillage)
+    }
+
+    unsafe fn tampon_de(&self, m: &crate::draw::Maillage3d) -> (u32, i32) {
         let gl = &self.gl;
-        let m = &v.maillage;
         let mut tampons = self.tampons.borrow_mut();
         let i = match tampons.iter().position(|t| t.id == m.id) {
             Some(i) => i,
@@ -274,6 +280,20 @@ impl Renderer {
         (gl.glUniform3f)(self.u_couleur, v.couleur[0], v.couleur[1], v.couleur[2]);
         (gl.glBindVertexArray)(vao);
         (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+        // Le surlignage, à la même profondeur, un peu avancé
+        if let Some((m, c)) = &v.dessus {
+            if !m.indices.is_empty() {
+                let (vao, n) = self.tampon_de(m);
+                (gl.glEnable)(POLYGON_OFFSET_FILL);
+                (gl.glPolygonOffset)(-1.0, -2.0);
+                (gl.glDepthFunc)(LEQUAL);
+                (gl.glUniform3f)(self.u_couleur, c[0], c[1], c[2]);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+                (gl.glDepthFunc)(LESS);
+                (gl.glDisable)(POLYGON_OFFSET_FILL);
+            }
+        }
         // Retour à l'interface
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);

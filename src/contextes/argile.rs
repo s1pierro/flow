@@ -654,7 +654,7 @@ impl Contexte for Argile {
         if z.w >= 2.0 && z.h >= 2.0 {
             let m = self.maillage3d();
             cx.clip(Some(z));
-            cx.dl.vue3d(Vue3d { rect: z, mvp: self.camera.mvp(z.w / z.h), vue: self.camera.vue(), maillage: m, couleur: self.couleur });
+            cx.dl.vue3d(Vue3d { rect: z, mvp: self.camera.mvp(z.w / z.h), vue: self.camera.vue(), maillage: m, couleur: self.couleur, dessus: None });
             if let Some((x, y)) = self.curseur {
                 let rp = TAILLES[self.taille].1 * self.dp;
                 let a = col.accent;

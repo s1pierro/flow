@@ -14,6 +14,7 @@ pub mod orchestre;
 pub mod radio;
 pub mod svg;
 pub mod argile;
+pub mod mailles;
 pub mod texte;
 
 use crate::contexte::Genre;
@@ -24,7 +25,7 @@ use crate::widgets::{Body, Cx, Icon};
 /// Les contextes, dans l'ordre du menu des fenêtres. Le premier est celui de la
 /// première fenêtre ; leur place ne compte pas pour l'enregistrement (c'est la clé qui
 /// est retenue), on peut donc les réordonner.
-pub const GENRES: &[Genre] = &[accueil::GENRE, fichiers::GENRE, texte::GENRE, svg::GENRE, argile::GENRE, disque::GENRE, radio::GENRE, mixeur::GENRE, encre::GENRE, orchestre::GENRE, aide::GENRE];
+pub const GENRES: &[Genre] = &[accueil::GENRE, fichiers::GENRE, texte::GENRE, svg::GENRE, argile::GENRE, mailles::GENRE, disque::GENRE, radio::GENRE, mixeur::GENRE, encre::GENRE, orchestre::GENRE, aide::GENRE];
 
 /// Le contexte d'une fenêtre dont la clé est inconnue (fichier d'une autre version).
 pub const REPLI: &str = aide::CLE;

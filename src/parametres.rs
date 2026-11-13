@@ -34,6 +34,9 @@ pub fn panneau(cx: &mut Cx, b: &mut Body, scroll: Id, onglet: usize, c: &mut Com
 }
 
 fn interface(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
+    cx.section(b, "ESPACE DE TRAVAIL");
+    cx.paragraph(b, "Full flow : les fenêtres se partagent tout l'espace. Free flow : chaque fenêtre flotte à sa place, comme sur un bureau ; tirez sa barre pour la déplacer, sa poignée pour la redimensionner, touchez-la pour la passer devant.");
+    cx.toggle(b, sub_id(scroll, 90), "Free flow : fenêtres libres", &mut c.libre);
     let t = &mut c.theme;
     cx.section(b, "COMMANDES");
     let shown = format!("{:.0} dp", t.commande);

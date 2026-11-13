@@ -71,6 +71,10 @@ fn main() {
         Shot { name: "svg-simplifier", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 10 },
         Shot { name: "argile", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
         Shot { name: "argile-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 9 },
+        Shot { name: "libre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "libre-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "mailles", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
+        Shot { name: "mailles-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
         Shot { name: "accueil", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "accueil-menu", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "applets", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -282,6 +286,16 @@ fn main() {
             app.ouvrir_espace("fenetres = F1:argile\n");
             app.commun.theme.sombre = s.name == "argile-portrait";
         }
+        if s.name.starts_with("libre") {
+            // Free flow : trois fenêtres qui se chevauchent, Mailles devant
+            app.ouvrir_espace("fenetres = libre(F1:fichiers 0.0300 0.0400 0.4500 0.7500;F2:aide 0.5200 0.0600 0.4500 0.5000;F3:mailles 0.2800 0.3200 0.5500 0.6400)\n[fenetre 3]\nmode = faces\n");
+            app.commun.theme.sombre = s.name == "libre-portrait";
+        }
+        if s.name.starts_with("mailles") {
+            // Un cube en mode Faces ; un toucher choisit la face du milieu
+            app.ouvrir_espace("fenetres = F1:mailles\n[fenetre 1]\nmode = faces\n");
+            app.commun.theme.sombre = s.name == "mailles-portrait";
+        }
         if s.name == "accueil" {
             // L'Accueil à côté d'une fenêtre Encre, née du menu
             app.ouvrir_espace("fenetres = C0.6200(F1:accueil,F2:orchestre)\n");
@@ -320,6 +334,11 @@ fn main() {
                     ui.event(Event::Move { id: 0, x: 430.0 + 50.0 * k, y: 700.0 + 26.0 * k }, t)
                 }
                 (3, 21) => ui.event(Event::Up { id: 0 }, t),
+                (20, 10) => {
+                    let (x, y) = if s.w > s.h { (650.0, 640.0) } else { (310.0, 960.0) };
+                    ui.event(Event::Down { id: 0, x, y }, t)
+                }
+                (20, 11) => ui.event(Event::Up { id: 0 }, t),
                 (5, 10) => ui.event(Event::Down { id: 0, x: 1850.0, y: 136.0 }, t),
                 (5, 11) => ui.event(Event::Up { id: 0 }, t),
                 (6, 10) => ui.event(Event::Down { id: 0, x: SVG_TAP.0, y: SVG_TAP.1 }, t),

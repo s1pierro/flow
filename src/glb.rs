@@ -343,7 +343,96 @@ fn matrice_noeud(nd: &Json) -> [f32; 16] {
     [r[0] * s[0], r[1] * s[0], r[2] * s[0], 0.0, r[3] * s[1], r[4] * s[1], r[5] * s[1], 0.0, r[6] * s[2], r[7] * s[2], r[8] * s[2], 0.0, t[0], t[1], t[2], 1.0]
 }
 
+/// Un objet d'un `.glb` : un nœud et son maillage, ses sommets (soudés, dans le
+/// repère du nœud), ses triangles, sa place dans la scène et sa couleur.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjetLu {
+    pub nom: String,
+    /// Du nœud à la scène (en colonnes).
+    pub matrice: [f32; 16],
+    pub positions: Vec<V3>,
+    pub triangles: Vec<[u32; 3]>,
+    pub couleur: Option<[f32; 3]>,
+}
+
+/// Ce qu'on lit d'un `.glb`, objet par objet, et s'il porte ce qu'on ne sait pas
+/// réécrire (armatures, animations, textures).
+pub struct Scene {
+    pub objets: Vec<ObjetLu>,
+    pub perdu: Vec<&'static str>,
+}
+
+/// Lit tout le `.glb` en un seul maillage, placé dans la scène et soudé.
 pub fn lire(octets: &[u8]) -> Result<Lu, String> {
+    let s = lire_objets(octets)?;
+    let mut positions: Vec<V3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut soudure: HashMap<[i64; 3], u32> = HashMap::new();
+    for o in &s.objets {
+        let m = &o.matrice;
+        let nouveaux: Vec<u32> = o
+            .positions
+            .iter()
+            .map(|p| {
+                let q = appliquer(m, *p);
+                let cle = q.map(|x| (x as f64 * 1e5).round() as i64);
+                *soudure.entry(cle).or_insert_with(|| {
+                    positions.push(q);
+                    positions.len() as u32 - 1
+                })
+            })
+            .collect();
+        for t in &o.triangles {
+            let tri = t.map(|i| nouveaux[i as usize]);
+            if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                triangles.push(tri);
+            }
+        }
+    }
+    if triangles.is_empty() {
+        return Err("Ce glb ne contient aucun triangle.".into());
+    }
+    Ok(Lu { positions, triangles, couleur: s.objets.iter().find_map(|o| o.couleur) })
+}
+
+/// Un point transformé par une matrice (en colonnes).
+pub fn appliquer(m: &[f32; 16], p: V3) -> V3 {
+    [m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13], m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]]
+}
+
+/// L'inverse d'une matrice affine (en colonnes) ; l'identité si elle est dégénérée.
+pub fn inverse(m: &[f32; 16]) -> [f32; 16] {
+    let a = |c: usize, l: usize| m[c * 4 + l] as f64;
+    let det = a(0, 0) * (a(1, 1) * a(2, 2) - a(2, 1) * a(1, 2)) - a(1, 0) * (a(0, 1) * a(2, 2) - a(2, 1) * a(0, 2)) + a(2, 0) * (a(0, 1) * a(1, 2) - a(1, 1) * a(0, 2));
+    if det.abs() < 1e-12 {
+        return IDENTITE;
+    }
+    let k = 1.0 / det;
+    // La 3×3 inverse, par les cofacteurs : i[c][l]
+    let mut i = [[0.0f64; 3]; 3];
+    for c in 0..3 {
+        for l in 0..3 {
+            let (c1, c2, l1, l2) = ((l + 1) % 3, (l + 2) % 3, (c + 1) % 3, (c + 2) % 3);
+            i[c][l] = (a(c1, l1) * a(c2, l2) - a(c2, l1) * a(c1, l2)) * k;
+        }
+    }
+    let t = [a(3, 0), a(3, 1), a(3, 2)];
+    let mut r = [0.0f32; 16];
+    for c in 0..3 {
+        for l in 0..3 {
+            r[c * 4 + l] = i[c][l] as f32;
+        }
+    }
+    for l in 0..3 {
+        r[12 + l] = -(0..3).map(|c| i[c][l] * t[c]).sum::<f64>() as f32;
+    }
+    r[15] = 1.0;
+    r
+}
+
+/// Lit les objets d'un `.glb` : chaque nœud qui porte un maillage (ses primitives en
+/// triangles réunies), avec sa place dans la scène.
+pub fn lire_objets(octets: &[u8]) -> Result<Scene, String> {
     let u32_a = |i: usize| octets.get(i..i + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
     if octets.get(..4) != Some(b"glTF") {
         return Err("Ce n'est pas un glTF binaire (.glb).".into());
@@ -435,12 +524,12 @@ pub fn lire(octets: &[u8]) -> Result<Lu, String> {
     // Les maillages, par les nœuds des scènes (avec leurs transformations)
     let noeuds = json.get("nodes").map(Json::liste).unwrap_or_default();
     let maillages = json.get("meshes").map(Json::liste).unwrap_or_default();
-    let mut a_faire: Vec<(usize, [f32; 16])> = Vec::new();
+    let mut a_faire: Vec<(usize, [f32; 16], String)> = Vec::new();
     let racines: Vec<usize> = match json.get("scenes").and_then(|s| s.at(json.entier("scene").unwrap_or(0))) {
         Some(sc) => sc.get("nodes").map(|v| v.liste().iter().filter_map(|x| x.nombre()).map(|x| x as usize).collect()).unwrap_or_default(),
         None => (0..noeuds.len()).collect(),
     };
-    let mut pile: Vec<(usize, [f32; 16], u32)> = racines.into_iter().map(|r| (r, crate::sculpture::produit(&IDENTITE, &IDENTITE), 0)).collect();
+    let mut pile: Vec<(usize, [f32; 16], u32)> = racines.into_iter().rev().map(|r| (r, IDENTITE, 0)).collect();
     while let Some((k, parent, prof)) = pile.pop() {
         let Some(nd) = noeuds.get(k) else { continue };
         if prof > 64 {
@@ -448,23 +537,25 @@ pub fn lire(octets: &[u8]) -> Result<Lu, String> {
         }
         let m = crate::sculpture::produit(&parent, &matrice_noeud(nd));
         if let Some(mi) = nd.entier("mesh") {
-            a_faire.push((mi, m));
+            let nom = nd.get("name").and_then(Json::texte).or_else(|| maillages.get(mi)?.get("name")?.texte()).map_or_else(|| format!("Objet {}", a_faire.len() + 1), str::to_string);
+            a_faire.push((mi, m, nom));
         }
-        for e in nd.get("children").map(Json::liste).unwrap_or_default() {
+        for e in nd.get("children").map(Json::liste).unwrap_or_default().iter().rev() {
             if let Some(e) = e.nombre() {
                 pile.push((e as usize, m, prof + 1));
             }
         }
     }
     if a_faire.is_empty() {
-        a_faire = (0..maillages.len()).map(|i| (i, IDENTITE)).collect();
+        a_faire = (0..maillages.len()).map(|i| (i, IDENTITE, maillages[i].get("name").and_then(Json::texte).map_or_else(|| format!("Objet {}", i + 1), str::to_string))).collect();
     }
-    let mut positions: Vec<V3> = Vec::new();
-    let mut triangles: Vec<[u32; 3]> = Vec::new();
-    let mut soudure: HashMap<[i64; 3], u32> = HashMap::new();
-    let mut couleur = None;
-    for (mi, m) in a_faire {
+    let mut objets = Vec::new();
+    for (mi, m, nom) in a_faire {
         let Some(me) = maillages.get(mi) else { continue };
+        let mut positions: Vec<V3> = Vec::new();
+        let mut triangles: Vec<[u32; 3]> = Vec::new();
+        let mut soudure: HashMap<[i64; 3], u32> = HashMap::new();
+        let mut couleur = None;
         for pr in me.get("primitives").map(Json::liste).unwrap_or_default() {
             if pr.entier("mode").unwrap_or(4) != 4 {
                 continue;
@@ -477,17 +568,13 @@ pub fn lire(octets: &[u8]) -> Result<Lu, String> {
                     (v.len() >= 3).then(|| [v[0], v[1], v[2]])
                 });
             }
-            // Chaque point transformé, puis soudé à un point déjà vu au même endroit
+            // Chaque point soudé à un point déjà vu au même endroit
             let mut nouveaux = Vec::with_capacity(pts.len());
             for p in &pts {
                 if p.len() < 3 {
                     return Err("glb : position incomplète".into());
                 }
-                let q = [
-                    m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
-                    m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
-                    m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
-                ];
+                let q = [p[0], p[1], p[2]];
                 let cle = q.map(|x| (x as f64 * 1e5).round() as i64);
                 let i = *soudure.entry(cle).or_insert_with(|| {
                     positions.push(q);
@@ -508,11 +595,115 @@ pub fn lire(octets: &[u8]) -> Result<Lu, String> {
                 }
             }
         }
+        if !triangles.is_empty() {
+            objets.push(ObjetLu { nom, matrice: m, positions, triangles, couleur });
+        }
     }
-    if triangles.is_empty() {
-        return Err("Ce glb ne contient aucun triangle.".into());
+    let mut perdu = Vec::new();
+    for (k, quoi) in [("skins", "armatures"), ("animations", "animations"), ("textures", "textures")] {
+        if !json.get(k).map(Json::liste).unwrap_or_default().is_empty() {
+            perdu.push(quoi);
+        }
     }
-    Ok(Lu { positions, triangles, couleur })
+    Ok(Scene { objets, perdu })
+}
+
+/// Un objet à écrire : son nom, sa place dans la scène, ses sommets (dans son repère),
+/// leurs normales, ses triangles et sa couleur.
+pub struct ObjetEcrit<'a> {
+    pub nom: &'a str,
+    pub matrice: [f32; 16],
+    pub positions: &'a [V3],
+    pub normales: &'a [V3],
+    pub triangles: &'a [[u32; 3]],
+    pub couleur: [f32; 3],
+}
+
+/// Des objets en glTF binaire : une scène, un nœud, un maillage et une matière par objet.
+pub fn ecrire_objets(objets: &[ObjetEcrit], generateur: &str) -> Vec<u8> {
+    let mut bin: Vec<u8> = Vec::new();
+    let (mut noeuds, mut mailles, mut matieres, mut vues, mut accesseurs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let v3 = |v: [f32; 3]| Json::Liste(v.iter().map(|x| n(*x as f64)).collect());
+    for (k, ob) in objets.iter().enumerate() {
+        let (mut a, mut b) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let debut = bin.len();
+        for p in ob.positions {
+            for c in 0..3 {
+                a[c] = a[c].min(p[c]);
+                b[c] = b[c].max(p[c]);
+                bin.extend_from_slice(&p[c].to_le_bytes());
+            }
+        }
+        let lp = bin.len() - debut;
+        for p in ob.normales {
+            for c in 0..3 {
+                bin.extend_from_slice(&p[c].to_le_bytes());
+            }
+        }
+        for t in ob.triangles {
+            for c in 0..3 {
+                bin.extend_from_slice(&t[c].to_le_bytes());
+            }
+        }
+        let li = ob.triangles.len() * 12;
+        let (iv, ia) = (vues.len() as f64, accesseurs.len() as f64);
+        vues.push(o(vec![("buffer", n(0.0)), ("byteOffset", n(debut as f64)), ("byteLength", n(lp as f64)), ("target", n(34962.0))]));
+        vues.push(o(vec![("buffer", n(0.0)), ("byteOffset", n((debut + lp) as f64)), ("byteLength", n(lp as f64)), ("target", n(34962.0))]));
+        vues.push(o(vec![("buffer", n(0.0)), ("byteOffset", n((debut + 2 * lp) as f64)), ("byteLength", n(li as f64)), ("target", n(34963.0))]));
+        let nv = ob.positions.len() as f64;
+        accesseurs.push(o(vec![("bufferView", n(iv)), ("componentType", n(5126.0)), ("count", n(nv)), ("type", Json::Texte("VEC3".into())), ("min", v3(a)), ("max", v3(b))]));
+        accesseurs.push(o(vec![("bufferView", n(iv + 1.0)), ("componentType", n(5126.0)), ("count", n(nv)), ("type", Json::Texte("VEC3".into()))]));
+        accesseurs.push(o(vec![("bufferView", n(iv + 2.0)), ("componentType", n(5125.0)), ("count", n((ob.triangles.len() * 3) as f64)), ("type", Json::Texte("SCALAR".into()))]));
+        let c = ob.couleur;
+        matieres.push(o(vec![
+            ("name", Json::Texte(ob.nom.into())),
+            ("pbrMetallicRoughness", o(vec![("baseColorFactor", Json::Liste(vec![n(c[0] as f64), n(c[1] as f64), n(c[2] as f64), n(1.0)])), ("metallicFactor", n(0.0)), ("roughnessFactor", n(0.9))])),
+        ]));
+        mailles.push(o(vec![
+            ("name", Json::Texte(ob.nom.into())),
+            ("primitives", Json::Liste(vec![o(vec![("attributes", o(vec![("POSITION", n(ia)), ("NORMAL", n(ia + 1.0))])), ("indices", n(ia + 2.0)), ("material", n(k as f64))])])),
+        ]));
+        let mut nd = vec![("mesh", n(k as f64)), ("name", Json::Texte(ob.nom.into()))];
+        if ob.matrice != IDENTITE {
+            nd.push(("matrix", Json::Liste(ob.matrice.iter().map(|x| n(*x as f64)).collect())));
+        }
+        noeuds.push(o(nd));
+    }
+    let json = o(vec![
+        ("asset", o(vec![("version", Json::Texte("2.0".into())), ("generator", Json::Texte(generateur.into()))])),
+        ("scene", n(0.0)),
+        ("scenes", Json::Liste(vec![o(vec![("nodes", Json::Liste((0..objets.len()).map(|i| n(i as f64)).collect()))])])),
+        ("nodes", Json::Liste(noeuds)),
+        ("meshes", Json::Liste(mailles)),
+        ("materials", Json::Liste(matieres)),
+        ("buffers", Json::Liste(vec![o(vec![("byteLength", n(bin.len() as f64))])])),
+        ("bufferViews", Json::Liste(vues)),
+        ("accessors", Json::Liste(accesseurs)),
+    ]);
+    emballer(json, bin)
+}
+
+/// Le JSON et le tampon, en blocs glTF binaires alignés.
+fn emballer(json: Json, mut bin: Vec<u8>) -> Vec<u8> {
+    let mut j = json.ecrire().into_bytes();
+    while j.len() % 4 != 0 {
+        j.push(b' ');
+    }
+    while bin.len() % 4 != 0 {
+        bin.push(0);
+    }
+    let total = 12 + 8 + j.len() + 8 + bin.len();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(b"glTF");
+    out.extend_from_slice(&2u32.to_le_bytes());
+    out.extend_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&(j.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"JSON");
+    out.extend_from_slice(&j);
+    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    out.extend_from_slice(b"BIN\0");
+    out.extend_from_slice(&bin);
+    out
 }
 
 const IDENTITE: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
@@ -578,5 +769,32 @@ mod tests {
         assert_eq!(l.triangles.len(), 2);
         assert!(l.positions.iter().all(|p| p[0] >= 10.0));
         assert!(lire(b"pas un glb").is_err());
+        // Par objet : le nœud garde son nom par défaut, sa place, et ses sommets locaux
+        let s = lire_objets(&o).unwrap();
+        assert_eq!(s.objets.len(), 1);
+        assert_eq!(s.objets[0].positions.len(), 4);
+        assert_eq!(s.objets[0].matrice[12], 10.0);
+        assert!(s.perdu.is_empty());
+    }
+
+    #[test]
+    fn des_objets_font_l_aller_retour() {
+        let m = Maillage::boule(1, 1.0);
+        let mut place = IDENTITE;
+        place[12] = 3.0;
+        place[0] = 2.0;
+        let obs = [
+            ObjetEcrit { nom: "un", matrice: IDENTITE, positions: &m.positions, normales: &m.normales, triangles: &m.triangles, couleur: [0.1, 0.2, 0.3] },
+            ObjetEcrit { nom: "deux", matrice: place, positions: &m.positions, normales: &m.normales, triangles: &m.triangles, couleur: [0.5, 0.5, 0.5] },
+        ];
+        let s = lire_objets(&ecrire_objets(&obs, "essai")).unwrap();
+        assert_eq!(s.objets.iter().map(|o| o.nom.as_str()).collect::<Vec<_>>(), ["un", "deux"]);
+        assert_eq!(s.objets[1].matrice, place);
+        assert_eq!(s.objets[1].positions, m.positions);
+        assert_eq!(s.objets[0].couleur, Some([0.1, 0.2, 0.3]));
+        // L'inverse ramène un point à sa place
+        let i = inverse(&place);
+        let p = appliquer(&i, appliquer(&place, [0.3, -1.0, 2.0]));
+        assert!((p[0] - 0.3).abs() < 1e-5 && (p[1] + 1.0).abs() < 1e-5 && (p[2] - 2.0).abs() < 1e-5);
     }
 }

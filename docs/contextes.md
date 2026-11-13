@@ -63,7 +63,12 @@ source — `Texte::integre`, sans en-tête, dont le contexte relaie les frappes)
 (une vue 3D : le maillage et ses pinceaux dans `src/sculpture.rs`, le glTF binaire dans
 `src/glb.rs`, et `DrawList::vue3d`, qui place une vue 3D à son rang dans la liste de dessin :
 le moteur de rendu la dessine avec sa propre profondeur dans son rectangle, et ce qui suit
-passe par-dessus), `orchestre.rs`
+passe par-dessus), `mailles.rs` (un éditeur de maillages : la géométrie en polygones et
+le tableau des opérations dans `src/maille.rs`, les objets d'un `.glb` par `glb::lire_objets`
+et `glb::ecrire_objets` ; la fenêtre est elle-même une `Surface`, partagée en vues comme
+l'espace de travail : `surface.base` donne à ses identifiants une racine propre à la
+fenêtre, `frame` place les vues, `dessus` dessine leurs menus ; `Vue3d::dessus` surligne
+les faces choisies par-dessus le maillage), `orchestre.rs`
 (la vue d'un module global, sans état propre).
 
 `texte.rs` est la référence pour un contexte qui édite des fichiers ; `svg.rs` montre
@@ -287,6 +292,25 @@ L'espace est enregistré quand le doigt se lève et que rien ne s'anime, ou au p
 toutes les 5 s pendant une animation, et toujours quand l'application passe en
 arrière-plan.
 
+## Full flow et Free flow
+
+L'espace de travail est une `Surface` (`src/surface.rs`) en deux modes :
+
+- **Full flow** (le pavage) : un arbre de partages, les fenêtres couvrent tout l'espace.
+- **Free flow** (`Surface::mettre_libre`, réglé par `Commun::libre` dans les paramètres) :
+  chaque fenêtre flotte à sa place, retenue en part de l'espace, de l'arrière vers l'avant.
+  `frame` dispose les fenêtres et passe devant celle qu'un doigt touche
+  (`Ui::appuis`) ; l'application appelle ensuite `habiller` juste avant le contenu de
+  chaque fenêtre : ombre, fond qui retient les doigts (`Sense::Sink`), barre à tirer
+  pour déplacer, poignée pour redimensionner. Pendant le dessin d'une fenêtre libre,
+  `Ui::socle` vaut son cadre : `Cx::clip` restreint tout découpage au socle, et
+  `clip(None)` y revient. Un contexte n'a rien à faire pour fonctionner dans les deux
+  modes, tant qu'il dessine dans son `Placee`.
+
+Les fenêtres et leurs instances survivent au changement de mode : seule la disposition
+change. En Free flow, partager coupe la place de la fenêtre en deux, et une fenêtre
+insérée (le lanceur) se pose en cascade devant les autres.
+
 ## Le fichier `espace.txt`
 
 ```text
@@ -302,6 +326,9 @@ document = /storage/emulated/0/Notes/idees.txt
 
 - `fenetres` : `F<numéro>:<clé>` pour une fenêtre ; `C<part>(…,…)` pour deux
   fenêtres côte à côte, `L<part>(…,…)` pour l'une sur l'autre.
+  En Free flow : `libre(F1:fichiers 0.05 0.05 0.5 0.6;F2:texte …)`, chaque fenêtre
+  suivie de sa place (x, y, largeur, hauteur, en part de l'espace), de l'arrière vers
+  l'avant.
 - `[commun]` : ce qui est partagé et doit être retrouvé (vide pour l'instant).
 - `[fenetre N]` : l'état de la fenêtre N, tel que son contexte l'écrit.
 
@@ -406,5 +433,7 @@ aucun ; les clés inconnues sont oubliées).
 
 - Argile : des pinceaux qui affinent la matière là où ils passent (topologie
   dynamique), la peinture de la terre, des formes de départ autres que la boule.
+- Mailles : boucles d'arêtes, biseau, couteau, sélection au lasso, les normales,
+  UV et matériaux conservés à l'enregistrement.
 - SVG : dégradés et motifs rendus fidèlement,
   sélection de plusieurs formes, entrer dans un groupe.

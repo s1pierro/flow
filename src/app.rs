@@ -191,6 +191,7 @@ impl App {
         let repli = contextes::indice(contextes::REPLI).unwrap_or(0);
         let Some(s) = e.fenetres.as_deref().and_then(|t| Surface::lire_avec(t, &|n| Some(contextes::indice(n).unwrap_or(repli)))) else { return };
         self.surface = s;
+        self.commun.libre = self.surface.libre();
         self.suspendre();
         self.fenetres.clear();
         for (f, vue, _) in self.surface.disposer(Rect::default()) {
@@ -336,7 +337,9 @@ impl App {
         let l = self.shell.layout(screen, dt);
         let vues = contextes::vues();
         self.surface.accueil = contextes::indice(contextes::accueil::CLE).unwrap_or(0);
+        self.surface.mettre_libre(self.commun.libre);
         let placees = self.surface.frame(cx, l.workspace, &vues);
+        let libre = self.surface.libre();
         self.suivre_fenetres(&placees);
         for p in &placees {
             if let Some(i) = self.fenetres.get_mut(&p.id) {
@@ -344,12 +347,23 @@ impl App {
             }
         }
         for p in &placees {
+            if !self.fenetres.contains_key(&p.id) {
+                continue;
+            }
+            // En fenêtres libres : le cadre et la barre juste avant le contenu, et tout
+            // le dessin de la fenêtre restreint à son cadre
+            self.surface.habiller(cx, p, &vues);
+            if libre {
+                cx.ui.socle = Some(p.cadre);
+                cx.clip(None);
+            }
             let Some(i) = self.fenetres.get_mut(&p.id) else { continue };
             let etat = i.dessiner(cx, &mut self.commun, p);
             // La ligne d'état, à droite du titre, en chasse fixe
             let (d, col, e) = (cx.dp, cx.couleurs(), p.etat);
             cx.clip(Some(e));
             cx.mono_at(e.x + 4.0 * d, e.cy(), &etat, 12.0, col.pale);
+            cx.ui.socle = None;
             cx.clip(None);
         }
         // L'orchestrateur : le recensement des instances ouvertes, puis ses tâches
@@ -480,6 +494,7 @@ impl App {
                 let mut b = cx.body(id("corps-aide"), body, &c.scrolls);
                 cx.section(&mut b, "FENÊTRES");
                 cx.paragraph(&mut b, "Touchez le titre d'une fenêtre pour choisir son contexte, la partager en deux ou la fermer.");
+                cx.paragraph(&mut b, "En Free flow (Paramètres, Interface), les fenêtres flottent comme sur un bureau : tirez la barre d'une fenêtre pour la déplacer, sa poignée pour la redimensionner ; touchez-la pour la passer devant. Un contexte lancé s'ouvre dans une nouvelle fenêtre, posée en cascade.");
                 cx.section(&mut b, "PANNEAU");
                 cx.paragraph(&mut b, "Le logo de la barre du bas ouvre la liste des contextes (à gauche en paysage, sous la barre en portrait) : en toucher un l'ajoute à l'espace de travail, à gauche en paysage, en bas en portrait, et referme la liste.");
                 cx.paragraph(&mut b, "Les liens Paramètres et À propos, en bas de la liste des contextes, ouvrent ce panneau. L'espace de travail s'adapte à la place restante.");
@@ -853,6 +868,21 @@ mod tests {
         r.app.surface.fermer(2);
         r.frames(1);
         assert!(!r.app.fenetres.contains_key(&2));
+    }
+
+    #[test]
+    fn les_fenetres_libres_se_retrouvent_et_se_rangent() {
+        let texte = "fenetres = libre(F1:fichiers 0.0500 0.0500 0.5000 0.6000;F2:aide 0.3000 0.3000 0.6000 0.6000)\n";
+        let mut r = Rig::new();
+        r.app.ouvrir_espace(texte);
+        r.frames(2);
+        assert!(r.app.commun.libre && r.app.surface.nombre() == 2);
+        assert!(r.app.espace().contains("\nfenetres = libre(F1:fichiers 0.0500 0.0500 0.5000 0.6000;F2:aide"), "{}", r.app.espace());
+        // Le réglage revient au pavage : les deux fenêtres restent, côte à côte
+        r.app.commun.libre = false;
+        r.frames(1);
+        assert!(r.app.espace().contains("\nfenetres = C0.5000(F1:fichiers,F2:aide)\n"), "{}", r.app.espace());
+        assert_eq!(r.app.fenetres[&2].cle(), "aide");
     }
 
     #[test]

@@ -132,6 +132,9 @@ pub struct Commun {
     pub dossier: Option<PathBuf>,
     /// Les demandes des instances, traitées par l'application après le dessin.
     pub demandes: Vec<Demande>,
+    /// Les fenêtres libres (« free flow ») plutôt que le pavage (« full flow ») : réglé
+    /// dans les paramètres, retenu avec l'espace de travail.
+    pub libre: bool,
     /// L'orchestrateur : empreintes, batterie, recensement des contextes.
     pub orchestre: Orchestre,
     /// Les dictionnaires de coloration syntaxique, lus à la première demande et relus
@@ -164,6 +167,7 @@ impl Default for Commun {
             fichier_espace: None,
             dossier: None,
             demandes: Vec::new(),
+            libre: false,
             orchestre: Orchestre::default(),
             syntaxes: None,
             fichiers: Default::default(),

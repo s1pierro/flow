@@ -84,6 +84,9 @@ pub struct Vue3d {
     pub maillage: Maillage3d,
     /// La couleur de la matière, de 0 à 1.
     pub couleur: [f32; 3],
+    /// Un second maillage dessiné par-dessus, dans la même profondeur (des faces
+    /// choisies, surlignées), et sa couleur.
+    pub dessus: Option<(Maillage3d, [f32; 3])>,
 }
 
 #[derive(Default)]

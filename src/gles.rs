@@ -80,6 +80,8 @@ api!(GlApi {
     glViewport: fn(i32, i32, i32, i32);
     glScissor: fn(i32, i32, i32, i32);
     glEnable: fn(u32);
+    glDepthFunc: fn(u32);
+    glPolygonOffset: fn(f32, f32);
     glDisable: fn(u32);
     glBlendFunc: fn(u32, u32);
     glClearColor: fn(f32, f32, f32, f32);

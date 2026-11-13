@@ -146,6 +146,10 @@ pub enum Icon {
     /// Le dessin vectoriel : une courbe entre deux nœuds, et une poignée.
     Vecteur,
     Argile,
+    /// Un maillage : un hexagone partagé en triangles, ses sommets marqués.
+    Maille,
+    /// Une disquette : enregistrer.
+    Disquette,
 }
 
 /// Les deux couleurs de la rustine, quel que soit le thème.
@@ -263,7 +267,13 @@ impl Cx<'_> {
         self.label(r.cx() - w / 2.0, r.cy(), s, size, color);
     }
 
+    /// Découpe le dessin et les zones touchables à `c`, toujours dans le socle (le cadre
+    /// de la fenêtre qui se dessine, en fenêtres libres) ; rien : tout le socle.
     pub fn clip(&mut self, c: Option<Rect>) {
+        let c = match (c, self.ui.socle) {
+            (Some(c), Some(s)) => Some(c.intersect(&s)),
+            (c, s) => c.or(s),
+        };
         self.dl.set_clip(c);
         self.ui.set_clip(c);
     }
@@ -445,6 +455,34 @@ impl Cx<'_> {
                 self.dl.secteur(p(0.0, 1.0), 7.2 * u, 9.0 * u, 0.0, 2.0 * pi, 0.0, color);
                 self.dl.secteur(p(2.0, -1.0), 2.6 * u, 4.0 * u, pi * 0.65, pi * 1.75, 0.0, color);
                 self.dl.rrect(Rect::new(cx - 5.4 * u, cy + 2.2 * u, 2.4 * u, 2.4 * u), 1.2 * u, color);
+            }
+            Icon::Maille => {
+                let v: Vec<[f32; 2]> = (0..6).map(|i| {
+                    let a = std::f32::consts::PI / 3.0 * i as f32 + std::f32::consts::PI / 6.0;
+                    p(9.5 * a.cos(), 9.5 * a.sin())
+                }).collect();
+                let o = p(0.0, 0.0);
+                for i in 0..6 {
+                    self.dl.line(v[i], v[(i + 1) % 6], 1.6 * u, color);
+                    if i % 2 == 0 {
+                        self.dl.line(o, v[i], 1.6 * u, color);
+                    }
+                }
+                for q in v.iter().chain([&o]) {
+                    self.dl.rrect(Rect::new(q[0] - 2.0 * u, q[1] - 2.0 * u, 4.0 * u, 4.0 * u), 2.0 * u, color);
+                }
+            }
+            Icon::Disquette => {
+                // Le boîtier au coin coupé, le volet de métal en haut, l'étiquette en bas
+                let e = 1.8 * u;
+                let c = [p(-9.0, -9.0), p(5.5, -9.0), p(9.0, -5.5), p(9.0, 9.0), p(-9.0, 9.0)];
+                for i in 0..5 {
+                    self.dl.line(c[i], c[(i + 1) % 5], e, color);
+                }
+                let v = p(-4.5, -9.0);
+                self.dl.rrect(Rect::new(v[0], v[1], 8.5 * u, 6.0 * u), 1.0 * u, color);
+                let t = p(-5.5, 2.0);
+                self.dl.rrect(Rect::new(t[0], t[1], 11.0 * u, 7.0 * u), 1.0 * u, color);
             }
             Icon::Gomme => {
                 // La gomme en biais : son corps, et le bout qui efface, plus pâle

@@ -114,6 +114,11 @@ pub struct Ui {
     maintenant: f64,
     /// Un événement vient d'être traité : voir `a_redessiner`.
     agite: bool,
+    /// Le cadre de la fenêtre qui se dessine : tout découpage s'y restreint, et
+    /// `clip(None)` y revient (`Cx::clip`). Rien : tout l'écran.
+    pub socle: Option<Rect>,
+    /// Où les doigts se sont posés depuis la dernière image.
+    appuis: Vec<(f32, f32)>,
 }
 
 impl Ui {
@@ -136,6 +141,8 @@ impl Ui {
             reglages_gestes: ReglagesGestes::default(),
             maintenant: 0.0,
             agite: false,
+            socle: None,
+            appuis: Vec::new(),
         }
     }
 
@@ -157,6 +164,7 @@ impl Ui {
         self.maintenant = self.maintenant.max(t);
         match ev {
             Event::Down { id, x, y } => {
+                self.appuis.push((x, y));
                 let owner = match self.hit(x, y) {
                     None => Owner::Nobody,
                     Some(r) => match r.sense {
@@ -364,6 +372,11 @@ impl Ui {
         self.drags.get(&id).copied()
     }
 
+    /// Où les doigts se sont posés depuis la dernière image.
+    pub fn appuis(&self) -> &[(f32, f32)] {
+        &self.appuis
+    }
+
     /// Le nombre de doigts posés.
     pub fn doigts(&self) -> usize {
         self.pointers.len()
@@ -382,6 +395,8 @@ impl Ui {
         std::mem::swap(&mut self.regions, &mut self.next);
         self.next.clear();
         self.clip = None;
+        self.socle = None;
+        self.appuis.clear();
         self.clicks.clear();
         self.clic_pos.clear();
         self.double_taps.clear();
