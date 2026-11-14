@@ -57,9 +57,10 @@ pub fn px_par_mm(dp: f32) -> f32 {
     dpi.unwrap_or(160.0 * dp) / 25.4
 }
 
-/// Des cercles concentriques posés au premier contact, tous les `pas` pixels autour de
-/// lui : rend vrai chaque fois que le doigt en franchit un. Seul l'éloignement du contact
-/// se sent, pas le tour qu'on fait autour.
+/// Des cercles concentriques, tous les `pas` pixels autour d'un centre : rend vrai chaque
+/// fois que le doigt en franchit un. Seul l'éloignement du centre se sent, pas le tour
+/// qu'on fait autour. Le centre est le premier contact (`suivre`) ou se donne à chaque
+/// pas (`autour` : la base d'un stick, qui peut suivre le doigt).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stries {
     origine: Option<[f32; 2]>,
@@ -68,8 +69,18 @@ pub struct Stries {
 
 impl Stries {
     /// Le doigt est en `p` (ou levé : `None`), les cercles tous les `pas` pixels (0 :
-    /// aucun). Vrai si un cercle vient d'être franchi.
+    /// aucun) autour du premier contact. Vrai si un cercle vient d'être franchi.
     pub fn suivre(&mut self, p: Option<[f32; 2]>, pas: f32) -> bool {
+        let centre = match (p, self.origine) {
+            (Some(p), None) => p,
+            (_, Some(o)) => o,
+            (None, None) => [0.0; 2],
+        };
+        self.autour(p, centre, pas)
+    }
+
+    /// Comme `suivre`, les cercles autour de `centre`. Au contact, pas de strie.
+    pub fn autour(&mut self, p: Option<[f32; 2]>, centre: [f32; 2], pas: f32) -> bool {
         let Some(p) = p else {
             self.origine = None;
             return false;
@@ -77,12 +88,15 @@ impl Stries {
         if pas <= 0.0 {
             return false;
         }
-        let Some(o) = self.origine else {
-            self.origine = Some(p);
-            self.cercle = 0;
+        // Un rien de marge : un doigt tenu à la butée, à distance fixe de la base, ne
+        // fait pas trembler l'arrondi sur un cercle
+        let cercle = ((p[0] - centre[0]).hypot(p[1] - centre[1]) / pas + 1e-3).floor() as i32;
+        if self.origine.is_none() {
+            self.origine = Some(centre);
+            self.cercle = cercle;
             return false;
-        };
-        let cercle = ((p[0] - o[0]).hypot(p[1] - o[1]) / pas).floor() as i32;
+        }
+        self.origine = Some(centre);
         let franchi = cercle != self.cercle;
         self.cercle = cercle;
         franchi
@@ -115,6 +129,18 @@ mod tests {
         assert!(!s.suivre(Some([306.0, 300.0]), 10.0));
         // Sans pas, jamais
         assert!(!s.suivre(Some([400.0, 300.0]), 0.0));
+    }
+
+    #[test]
+    fn les_cercles_suivent_leur_centre() {
+        let mut s = Stries::default();
+        assert!(!s.autour(Some([100.0, 100.0]), [100.0, 100.0], 10.0));
+        assert!(s.autour(Some([125.0, 100.0]), [100.0, 100.0], 10.0));
+        // Le centre suit le doigt à distance fixe : rien
+        assert!(!s.autour(Some([145.0, 100.0]), [120.0, 100.0], 10.0));
+        assert!(!s.autour(Some([145.0, 130.0]), [145.0, 105.0], 10.0));
+        // En revenant vers le centre : les cercles se refranchissent
+        assert!(s.autour(Some([145.0, 110.0]), [145.0, 105.0], 10.0));
     }
 
     #[test]

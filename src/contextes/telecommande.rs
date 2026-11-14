@@ -11,7 +11,7 @@
 //!   - **Manette** : deux surfaces à stick flottant (le contact pose le stick au repos,
 //!     comme les commandes à l'écran de WhiteRoom), la croix, A B X Y, L1 R1, les
 //!     gâchettes, Select et Start, à plusieurs doigts. Sous le doigt, des stries
-//!     en cercles autour du contact (`vibreur::Stries`, 1 mm par défaut) : chacune franchie fait vibrer l'appareil
+//!     en cercles autour de la base du stick, qui les emporte (`vibreur::Stries`, 1 mm par défaut) : chacune franchie fait vibrer l'appareil
 //!     aussi brièvement qu'il le peut, une rugosité qui dit au pouce où il va. Flow s'en sert dans la 3D des Lieux ; WhiteRoom la
 //!     voit comme une manette de jeu (n'y sont alors proposés que Manette et Délier).
 //!   La ligne du haut dit l'aller-retour mesuré (`telecommande::Latence`).
@@ -64,7 +64,7 @@ const COURSE_MM: f32 = 9.0;
 const STRIES: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 3.0, 0.0];
 
 /// Un stick flottant sur une surface : le doigt qui le tient, la base posée au contact,
-/// où est le doigt, et les stries sous lui.
+/// où est le doigt, et les stries autour de la base.
 #[derive(Clone, Copy, Debug, Default)]
 struct StickFlottant {
     doigt: Option<i32>,
@@ -96,7 +96,8 @@ impl StickFlottant {
         }
         self.base = Some(b);
         self.pos = Some(p);
-        let tic = self.stries.suivre(Some(p), pas);
+        // Les cercles autour de la base : au-delà de la course, ils la suivent
+        let tic = self.stries.autour(Some(p), b, pas);
         ([((p[0] - b[0]) / r).clamp(-1.0, 1.0), ((p[1] - b[1]) / r).clamp(-1.0, 1.0)], tic)
     }
 }
