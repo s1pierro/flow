@@ -83,6 +83,9 @@ fn main() {
         Shot { name: "lieux", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-loin", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-portrait", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-plan", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-plan-paysage", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-ordre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-accueil", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-3d", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-3d-pres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -326,12 +329,18 @@ fn main() {
             let vue = match s.name { "lieux-loin" => "0 0 0.05", "lieux-portrait" => "-300 -100 1.6", _ => "-200 0 0.9" };
             if s.name == "lieux-accueil" {
                 app.ouvrir_espace("fenetres = F1:lieux\n");
+            } else if s.name.starts_with("lieux-plan") {
+                // Le plan sur Rouen (FLOW_POSITION : ailleurs), les tuiles d'OpenFreeMap
+                let pos = std::env::var("FLOW_POSITION").unwrap_or_else(|_| "49.4431, 1.0993".into());
+                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\nposition = {pos}\nplan = oui\n"));
             } else {
                 // FLOW_LIEU : un autre lieu
                 let doc = std::env::var("FLOW_LIEU").unwrap_or_else(|_| "/sdcard/bang/lieux/les-andelys.reel".into());
                 // En 3D : lacet, tangage, distance, cible
                 let vue3d = match s.name { "lieux-3d" => "vue3d = 0.5 0.45 4000 0 0 0\n", "lieux-3d-pres" => "vue3d = 2.6 0.22 700 -150 0 -50\n", "lieux-3d-portrait" => "vue3d = -0.6 0.35 2500 0 0 0\n", _ => "" };
-                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}outil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
+                // lieux-ordre : les bois au-dessus de tout, les voies de bus au-dessus des voies
+                let ordre = if s.name == "lieux-ordre" { "ordre = 2 3 4 5 10 25 24 23 22 21 20 26 30 40 1\n" } else { "" };
+                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}{ordre}outil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
             }
         }
         if s.name == "telecommande-manette" {
@@ -479,7 +488,8 @@ fn main() {
             ui.end_frame();
             if s.name.starts_with("lieux") {
                 // Laisse la lecture et le dessin des tuiles finir
-                std::thread::sleep(std::time::Duration::from_millis(if i < 3 { 600 } else { 40 }));
+                let long = if s.name.starts_with("lieux-plan") { 2500 } else { 600 };
+                std::thread::sleep(std::time::Duration::from_millis(if i < 3 { long } else { 40 }));
             }
             if s.name.starts_with("images") {
                 // Laisse le décodage finir

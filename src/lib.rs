@@ -30,6 +30,7 @@ pub mod mixage;
 pub mod operations;
 pub mod orchestre;
 pub mod paquets;
+pub mod plan;
 pub mod parametres;
 pub mod magneto;
 pub mod radio;

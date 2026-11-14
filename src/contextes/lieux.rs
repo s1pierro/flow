@@ -3,7 +3,9 @@
 //! - **Sans lieu ouvert** : la liste des lieux (`Flow/lieux/`), et la génération d'un
 //!   nouveau : un nom, une position (« latitude, longitude »), le pas de la grille, l'emprise
 //!   (largeur × longueur en km, jusqu'à la carte entière de 20 km), les
-//!   toits mesurés au LiDAR ou non. Flow télécharge lui-même (le relief et le LiDAR de
+//!   toits mesurés au LiDAR ou non. « Choisir sur la carte » ouvre un plan minimaliste
+//!   (`crate::plan`, tuiles d'OpenFreeMap) avec le cadre de l'emprise au centre : on y
+//!   glisse la carte, on cherche un nom (Nominatim), et le centre devient la position. Flow télécharge lui-même (le relief et le LiDAR de
 //!   l'IGN, OpenStreetMap par Overpass) et suit l'avancement ; on peut arrêter, et
 //!   relancer reprend ce qui est déjà téléchargé (`<lieu>.reel.cache/`). Un lieu
 //!   vierge (plat, sans rien) se crée aussi.
@@ -56,6 +58,7 @@ pub const GENRE: Genre = Genre { cle: CLE, nom: "Lieux", legende: "Générer, ex
 const LIEUX: Id = id("lieux");
 const NOM: Id = id("lieux/nom");
 const POSITION: Id = id("lieux/position");
+const RECHERCHE: Id = id("lieux/recherche");
 /// Le dossier des lieux, dans celui de Flow.
 pub const DOSSIER: &str = "lieux";
 const HISTORIQUE: usize = 60;
@@ -70,7 +73,7 @@ const SOL: usize = 5;
 
 const GENRES_BATI: [&str; 5] = ["Maison", "Immeuble", "Industriel", "Édifice", "Annexe"];
 const FORMES: [&str; 4] = ["Plat", "Deux pans", "Croupe", "Appentis"];
-const GENRES_VOIE: [&str; 6] = ["Grande route", "Route", "Service", "Piétonne", "Chemin", "Sentier"];
+const GENRES_VOIE: [&str; sage_reel::GENRES as usize] = sage_reel::NOMS_GENRES;
 const CLASSES: [&str; 6] = ["Rien", "Bois", "Prés", "Champs", "Habité", "Zones"];
 const PINCEAUX: [&str; 4] = ["Monter", "Creuser", "Lisser", "Aplanir"];
 
@@ -190,6 +193,31 @@ pub struct Lieux {
     trois_d: Option<Relief3d>,
     camera3d: Option<Camera>,
     orbite: Option<(f32, f32)>,
+    /// Le plan où choisir la zone à générer, quand il est ouvert ; la recherche d'un
+    /// nom (Nominatim), en cours ou faite.
+    plan: Option<crate::plan::Plan>,
+    recherche: Edition,
+    cherche: Option<JoinHandle<Result<Vec<(String, f64, f64)>, String>>>,
+    resultats: Vec<(String, f64, f64)>,
+    /// Le plan à rouvrir (relu de l'espace) au premier dessin.
+    plan_a_ouvrir: bool,
+    /// L'ordre de dessin des couches de la carte, et la couche choisie pour le changer.
+    ordre: Vec<crate::carte::Couche>,
+    couche: Option<crate::carte::Couche>,
+}
+
+/// Cherche un lieu par son nom (Nominatim, en France : le relief vient de l'IGN) :
+/// (nom complet, latitude, longitude).
+fn chercher(texte: &str, cache: &Path) -> Result<Vec<(String, f64, f64)>, String> {
+    let url = format!("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&countrycodes=fr&accept-language=fr&q={}", generer::encoder(texte));
+    let f = cache.join("recherche.json");
+    let _ = std::fs::create_dir_all(cache);
+    ReseauFlow.telecharger(&url, None, &f)?;
+    let t = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&f);
+    let j = sage_reel::json::lire(&t).ok_or("réponse illisible")?;
+    let num = |v: Option<&sage_reel::json::J>| v.and_then(|v| v.txt().and_then(|t| t.parse::<f64>().ok()).or_else(|| v.num()));
+    Ok(j.liste().unwrap_or(&[]).iter().filter_map(|e| Some((e.get("display_name")?.txt()?.to_string(), num(e.get("lat"))?, num(e.get("lon"))?))).collect())
 }
 
 impl Default for Lieux {
@@ -231,6 +259,13 @@ impl Default for Lieux {
             trois_d: None,
             camera3d: None,
             orbite: None,
+            plan: None,
+            recherche: Edition::default(),
+            cherche: None,
+            resultats: Vec::new(),
+            plan_a_ouvrir: false,
+            ordre: crate::carte::ordre_par_defaut(),
+            couche: None,
         }
     }
 }
@@ -248,6 +283,14 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         }
     }
     l.outil = (e.nombre("outil").unwrap_or(0.0) as usize).min(OUTILS.len() - 1);
+    // La position d'un lieu à générer ; le plan ouvert dessus
+    if let Some(p) = e.texte("position") {
+        l.position = Edition::new(p);
+    }
+    l.plan_a_ouvrir = e.texte("plan") == Some("oui");
+    if let Some(o) = e.texte("ordre") {
+        l.ordre = crate::carte::ordre_lu(o);
+    }
     Box::new(l)
 }
 
@@ -412,7 +455,15 @@ impl Lieux {
 
     /// Ouvre un lieu tout prêt (lu, généré, vierge).
     fn ouvrir_lieu(&mut self, lieu: Lieu, chemin: Option<PathBuf>, modifie: bool) {
-        self.carte = Some(Carte::new(lieu));
+        // Un autre ordre de dessin : les tuiles déjà parties se refont
+        let mut carte = Carte::new(lieu);
+        if self.ordre != crate::carte::ordre_par_defaut() {
+            if let Ok(mut d) = carte.donnees.write() {
+                d.ordre = self.ordre.clone();
+            }
+            carte.tout_retoucher();
+        }
+        self.carte = Some(carte);
         self.trois_d = None;
         if self.chemin != chemin {
             self.vue = None;
@@ -716,7 +767,7 @@ impl Lieux {
         }
         if let Some((pont, k)) = Lieux::voie_pres(d, x, z, 6.0) {
             let r = if pont { &l.ponts[k] } else { &l.routes[k] };
-            v.push(format!("{}{} · {:.1} m de large", GENRES_VOIE[(r.genre as usize).min(5)], if pont { " (pont)" } else { "" }, r.largeur).replace('.', ","));
+            v.push(format!("{}{} · {:.1} m de large", GENRES_VOIE[(r.genre as usize).min(GENRES_VOIE.len() - 1)], if pont { " (pont)" } else { "" }, r.largeur).replace('.', ","));
         }
         v
     }
@@ -1261,6 +1312,35 @@ impl Lieux {
                     cx.paragraph(&mut b, &format!("{} × {} points de {} m · eau à {:.1} m", l.grille.nx, l.grille.nz, l.pas, l.niveau).replace('.', ","));
                     cx.paragraph(&mut b, &format!("{} bâtiments, {} routes, {} ponts", l.batiments.len(), l.routes.len(), l.ponts.len()));
                 }
+                // L'ordre de dessin, du dessus au dessous ; la 3D, drapée des mêmes
+                // tuiles, le suit
+                cx.section(&mut b, "Ordre de dessin");
+                cx.paragraph(&mut b, "Du dessus au dessous. Touchez une couche, puis montez-la ou descendez-la.");
+                let avant = self.ordre.clone();
+                for (i, &k) in avant.iter().enumerate().rev() {
+                    let c = crate::carte::couleur_couche(k).map(|v| (v * 255.0) as u8);
+                    if cx.row(&mut b, sub_id(base, 600 + i), crate::carte::nom_couche(k), Some([c[0], c[1], c[2], 255]), self.couche == Some(k)) {
+                        self.couche = if self.couche == Some(k) { None } else { Some(k) };
+                    }
+                }
+                let pos = self.couche.and_then(|k| self.ordre.iter().position(|&c| c == k));
+                if let Some(p) = pos {
+                    if p + 1 < self.ordre.len() && cx.button(&mut b, sub_id(base, 640), "Monter") {
+                        self.ordre.swap(p, p + 1);
+                    }
+                    if p > 0 && cx.button(&mut b, sub_id(base, 641), "Descendre") {
+                        self.ordre.swap(p, p - 1);
+                    }
+                }
+                if self.ordre != crate::carte::ordre_par_defaut() && cx.button(&mut b, sub_id(base, 642), "Ordre par défaut") {
+                    self.ordre = crate::carte::ordre_par_defaut();
+                }
+                if self.ordre != avant {
+                    if let Ok(mut dn) = carte.donnees.write() {
+                        dn.ordre = self.ordre.clone();
+                    }
+                    carte.tout_retoucher();
+                }
                 cx.section(&mut b, "Sources");
                 cx.paragraph(&mut b, "Relief © IGN · eau, routes, bâtiments, sol © les contributeurs OpenStreetMap (ODbL). Un lieu généré en est dérivé : ne le publiez pas.");
             }
@@ -1545,6 +1625,10 @@ impl Lieux {
             cx.section(&mut b, "Nouveau lieu");
             clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom du lieu", &mut self.nom, &mut c.clavier);
             clavier::champ(cx, &mut b, sub_id(POSITION, k), "Position : latitude, longitude", &mut self.position, &mut c.clavier);
+            if cx.button(&mut b, sub_id(base, 716), "Choisir sur la carte") {
+                c.clavier.fermer();
+                self.ouvrir_plan(c);
+            }
             let mut pas = self.pas;
             cx.slider(&mut b, sub_id(base, 710), "Pas de la grille", &format!("{pas:.0} m"), &mut pas, 2.0, 16.0);
             self.pas = pas.round();
@@ -1564,6 +1648,111 @@ impl Lieux {
                 c.clavier.fermer();
                 self.creer_vierge(c);
             }
+        }
+        cx.body_end(b, &mut c.scrolls);
+    }
+
+    // ----- Le plan où choisir la zone
+
+    fn cache_plan(c: &Commun) -> PathBuf {
+        Lieux::dossier(c).unwrap_or_else(std::env::temp_dir).join(".plan")
+    }
+
+    /// Ouvre le plan sur la position donnée (la zone tout autour), sinon sur la France.
+    fn ouvrir_plan(&mut self, c: &Commun) {
+        let (lat, lon, large) = match lire_position(&self.position.texte) {
+            Some((lat, lon)) => (lat, lon, self.largeur.max(self.longueur) as f64 * 2500.0),
+            None => (46.6, 2.4, 1.1e6),
+        };
+        self.plan = Some(crate::plan::Plan::new(lat, lon, large, Lieux::cache_plan(c), ReseauFlow));
+        self.resultats.clear();
+    }
+
+    fn lancer_recherche(&mut self, c: &Commun) {
+        let t = self.recherche.texte.trim().to_string();
+        if t.is_empty() || self.cherche.is_some() {
+            return;
+        }
+        let cache = Lieux::cache_plan(c);
+        self.message = None;
+        self.cherche = Some(std::thread::spawn(move || chercher(&t, &cache)));
+    }
+
+    /// Le plan, et à côté (en paysage) ou dessous (en portrait) de quoi chercher, régler
+    /// l'emprise et choisir.
+    fn dessiner_plan(&mut self, cx: &mut Cx, c: &mut Commun, r: Rect, base: Id, k: usize) {
+        let d = cx.dp;
+        let col = cx.couleurs();
+        // La recherche finie : un seul résultat y va tout de suite
+        if self.cherche.as_ref().is_some_and(|h| h.is_finished()) {
+            match self.cherche.take().map(|h| h.join()) {
+                Some(Ok(Ok(v))) => {
+                    if v.is_empty() {
+                        self.message = Some(("Aucun lieu de ce nom en France.".into(), true));
+                    }
+                    if let (Some((_, lat, lon)), true) = (v.first(), v.len() == 1) {
+                        if let Some(p) = &mut self.plan {
+                            p.aller(*lat, *lon, self.largeur.max(self.longueur) as f64 * 2500.0);
+                        }
+                    }
+                    self.resultats = v;
+                }
+                Some(Ok(Err(e))) => self.message = Some((format!("Recherche impossible : {e}"), true)),
+                _ => self.message = Some(("Recherche interrompue".into(), true)),
+            }
+        }
+        let (zone, panneau) = if r.w > r.h * 1.1 {
+            let w = (340.0 * d).min(r.w * 0.42);
+            (Rect::new(r.x, r.y, r.w - w, r.h), Rect::new(r.right() - w, r.y, w, r.h))
+        } else {
+            let h = (r.h * 0.42).max(200.0 * d).min(r.h * 0.6);
+            (Rect::new(r.x, r.y, r.w, r.h - h), Rect::new(r.x, r.bottom() - h, r.w, h))
+        };
+        let emprise = if self.grille().est_entiere(self.pas as f64) { (20.0, 20.0) } else { (self.largeur, self.longueur) };
+        if let Some(p) = &mut self.plan {
+            for g in cx.ui.gestes(sub_id(base, 2), zone) {
+                p.recevoir(g, zone);
+            }
+            p.dessiner(cx, zone, emprise);
+        }
+        cx.dl.rrect(panneau, 0.0, col.fond);
+        let mut b = cx.body(sub_id(base, 5), panneau, &c.scrolls);
+        cx.section(&mut b, "Choisir la zone");
+        if let Some((m, _)) = &self.message {
+            let m = m.clone();
+            cx.paragraph(&mut b, &m);
+        }
+        clavier::champ(cx, &mut b, sub_id(RECHERCHE, k), "Chercher une ville, une adresse", &mut self.recherche, &mut c.clavier);
+        let attente = self.cherche.is_some();
+        if cx.button(&mut b, sub_id(base, 720), if attente { "Recherche…" } else { "Chercher" }) && !attente {
+            c.clavier.fermer();
+            self.lancer_recherche(c);
+        }
+        let mut aller = None;
+        for (i, (nom, lat, lon)) in self.resultats.iter().enumerate().filter(|_| self.resultats.len() > 1) {
+            if cx.button(&mut b, sub_id(base, 730 + i), nom) {
+                aller = Some((*lat, *lon));
+            }
+        }
+        if let (Some((lat, lon)), Some(p)) = (aller, &mut self.plan) {
+            p.aller(lat, lon, self.largeur.max(self.longueur) as f64 * 2500.0);
+            self.resultats.clear();
+        }
+        let (mut lx, mut lz) = (self.largeur, self.longueur);
+        cx.slider(&mut b, sub_id(base, 724), "Largeur (est-ouest)", &format!("{lx:.1} km").replace('.', ","), &mut lx, 1.0, 20.0);
+        cx.slider(&mut b, sub_id(base, 725), "Longueur (nord-sud)", &format!("{lz:.1} km").replace('.', ","), &mut lz, 1.0, 20.0);
+        (self.largeur, self.longueur) = ((lx * 2.0).round() / 2.0, (lz * 2.0).round() / 2.0);
+        let (lat, lon) = self.plan.as_ref().map_or((0.0, 0.0), |p| p.position());
+        let centre = format!("{lat:.5} ; {lon:.5}").replace('.', ",");
+        cx.paragraph(&mut b, &format!("Centre : {centre}. Glissez la carte sous le cadre ; deux doigts zooment, un toucher y centre."));
+        if cx.button(&mut b, sub_id(base, 721), "Choisir cette zone") {
+            self.position = Edition::new(&format!("{lat:.5}, {lon:.5}"));
+            self.plan = None;
+            self.message = None;
+        }
+        if cx.button(&mut b, sub_id(base, 722), "Annuler") {
+            self.plan = None;
+            self.message = None;
         }
         cx.body_end(b, &mut c.scrolls);
     }
@@ -1675,10 +1864,19 @@ impl Contexte for Lieux {
             }
         }
         e.mettre("outil", self.outil);
+        if !self.position.texte.trim().is_empty() {
+            e.mettre("position", self.position.texte.trim());
+        }
+        if self.plan.is_some() {
+            e.mettre("plan", "oui");
+        }
+        if self.ordre != crate::carte::ordre_par_defaut() {
+            e.mettre("ordre", self.ordre.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
+        }
     }
 
     fn anime(&self, _c: &Commun) -> bool {
-        self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some()
+        self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
@@ -1687,11 +1885,16 @@ impl Contexte for Lieux {
             &mut self.nom
         } else if cible == sub_id(POSITION, k) {
             &mut self.position
+        } else if cible == sub_id(RECHERCHE, k) {
+            &mut self.recherche
         } else {
             return false;
         };
         if ed.appliquer(frappe) {
             c.clavier.fermer();
+            if cible == sub_id(RECHERCHE, k) {
+                self.lancer_recherche(c);
+            }
         }
         self.message = None;
         true
@@ -1710,6 +1913,9 @@ impl Contexte for Lieux {
             }
         }
         self.suivre();
+        if std::mem::take(&mut self.plan_a_ouvrir) && self.carte.is_none() && self.chemin.is_none() {
+            self.ouvrir_plan(c);
+        }
         if cx.ui.doigts() == 0 {
             self.ouverte = false;
         }
@@ -1735,6 +1941,8 @@ impl Contexte for Lieux {
                 self.dessiner_carte(cx, zone, base);
             }
             self.panneau(cx, c, panneau, base);
+        } else if self.plan.is_some() {
+            self.dessiner_plan(cx, c, r, base, k);
         } else {
             self.accueil(cx, c, r, base, k);
         }

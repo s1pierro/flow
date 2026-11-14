@@ -12,7 +12,7 @@
 
 use crate::draw::{Image, Rect};
 use crate::widgets::Cx;
-use sage_reel::{origine, Batiment, Lieu, Route, BOIS, CHAMP, CHEMIN, GRANDE, HABITE, PIETONNE, PRE, ROUTE, SENTIER, SERVICE, ZONE};
+use sage_reel::{origine, Batiment, Lieu, Route, BOIS, BUS, CHAMP, CHEMIN, CLASSES, GENRES, GRANDE, HABITE, PIETONNE, PRE, ROUTE, SENTIER, SERVICE, ZONE};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -32,6 +32,8 @@ pub type Cle = (u8, i32, i32);
 /// Le lieu et ses index : les bâtiments, les routes et les ponts rangés par cellule.
 pub struct Donnees {
     pub lieu: Lieu,
+    /// L'ordre où les couches se peignent, la première dessous (`ordre_par_defaut`).
+    pub ordre: Vec<Couche>,
     bati: HashMap<(i32, i32), Vec<u32>>,
     routes: HashMap<(i32, i32), Vec<u32>>,
     ponts: HashMap<(i32, i32), Vec<u32>>,
@@ -77,7 +79,7 @@ fn dans(index: &HashMap<(i32, i32), Vec<u32>>, b: [f32; 4], tous: usize) -> Vec<
 
 impl Donnees {
     pub fn new(lieu: Lieu) -> Donnees {
-        let mut d = Donnees { lieu, bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
+        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
         d.reindexer();
         d
     }
@@ -138,6 +140,71 @@ pub fn couleur_sol(classe: u8) -> [f32; 3] {
 
 pub const EAU: [f32; 3] = [0.62, 0.78, 0.92];
 
+/// Une couche de la carte : une occupation du sol (`BOIS` à `ZONE`), l'eau, les voies
+/// d'un genre (`COUCHE_VOIE` + genre), les ponts, les bâtiments. Le sol nu est toujours
+/// le fond.
+pub type Couche = u8;
+pub const COUCHE_EAU: Couche = 10;
+pub const COUCHE_VOIE: Couche = 20;
+pub const COUCHE_PONTS: Couche = 30;
+pub const COUCHE_BATI: Couche = 40;
+
+fn est_voie(c: Couche) -> bool {
+    (COUCHE_VOIE..COUCHE_VOIE + GENRES).contains(&c)
+}
+
+/// L'ordre de toujours, du dessous au dessus : le sol, l'eau, les petites voies sous
+/// les grandes, les ponts, les bâtiments.
+pub fn ordre_par_defaut() -> Vec<Couche> {
+    let mut v = vec![BOIS, PRE, CHAMP, HABITE, ZONE, COUCHE_EAU];
+    v.extend([SENTIER, CHEMIN, PIETONNE, SERVICE, ROUTE, BUS, GRANDE].map(|g| COUCHE_VOIE + g));
+    v.extend([COUCHE_PONTS, COUCHE_BATI]);
+    v
+}
+
+/// Un ordre écrit (les numéros des couches, séparés d'espaces) : les couches connues,
+/// sans doublon, puis celles qui manquent dans l'ordre par défaut.
+pub fn ordre_lu(t: &str) -> Vec<Couche> {
+    let defaut = ordre_par_defaut();
+    let mut v: Vec<Couche> = Vec::new();
+    for c in t.split_whitespace().filter_map(|x| x.parse::<Couche>().ok()) {
+        if defaut.contains(&c) && !v.contains(&c) {
+            v.push(c);
+        }
+    }
+    v.extend(defaut.into_iter().filter(|c| !v.contains(c)).collect::<Vec<_>>());
+    v
+}
+
+/// Le nom d'une couche.
+pub fn nom_couche(c: Couche) -> &'static str {
+    match c {
+        BOIS => "Bois",
+        PRE => "Prés",
+        CHAMP => "Champs",
+        HABITE => "Habité",
+        ZONE => "Zones",
+        COUCHE_EAU => "Eau",
+        COUCHE_PONTS => "Ponts",
+        COUCHE_BATI => "Bâtiments",
+        _ => ["Grandes routes", "Routes", "Voies de service", "Voies piétonnes", "Chemins", "Sentiers", "Voies de bus"].get((c.wrapping_sub(COUCHE_VOIE)) as usize).copied().unwrap_or("?"),
+    }
+}
+
+/// La couleur d'une couche, pour sa pastille.
+pub fn couleur_couche(c: Couche) -> [f32; 3] {
+    match c {
+        COUCHE_EAU => EAU,
+        COUCHE_PONTS => [0.25, 0.25, 0.28],
+        COUCHE_BATI => couleur_bati(1),
+        _ if est_voie(c) => {
+            let (int, bord) = couleur_route(c - COUCHE_VOIE, false);
+            if int == [1.0, 1.0, 1.0] { bord } else { int }
+        }
+        _ => couleur_sol(c),
+    }
+}
+
 /// L'intérieur et le bord d'une voie de ce genre ; les ponts ont un bord sombre.
 pub fn couleur_route(genre: u8, pont: bool) -> ([f32; 3], [f32; 3]) {
     let int = match genre {
@@ -145,9 +212,10 @@ pub fn couleur_route(genre: u8, pont: bool) -> ([f32; 3], [f32; 3]) {
         ROUTE | SERVICE => [1.0, 1.0, 1.0],
         PIETONNE => [0.95, 0.93, 0.88],
         CHEMIN => [0.86, 0.74, 0.56],
+        BUS => [0.95, 0.66, 0.62],
         _ => [0.80, 0.64, 0.46],
     };
-    let bord = if pont { [0.25, 0.25, 0.28] } else if genre == GRANDE { [0.78, 0.55, 0.25] } else { [0.62, 0.60, 0.58] };
+    let bord = if pont { [0.25, 0.25, 0.28] } else if genre == GRANDE { [0.78, 0.55, 0.25] } else if genre == BUS { [0.70, 0.30, 0.28] } else { [0.62, 0.60, 0.58] };
     (int, bord)
 }
 
@@ -214,6 +282,11 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
         let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         [v[0] / n, v[1] / n, v[2] / n]
     };
+    // Le sol, par pixel : l'ombrage, le poids de chaque occupation (les classes des
+    // quatre points voisins, mêlées : pas d'escalier aux bords) et l'eau
+    let mut ombre = vec![1f32; n * n];
+    let mut poids = vec![[0f32; CLASSES as usize]; n * n];
+    let mut eau: Vec<Option<[f32; 3]>> = vec![None; n * n];
     for y in 0..n {
         let z = b[1] as f64 + (y as f64 + 0.5) * m as f64;
         for x in 0..n {
@@ -222,11 +295,7 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
             if l.eau(xx, z) >= 0.5 {
                 // Plus sombre au fond
                 let p = ((l.niveau - h[(y + 1) * (n + 2) + x + 1]) / 8.0).clamp(0.0, 1.0);
-                let c = [EAU[0] - 0.12 * p, EAU[1] - 0.10 * p, EAU[2] - 0.04 * p];
-                for k in 0..3 {
-                    px[i * 4 + k] = (c[k] * 255.0) as u8;
-                }
-                continue;
+                eau[i] = Some([EAU[0] - 0.12 * p, EAU[1] - 0.10 * p, EAU[2] - 0.04 * p]);
             }
             let hc = |dx: i32, dy: i32| h[((y as i32 + 1 + dy) as usize) * (n + 2) + (x as i32 + 1 + dx) as usize];
             // De près, la pente se prend sur deux pas de la grille : le relief de l'IGN,
@@ -241,36 +310,101 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
             let (gx, gz) = (gx * exag, gz * exag);
             let nn = (gx * gx + 1.0 + gz * gz).sqrt();
             let s = ((-gx * lum[0] + lum[1] - gz * lum[2]) / nn / lum[1]).clamp(0.0, 1.35);
-            // Les classes des quatre points voisins, mêlées : pas d'escalier aux bords
-            let c = if m < (l.pas * 2.0) as f32 {
-                l.occupation(xx, z).iter().fold([0.0f32; 3], |a, &(k, w)| {
-                    let c = couleur_sol(k);
-                    [a[0] + c[0] * w as f32, a[1] + c[1] * w as f32, a[2] + c[2] * w as f32]
-                })
+            ombre[i] = 0.42 + 0.58 * s;
+            if m < (l.pas * 2.0) as f32 {
+                for (k, w) in l.occupation(xx, z) {
+                    poids[i][(k as usize).min(CLASSES as usize - 1)] += w as f32;
+                }
             } else {
-                couleur_sol(l.classe(xx, z))
-            };
-            let f = 0.42 + 0.58 * s;
-            for k in 0..3 {
-                px[i * 4 + k] = (c[k] * f * 255.0).round().clamp(0.0, 255.0) as u8;
+                poids[i][(l.classe(xx, z) as usize).min(CLASSES as usize - 1)] = 1.0;
             }
         }
     }
-    // En pixels de la tuile
+    // Le fond : le sol nu. Chaque occupation se pose ensuite à son tour, au prorata de
+    // son poids dans ce qui est déjà peint du sol (le mélange ne dépend pas de l'ordre)
+    let mut cumul: Vec<f32> = poids.iter().map(|p| p[0]).collect();
+    let nu = couleur_sol(0);
+    for i in 0..n * n {
+        for k in 0..3 {
+            px[i * 4 + k] = (nu[k] * ombre[i] * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    let ordre = &d.ordre;
+    let mut k = 0;
+    while k < ordre.len() {
+        let c = ordre[k];
+        // Les voies qui se suivent dans l'ordre : leurs bords d'abord, puis leurs
+        // intérieurs, couche par couche (les carrefours restent nets)
+        if est_voie(c) {
+            let fin = (k..ordre.len()).find(|&j| !est_voie(ordre[j])).unwrap_or(ordre.len());
+            let genres: Vec<u8> = ordre[k..fin].iter().map(|c| c - COUCHE_VOIE).collect();
+            peindre_voies(&mut px, d, b, m, false, &genres);
+            k = fin;
+            continue;
+        }
+        match c {
+            COUCHE_EAU => {
+                for (i, e) in eau.iter().enumerate() {
+                    if let Some(e) = e {
+                        for j in 0..3 {
+                            px[i * 4 + j] = (e[j] * 255.0) as u8;
+                        }
+                    }
+                }
+            }
+            COUCHE_PONTS => {
+                let genres: Vec<u8> = ordre.iter().filter(|c| est_voie(**c)).map(|c| c - COUCHE_VOIE).collect();
+                peindre_voies(&mut px, d, b, m, true, &genres);
+            }
+            COUCHE_BATI => peindre_bati(&mut px, d, b, m),
+            classe if classe < CLASSES => {
+                let cs = couleur_sol(classe);
+                for i in 0..n * n {
+                    let w = poids[i][classe as usize];
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    cumul[i] += w;
+                    let a = w / cumul[i];
+                    let f = ombre[i];
+                    melanger(&mut px, i, [cs[0] * f, cs[1] * f, cs[2] * f], a);
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    // Hors du lieu : transparent
+    let e = l.etendue();
+    for y in 0..n {
+        let z = b[1] as f64 + (y as f64 + 0.5) * m as f64;
+        for x in 0..n {
+            let xx = b[0] as f64 + (x as f64 + 0.5) * m as f64;
+            if xx < e[0] || xx > e[2] || z < e[1] || z > e[3] {
+                px[(y * n + x) * 4..(y * n + x) * 4 + 4].fill(0);
+            }
+        }
+    }
+    px
+}
+
+/// Peint les voies (ou les ponts) des genres donnés, dans leur ordre : tous les bords,
+/// puis les intérieurs.
+fn peindre_voies(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32, pont: bool, genres: &[u8]) {
+    let (l, n) = (&d.lieu, TUILE);
     let vers = |p: [f32; 2]| ((p[0] - b[0]) / m, (p[1] - b[1]) / m);
-    // Les voies : d'abord tous les bords, puis les intérieurs ; les ponts par-dessus
     let marge = [b[0] - 40.0, b[1] - 40.0, b[2] + 40.0, b[3] + 40.0];
-    for pont in [false, true] {
+    {
         let liste = if pont { &l.ponts } else { &l.routes };
         let choisies = d.routes_dans(marge, pont);
         for passe in 0..2 {
-            for &k in &choisies {
+            for &k in genres.iter().flat_map(|&g| choisies.iter().filter(move |&&k| liste[k as usize].genre == g)) {
                 let r = &liste[k as usize];
                 let large = r.largeur / m;
                 // Au loin, seules les grandes voies se voient
                 let min = match r.genre {
                     GRANDE => 1.4,
-                    ROUTE => 0.9,
+                    ROUTE | BUS => 0.9,
                     SERVICE | PIETONNE if m < 6.0 => 0.7,
                     CHEMIN | SENTIER if m < 4.0 => 0.6,
                     _ if pont => 1.2,
@@ -293,9 +427,9 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
                             let dd = (qx - a.0 - dx * t).hypot(qy - a.1 - dy * t);
                             let i = y as usize * n + x as usize;
                             if passe == 0 {
-                                melanger(&mut px, i, cb, demi + bord + 0.5 - dd);
+                                melanger(px, i, cb, demi + bord + 0.5 - dd);
                             } else {
-                                melanger(&mut px, i, int, demi + 0.5 - dd);
+                                melanger(px, i, int, demi + 0.5 - dd);
                             }
                         }
                     }
@@ -303,7 +437,12 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
             }
         }
     }
-    // Les bâtiments : remplis par lignes, bordés de près
+}
+
+/// Peint les bâtiments : remplis par lignes, bordés de près.
+fn peindre_bati(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
+    let (l, n) = (&d.lieu, TUILE);
+    let vers = |p: [f32; 2]| ((p[0] - b[0]) / m, (p[1] - b[1]) / m);
     for k in d.batiments_dans(b) {
         let bt = &l.batiments[k as usize];
         let c = couleur_bati(bt.genre);
@@ -317,7 +456,7 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
             let (x, y) = (((bb[0] + bb[2]) / 2.0) as i32, ((bb[1] + bb[3]) / 2.0) as i32);
             if (0..n as i32).contains(&x) && (0..n as i32).contains(&y) {
                 let a = ((bb[2] - bb[0]) * (bb[3] - bb[1])).sqrt().max(0.25);
-                melanger(&mut px, y as usize * n + x as usize, [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8], a);
+                melanger(px, y as usize * n + x as usize, [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8], a);
             }
             continue;
         }
@@ -342,7 +481,7 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
                 for x in ia.max(0)..=ib {
                     // Couverture horizontale aux bouts
                     let cov = ((x as f32 + 1.0).min(xb) - (x as f32).max(xa)).clamp(0.0, 1.0);
-                    melanger(&mut px, y as usize * n + x as usize, c, cov);
+                    melanger(px, y as usize * n + x as usize, c, cov);
                 }
             }
         }
@@ -356,24 +495,12 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
                     let t = s as f32 / pas as f32;
                     let (x, y) = ((p.0 + (q.0 - p.0) * t) as i32, (p.1 + (q.1 - p.1) * t) as i32);
                     if (0..n as i32).contains(&x) && (0..n as i32).contains(&y) {
-                        melanger(&mut px, y as usize * n + x as usize, sombre, 0.7);
+                        melanger(px, y as usize * n + x as usize, sombre, 0.7);
                     }
                 }
             }
         }
     }
-    // Hors du lieu : transparent
-    let e = l.etendue();
-    for y in 0..n {
-        let z = b[1] as f64 + (y as f64 + 0.5) * m as f64;
-        for x in 0..n {
-            let xx = b[0] as f64 + (x as f64 + 0.5) * m as f64;
-            if xx < e[0] || xx > e[2] || z < e[1] || z > e[3] {
-                px[(y * n + x) * 4..(y * n + x) * 4 + 4].fill(0);
-            }
-        }
-    }
-    px
 }
 
 /// La vue : le point du monde au centre de la zone, et les pixels par mètre.
@@ -702,6 +829,48 @@ mod tests {
         let xo = origine() as f32 + 64.0 * 5.0;
         let p = pixel(tuile(xo, 0.0), xo, 0.0);
         assert!(p[2] > p[0] && p[2] > 180, "{p:?}");
+    }
+
+    #[test]
+    fn l_ordre_des_couches_se_regle() {
+        // Une route et une voie de bus qui se croisent en (100, 50), dans les bois
+        let mut l = lieu();
+        l.routes.push(Route { genre: BUS, largeur: 8.0, points: vec![[100.0, -200.0, 50.0], [100.0, 300.0, 50.0]] });
+        let mut d = Donnees::new(l);
+        let (x0, _, c) = d.monde();
+        let t = c / 256.0;
+        let cle = (8u8, ((100.0 - x0) / t).floor() as i32, ((50.0 - x0) / t).floor() as i32);
+        let pixel = |d: &Donnees, x: f32, z: f32| {
+            let b = boite_tuile(d, cle);
+            let px = rendre(d, cle);
+            let m = (b[2] - b[0]) / TUILE as f32;
+            let i = ((z - b[1]) / m) as usize * TUILE + ((x - b[0]) / m) as usize;
+            [px[i * 4], px[i * 4 + 1], px[i * 4 + 2]]
+        };
+        let rvb = |c: [f32; 3]| c.map(|v| (v * 255.0) as u8);
+        // Par défaut, le bus passe sur la route
+        let bus = rvb(couleur_route(BUS, false).0);
+        assert_eq!(pixel(&d, 100.0, 50.0), bus);
+        assert_eq!(pixel(&d, 60.0, 50.0), [255, 255, 255]);
+        // La route au-dessus de tout : elle passe sur le bus
+        d.ordre = ordre_lu(&format!("{}", COUCHE_VOIE + BUS));
+        assert_eq!(d.ordre.last(), Some(&COUCHE_BATI));
+        let mut o = d.ordre.clone();
+        o.retain(|&c| c != COUCHE_VOIE + ROUTE);
+        o.push(COUCHE_VOIE + ROUTE);
+        d.ordre = o;
+        assert_eq!(pixel(&d, 100.0, 50.0), [255, 255, 255]);
+        // Les bois au-dessus des voies : ils les cachent
+        let mut o = ordre_par_defaut();
+        o.retain(|&c| c != BOIS);
+        o.push(BOIS);
+        d.ordre = o;
+        let p = pixel(&d, 60.0, 50.0);
+        assert!(p[1] > p[0] && p[1] > p[2], "{p:?}");
+        // Un ordre écrit de travers garde toutes les couches, une fois
+        let o = ordre_lu("40 40 999 x 10");
+        assert_eq!(o.len(), ordre_par_defaut().len());
+        assert_eq!(&o[..2], &[COUCHE_BATI, COUCHE_EAU]);
     }
 
     #[test]
