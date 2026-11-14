@@ -801,7 +801,7 @@ mod tests {
         for _ in 0..200 {
             ev.extend(evenements(1000.0, 800.0, 2.0));
             fr.extend(frappes());
-            if ev.len() >= 4 && !fr.is_empty() && clavier_distant() {
+            if ev.len() >= 4 && !fr.is_empty() && clavier_distant() && manette().is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));

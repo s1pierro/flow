@@ -134,6 +134,8 @@ pub struct Telecommande {
     /// Les deux sticks flottants, et l'écart de leurs stries (mm, 0 : aucune).
     sticks: [StickFlottant; 2],
     stries: f32,
+    /// La force des stries (`vibreur::NIVEAUX`).
+    force: u8,
 }
 
 fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
@@ -152,6 +154,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         manette_envoyee: None,
         demo: e.texte("demo") == Some("oui"),
         sticks: Default::default(),
+        force: e.texte("force").and_then(|v| v.parse().ok()).filter(|v: &u8| (*v as usize) < vibreur::NIVEAUX.len()).unwrap_or(2),
         stries: e.texte("stries").and_then(|v| v.parse().ok()).filter(|v: &f32| STRIES.contains(v)).unwrap_or(1.0),
         onglet: e.texte("onglet").and_then(|o| ONGLETS.iter().position(|n| *n == o)).filter(|&i| i != DELIER).unwrap_or(0),
     })
@@ -506,8 +509,8 @@ impl Telecommande {
         };
         let (case_stick_g, case_croix) = cases(gauche, false);
         let (case_abxy, case_stick_d) = cases(droite, true);
-        let bh = h.min((colonne.h - 2.0 * e) / 3.0);
-        let y0 = colonne.cy() - 1.5 * bh - e;
+        let bh = h.min((colonne.h - 3.0 * e) / 4.0);
+        let y0 = colonne.cy() - 2.0 * bh - 1.5 * e;
         let sel = Rect::new(colonne.x, y0, colonne.w, bh);
         let start = Rect::new(colonne.x, y0 + bh + e, colonne.w, bh);
         // L'écart des stries : chaque appui passe au suivant
@@ -516,12 +519,20 @@ impl Telecommande {
             let i = STRIES.iter().position(|v| *v == self.stries).unwrap_or(0);
             self.stries = STRIES[(i + 1) % STRIES.len()];
             if self.stries > 0.0 {
-                vibreur::tic(1.0);
+                vibreur::tic(self.force);
             }
         }
         cx.dl.rrect(rug, cx.theme.rayon(bh), col.puce);
         let t = if self.stries > 0.0 { format!("Stries {} mm", self.stries).replace('.', ",") } else { "Sans stries".into() };
         cx.centered(rug, &t, 13.0, col.accent);
+        // Leur force : chaque appui passe à la suivante, et la fait sentir
+        let fr = Rect::new(colonne.x, y0 + 3.0 * (bh + e), colonne.w, bh);
+        if cx.ui.click(sub_id(mb, 8), fr, None) {
+            self.force = (self.force + 1) % vibreur::NIVEAUX.len() as u8;
+            vibreur::tic(self.force);
+        }
+        cx.dl.rrect(fr, cx.theme.rayon(bh), col.puce);
+        cx.centered(fr, vibreur::NIVEAUX[self.force as usize], 13.0, col.accent);
         if touche(cx, sub_id(mb, 5), sel, "Select") {
             m.boutons |= bouton::SELECT;
         }
@@ -542,7 +553,7 @@ impl Telecommande {
             tic |= t;
         }
         if tic {
-            vibreur::tic(1.0);
+            vibreur::tic(self.force);
         }
 
         // La croix : une seule zone, la direction d'après le doigt (le pouce glisse
@@ -671,6 +682,7 @@ impl Contexte for Telecommande {
         }
         e.mettre("onglet", ONGLETS[self.onglet]);
         e.mettre("stries", self.stries);
+        e.mettre("force", self.force);
     }
 
     fn avancer(&mut self, _dt: f32, _c: &Commun) {

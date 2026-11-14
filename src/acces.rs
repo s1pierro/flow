@@ -430,8 +430,8 @@ pub fn verrous_wifi(pris: bool) -> Option<String> {
     appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "verrous", Some(if pris { "1" } else { "0" }))
 }
 
-/// Le vibreur de la télécommande (`fr.s1pierro.flow.Vibreur`) : `tic` (force de 0 à 1),
-/// `maniere`, `dpi` ; rien hors d'Android.
+/// Le vibreur de la télécommande (`fr.s1pierro.flow.Vibreur`) : `tic` (niveau de 0 à 3),
+/// `dpi` ; rien hors d'Android.
 pub fn vibreur(methode: &str, arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Vibreur", &CONTEXTE, methode, Some(arg))
 }

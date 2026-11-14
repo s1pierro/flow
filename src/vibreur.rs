@@ -8,21 +8,24 @@
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 
-static FILE: OnceLock<Mutex<Sender<f32>>> = OnceLock::new();
+static FILE: OnceLock<Mutex<Sender<u8>>> = OnceLock::new();
 static DPI: OnceLock<Option<f32>> = OnceLock::new();
 static ERREUR: Mutex<Option<String>> = Mutex::new(None);
 
-/// Une strie, de force `force` (0 à 1).
-pub fn tic(force: f32) {
+/// Les niveaux de force d'une strie, du plus léger au plus fort.
+pub const NIVEAUX: [&str; 4] = ["Légère", "Moyenne", "Forte", "Maximale"];
+
+/// Une strie, de niveau `niveau` (0 à 3, voir `NIVEAUX`).
+pub fn tic(niveau: u8) {
     let f = FILE.get_or_init(|| {
-        let (tx, rx) = channel::<f32>();
+        let (tx, rx) = channel::<u8>();
         std::thread::spawn(move || {
-            while let Ok(mut force) = rx.recv() {
+            while let Ok(mut niveau) = rx.recv() {
                 // Les demandes arrivées entre-temps se fondent en une
-                while let Ok(f) = rx.try_recv() {
-                    force = force.max(f);
+                while let Ok(n) = rx.try_recv() {
+                    niveau = niveau.max(n);
                 }
-                let e = crate::acces::vibreur("tic", &format!("{force:.2}")).filter(|e| !e.is_empty());
+                let e = crate::acces::vibreur("tic", &niveau.to_string()).filter(|e| !e.is_empty());
                 if let Ok(mut x) = ERREUR.lock() {
                     *x = e;
                 }
@@ -31,7 +34,7 @@ pub fn tic(force: f32) {
         Mutex::new(tx)
     });
     if let Ok(t) = f.lock() {
-        let _ = t.send(force);
+        let _ = t.send(niveau);
     }
 }
 

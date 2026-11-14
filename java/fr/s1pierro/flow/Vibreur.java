@@ -13,40 +13,52 @@ import android.util.DisplayMetrics;
  */
 public class Vibreur {
     private static Vibrator vibreur;
-    /** 0 : primitive TICK (Android 11) ; 1 : effet TICK (Android 10) ; 2 : impulsion. */
-    private static int maniere = -1;
+    /** Les primitives prises en charge : TICK, CLICK (Android 11), ou null à savoir. */
+    private static Boolean tick, click;
 
-    /** Une strie, de force arg (0 à 1). Rend "" si tout va bien, sinon l'erreur. */
+    /**
+     * Une strie, de niveau arg : 0 légère (le « tick »), 1 moyenne (le « clic »), 2 forte
+     * (le « clic appuyé »), 3 maximale (impulsion de 12 ms à pleine amplitude). Chaque
+     * niveau prend l'effet le plus court qui l'atteint sur l'appareil. Rend "" si tout va
+     * bien, sinon l'erreur.
+     */
     public static String tic(Context c, String arg) {
         try {
             if (vibreur == null) {
                 vibreur = (Vibrator) c.getApplicationContext().getSystemService(Context.VIBRATOR_SERVICE);
             }
             if (vibreur == null || !vibreur.hasVibrator()) return "pas de vibreur";
-            float force = 1f;
-            try { force = Math.max(0.05f, Math.min(1f, Float.parseFloat(arg))); } catch (Throwable e) { }
-            if (maniere < 0) {
-                if (Build.VERSION.SDK_INT >= 30 && vibreur.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK)) maniere = 0;
-                else if (Build.VERSION.SDK_INT >= 29) maniere = 1;
-                else maniere = 2;
+            int niveau = 2;
+            try { niveau = Math.max(0, Math.min(3, Integer.parseInt(arg.trim()))); } catch (Throwable e) { }
+            int sdk = Build.VERSION.SDK_INT;
+            if (sdk >= 30 && tick == null) {
+                tick = vibreur.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK);
+                click = vibreur.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_CLICK);
             }
-            if (maniere == 0) {
-                vibreur.vibrate(VibrationEffect.startComposition().addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, force).compose());
-            } else if (maniere == 1) {
-                vibreur.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK));
+            VibrationEffect e;
+            if (niveau == 0 && sdk >= 30 && tick) {
+                e = VibrationEffect.startComposition().addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, 1f).compose();
+            } else if (niveau == 0 && sdk >= 29) {
+                e = VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK);
+            } else if (niveau == 1 && sdk >= 30 && click) {
+                e = VibrationEffect.startComposition().addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK, 1f).compose();
+            } else if (niveau == 1 && sdk >= 29) {
+                e = VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK);
+            } else if (niveau == 2 && sdk >= 29) {
+                e = VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK);
             } else {
-                vibreur.vibrate(VibrationEffect.createOneShot(4, Math.max(1, (int) (255 * force))));
+                // Sans effets prédéfinis, ou au maximum : une impulsion, plus longue
+                // pour plus forte (un moteur met quelques ms à prendre son élan)
+                int ms = niveau == 0 ? 4 : niveau == 1 ? 7 : niveau == 2 ? 10 : 12;
+                int amplitude = vibreur.hasAmplitudeControl() ? 255 : VibrationEffect.DEFAULT_AMPLITUDE;
+                e = VibrationEffect.createOneShot(ms, amplitude);
             }
+            vibreur.vibrate(e);
             return "";
         } catch (Throwable e) {
             String m = e.getMessage();
             return e.getClass().getSimpleName() + (m == null ? "" : " : " + m);
         }
-    }
-
-    /** La manière retenue (« primitive », « effet », « impulsion »), après un premier tic. */
-    public static String maniere(Context c, String arg) {
-        return maniere == 0 ? "primitive" : maniere == 1 ? "effet" : maniere == 2 ? "impulsion" : "";
     }
 
     /** Les pixels par pouce de l'écran, en x et en y (« 401.0 403.5 »). */
