@@ -57,17 +57,18 @@ pub fn px_par_mm(dp: f32) -> f32 {
     dpi.unwrap_or(160.0 * dp) / 25.4
 }
 
-/// Une grille de stries posée au premier contact : rend vrai chaque fois que le doigt
-/// franchit une de ses lignes.
+/// Des cercles concentriques posés au premier contact, tous les `pas` pixels autour de
+/// lui : rend vrai chaque fois que le doigt en franchit un. Seul l'éloignement du contact
+/// se sent, pas le tour qu'on fait autour.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stries {
     origine: Option<[f32; 2]>,
-    case: (i32, i32),
+    cercle: i32,
 }
 
 impl Stries {
-    /// Le doigt est en `p` (ou levé : `None`), les lignes tous les `pas` pixels (0 :
-    /// aucune). Vrai si une ligne vient d'être franchie.
+    /// Le doigt est en `p` (ou levé : `None`), les cercles tous les `pas` pixels (0 :
+    /// aucun). Vrai si un cercle vient d'être franchi.
     pub fn suivre(&mut self, p: Option<[f32; 2]>, pas: f32) -> bool {
         let Some(p) = p else {
             self.origine = None;
@@ -76,16 +77,15 @@ impl Stries {
         if pas <= 0.0 {
             return false;
         }
-        // La grille est centrée sur le contact : la première ligne est à un demi-pas
         let Some(o) = self.origine else {
             self.origine = Some(p);
-            self.case = (0, 0);
+            self.cercle = 0;
             return false;
         };
-        let case = (((p[0] - o[0]) / pas + 0.5).floor() as i32, ((p[1] - o[1]) / pas + 0.5).floor() as i32);
-        let franchie = case != self.case;
-        self.case = case;
-        franchie
+        let cercle = ((p[0] - o[0]).hypot(p[1] - o[1]) / pas).floor() as i32;
+        let franchi = cercle != self.cercle;
+        self.cercle = cercle;
+        franchi
     }
 }
 
@@ -94,23 +94,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn les_stries_se_franchissent_au_pas() {
+    fn les_cercles_se_franchissent_en_s_eloignant() {
         let mut s = Stries::default();
-        // Le contact pose la grille : pas de strie
+        // Le contact pose les cercles : pas de strie
         assert!(!s.suivre(Some([100.0, 100.0]), 10.0));
-        // Moins d'un demi-pas : rien
-        assert!(!s.suivre(Some([104.0, 100.0]), 10.0));
-        // Une ligne franchie
-        assert!(s.suivre(Some([106.0, 100.0]), 10.0));
-        assert!(!s.suivre(Some([114.0, 100.0]), 10.0));
-        assert!(s.suivre(Some([116.0, 100.0]), 10.0));
-        // Vers le bas aussi, et en revenant
-        assert!(s.suivre(Some([116.0, 106.0]), 10.0));
-        assert!(s.suivre(Some([116.0, 104.0]), 10.0));
-        // Levé puis reposé ailleurs : nouvelle grille, pas de strie
+        // En deçà du premier cercle : rien
+        assert!(!s.suivre(Some([108.0, 100.0]), 10.0));
+        // Le premier cercle, dans n'importe quelle direction
+        assert!(s.suivre(Some([108.0, 108.0]), 10.0));
+        assert!(!s.suivre(Some([92.0, 108.0]), 10.0));
+        // Tourner autour à distance égale : rien
+        assert!(!s.suivre(Some([88.0, 100.0]), 10.0));
+        assert!(!s.suivre(Some([100.0, 112.0]), 10.0));
+        // Le deuxième, puis en revenant
+        assert!(s.suivre(Some([100.0, 121.0]), 10.0));
+        assert!(s.suivre(Some([100.0, 119.0]), 10.0));
+        // Levé puis reposé ailleurs : nouveaux cercles, pas de strie
         assert!(!s.suivre(None, 10.0));
         assert!(!s.suivre(Some([300.0, 300.0]), 10.0));
-        assert!(!s.suivre(Some([303.0, 300.0]), 10.0));
+        assert!(!s.suivre(Some([306.0, 300.0]), 10.0));
         // Sans pas, jamais
         assert!(!s.suivre(Some([400.0, 300.0]), 0.0));
     }

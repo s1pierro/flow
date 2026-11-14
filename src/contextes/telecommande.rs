@@ -11,7 +11,7 @@
 //!   - **Manette** : deux surfaces à stick flottant (le contact pose le stick au repos,
 //!     comme les commandes à l'écran de WhiteRoom), la croix, A B X Y, L1 R1, les
 //!     gâchettes, Select et Start, à plusieurs doigts. Sous le doigt, des stries
-//!     (`vibreur::Stries`, 1 mm par défaut) : chacune franchie fait vibrer l'appareil
+//!     en cercles autour du contact (`vibreur::Stries`, 1 mm par défaut) : chacune franchie fait vibrer l'appareil
 //!     aussi brièvement qu'il le peut, une rugosité qui dit au pouce où il va. Flow s'en sert dans la 3D des Lieux ; WhiteRoom la
 //!     voit comme une manette de jeu (n'y sont alors proposés que Manette et Délier).
 //!   La ligne du haut dit l'aller-retour mesuré (`telecommande::Latence`).
@@ -753,7 +753,7 @@ mod tests {
         let mut s = StickFlottant::default();
         // Le contact : au repos
         assert_eq!(s.suivre(&[(7, 100.0, 100.0)], 50.0, 10.0), ([0.0, 0.0], false));
-        // À mi-course vers la droite, deux stries franchies (une seule vibration)
+        // À mi-course vers la droite, deux cercles franchis (une seule vibration)
         assert_eq!(s.suivre(&[(7, 125.0, 100.0)], 50.0, 10.0), ([0.5, 0.0], true));
         // Vers le haut à fond, au-delà : la base suit
         let (v, _) = s.suivre(&[(7, 100.0, 20.0)], 50.0, 10.0);
