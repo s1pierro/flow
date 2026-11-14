@@ -73,16 +73,18 @@ const TERRAIN_VS: &str = "#version 300 es
 precision highp float;
 layout(location=0) in vec3 a_pos;
 layout(location=1) in vec3 a_normal;
-layout(location=2) in vec2 a_uv;
+layout(location=2) in vec3 a_uv;
 uniform mat4 u_mvp;
 uniform vec4 u_uv;
 uniform vec3 u_oeil;
 out vec3 v_n;
 out vec2 v_uv;
 out float v_d;
+out float v_mat;
 void main() {
   v_n = a_normal;
-  v_uv = u_uv.xy + a_uv * u_uv.zw;
+  v_uv = u_uv.xy + a_uv.xy * u_uv.zw;
+  v_mat = a_uv.z;
   v_d = distance(a_pos, u_oeil);
   gl_Position = u_mvp * vec4(a_pos, 1.0);
 }";
@@ -122,20 +124,28 @@ void main() {
   o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
 }";
 /// La couleur vient de la carte (déjà ombrée) ; un peu de soleil en plus pour le
-/// relief vu de biais, et la brume au loin. Hors du lieu (transparent), rien.
+/// relief vu de biais, et la brume au loin. Hors du lieu (transparent), rien. En blanc,
+/// la matière teinte un peu : l'eau bleu pâle, la chaussée gris clair.
 const TERRAIN_FS: &str = "#version 300 es
 precision highp float;
 in vec3 v_n;
 in vec2 v_uv;
 in float v_d;
+in float v_mat;
 uniform sampler2D u_image;
 uniform int u_avec_image;
 uniform vec3 u_couleur;
 uniform vec3 u_ciel;
 uniform vec2 u_brume;
+uniform float u_blanc;
 out vec4 o_color;
 void main() {
   vec3 c = u_couleur;
+  if (u_blanc > 0.5) {
+    if (v_mat > 2.5) c = vec3(0.90, 0.90, 0.91);
+    else if (v_mat > 1.5) c = vec3(0.80, 0.80, 0.83);
+    else if (v_mat > 0.5) c = vec3(0.76, 0.86, 0.95);
+  }
   if (u_avec_image == 1) {
     vec4 t = texture(u_image, v_uv);
     if (t.a < 0.5) discard;
@@ -242,8 +252,8 @@ pub struct Renderer {
     u_vue: i32,
     u_couleur: i32,
     terrain_program: u32,
-    /// u_mvp, u_uv, u_oeil, u_avec_image, u_couleur, u_ciel, u_brume
-    u_terrain: [i32; 7],
+    /// u_mvp, u_uv, u_oeil, u_avec_image, u_couleur, u_ciel, u_brume, u_blanc
+    u_terrain: [i32; 8],
     bati_program: u32,
     /// u_mvp, u_oeil, u_ciel, u_brume, u_blanc
     u_bati: [i32; 5],
@@ -337,7 +347,7 @@ impl Renderer {
             let u_vue = loc(maillage_program, "u_vue");
             let u_couleur = loc(maillage_program, "u_couleur");
             let terrain_program = program(&gl, TERRAIN_VS, TERRAIN_FS)?;
-            let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume"].map(|n| loc(terrain_program, n));
+            let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume", "u_blanc"].map(|n| loc(terrain_program, n));
             (gl.glUseProgram)(terrain_program);
             (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
             let bati_program = program(&gl, BATI_VS, BATI_FS)?;
@@ -513,6 +523,7 @@ impl Renderer {
         (gl.glUniform3f)(u[2], t.oeil[0], t.oeil[1], t.oeil[2]);
         (gl.glUniform3f)(u[5], t.ciel[0], t.ciel[1], t.ciel[2]);
         (gl.glUniform2f)(u[6], t.brume[0], t.brume[1]);
+        (gl.glUniform1f)(u[7], if t.blanc { 1.0 } else { 0.0 });
         // En blanc, les faces reculent un peu : les arêtes passent devant
         if t.blanc {
             (gl.glEnable)(POLYGON_OFFSET_FILL);
@@ -522,7 +533,7 @@ impl Renderer {
             if m.maillage.indices.is_empty() {
                 continue;
             }
-            let (vao, n) = self.tampon_de(&m.maillage, 8);
+            let (vao, n) = self.tampon_de(&m.maillage, crate::relief3d::SOMMET as i32);
             match &m.image {
                 Some(img) if !t.blanc => {
                     self.lier_image(img);
@@ -565,7 +576,7 @@ impl Renderer {
             (gl.glUniform2f)(u[4], t.brume[0], t.brume[1]);
             (gl.glLineWidth)(1.5);
             (gl.glDepthFunc)(LEQUAL);
-            for (liste, flottants, c, biais) in [(&t.aretes, 8, [0.58, 0.6, 0.64], 1.0), (&t.aretes_bati, 9, [0.22, 0.23, 0.26], 0.0)] {
+            for (liste, flottants, c, biais) in [(&t.aretes, crate::relief3d::SOMMET as i32, [0.58, 0.6, 0.64], 1.0), (&t.aretes_bati, 9, [0.22, 0.23, 0.26], 0.0)] {
                 (gl.glUniform3f)(u[2], c[0], c[1], c[2]);
                 (gl.glUniform1f)(u[5], biais);
                 for m in liste {

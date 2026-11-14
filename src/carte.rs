@@ -40,6 +40,12 @@ pub struct Donnees {
     pub ordre: Vec<Couche>,
     /// Les tabliers des ponts, pour la 3D (refaits avec les index).
     pub tabliers: Vec<sage_reel::tabliers::Tablier>,
+    /// La voirie en volume, nivelée et terrassée, pour la 3D : refaite avec les index,
+    /// dans un fil à part (quelques secondes pour une ville) ; `prendre_voirie` la pose
+    /// quand elle est prête, et sa version change alors.
+    voirie: Mutex<(u64, Arc<crate::voirie3d::Voirie>)>,
+    voirie_demandee: u64,
+    voirie_prete: Arc<Mutex<Option<(u64, Arc<crate::voirie3d::Voirie>)>>>,
     bati: HashMap<(i32, i32), Vec<u32>>,
     routes: HashMap<(i32, i32), Vec<u32>>,
     ponts: HashMap<(i32, i32), Vec<u32>>,
@@ -85,7 +91,7 @@ fn dans(index: &HashMap<(i32, i32), Vec<u32>>, b: [f32; 4], tous: usize) -> Vec<
 
 impl Donnees {
     pub fn new(lieu: Lieu) -> Donnees {
-        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
+        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
         d.reindexer();
         d
     }
@@ -111,6 +117,64 @@ impl Donnees {
         self.ponts = ranger(&self.lieu.ponts);
         self.bati = bati;
         self.tabliers = sage_reel::tabliers::tabliers(&self.lieu.ponts);
+        self.voirie_demandee += 1;
+        let (n, routes, ponts, tabliers, prete) = (self.voirie_demandee, self.lieu.routes.clone(), self.lieu.ponts.clone(), self.tabliers.clone(), self.voirie_prete.clone());
+        let faire = move || {
+            let v = Arc::new(crate::voirie3d::Voirie::depuis(&routes, &ponts, &tabliers));
+            if let Ok(mut p) = prete.lock() {
+                if p.as_ref().is_none_or(|x| x.0 < n) {
+                    *p = Some((n, v));
+                }
+            }
+        };
+        // (essais et aperçus : tout de suite)
+        if cfg!(test) || std::env::var_os("FLOW_VOIRIE_SYNC").is_some() {
+            faire();
+            self.prendre_voirie();
+        } else {
+            std::thread::spawn(faire);
+        }
+    }
+
+    /// La voirie (sa version, elle).
+    pub fn voirie(&self) -> (u64, Arc<crate::voirie3d::Voirie>) {
+        self.voirie.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    pub fn voirie_version(&self) -> u64 {
+        self.voirie.lock().map_or(0, |v| v.0)
+    }
+
+    /// Pose la voirie refaite, si elle est prête (vrai alors). Sans écrire les données :
+    /// les fils des tuiles les lisent sans cesse.
+    pub fn prendre_voirie(&self) -> bool {
+        let Ok(mut p) = self.voirie_prete.lock() else { return false };
+        match p.take() {
+            Some((n, v)) if n == self.voirie_demandee => {
+                if let Ok(mut m) = self.voirie.lock() {
+                    *m = (n, v);
+                }
+                true
+            }
+            Some(x) if x.0 > self.voirie_demandee => {
+                *p = Some(x);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// La voirie se refait-elle encore ?
+    pub fn voirie_en_cours(&self) -> bool {
+        self.voirie_version() != self.voirie_demandee
+    }
+
+    /// Attend la voirie (essais, mesures).
+    pub fn attendre_voirie(&self) {
+        while self.voirie_en_cours() {
+            self.prendre_voirie();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Le carré de la pyramide des tuiles : son coin (x, z) et son côté, en mètres. Il

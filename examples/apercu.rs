@@ -360,6 +360,10 @@ fn main() {
                         }
                     }
                 }
+                // FLOW_VUE3D=« lacet tangage distance x y z » : une autre vue
+                if let Ok(v) = std::env::var("FLOW_VUE3D") {
+                    vue3d = format!("vue3d = {v}\n");
+                }
                 // lieux-ordre : les bois au-dessus de tout, les voies de bus au-dessus des voies
                 let mut ordre = if s.name == "lieux-ordre" { "ordre = 2 3 4 5 10 25 24 23 22 21 20 26 30 40 1\n" } else { "" }.to_string();
                 // FLOW_RENDU=blanc : la 3D aux faces blanches, arêtes tracées

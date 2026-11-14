@@ -6,9 +6,12 @@
 //!   (z, i, j) a toujours `COTES` × `COTES` cases, quelle que soit sa taille. Près de
 //!   l'œil, on descend jusqu'au niveau où une case vaut à peu près un pas de la grille
 //!   du lieu ; au loin, de grandes tuiles grossières.
-//! - **L'eau** : chaque triangle est coupé à la rive (`Eau`) ; la terre descend jusqu'à
-//!   la ligne d'eau, et une surface plane au niveau de l'eau remplace le lit, cousue sur
-//!   les mêmes points.
+//! - **Le maillage en passes** (`Decoupe`) : chaque triangle de la grille est coupé là
+//!   où un champ passe par 0, les points de coupe partagés (la couture est étanche).
+//!   D'abord **l'eau** : la terre descend jusqu'à la ligne d'eau, et une surface plane
+//!   au niveau de l'eau remplace le lit. Puis **les voies**, près de l'œil (cases de
+//!   `VOIRIE_CASE` mètres au plus) : le sol terrassé le long de leur tracé, coupé au
+//!   bord des rubans de la voirie, qui s'y cousent (`voirie3d`).
 //! - **Les jupes** : chaque tuile a un rebord qui descend sous elle, ce qui cache les
 //!   fentes entre deux niveaux voisins.
 //! - **Les maillages** se font au fil des images (quelques millisecondes par image),
@@ -35,6 +38,14 @@ use std::sync::Arc;
 
 /// Cases par côté d'une tuile.
 pub const COTES: usize = 32;
+/// Les flottants d'un sommet du relief : position, normale, texture (u, v), matière.
+pub const SOMMET: usize = 9;
+/// Les matières du relief : la terre, l'eau, la chaussée, ses bords (le rendu blanc les teinte).
+pub const TERRE: f32 = 0.0;
+pub const EAU: f32 = 1.0;
+pub const CHAUSSEE: f32 = 2.0;
+/// Les trottoirs et accotements, de part et d'autre de la chaussée.
+pub const BORD: f32 = 3.0;
 /// Une tuile se divise quand l'œil est à moins de `PRES` fois son côté.
 const PRES: f32 = 2.4;
 /// Le temps donné aux maillages à chaque image, en secondes.
@@ -55,6 +66,8 @@ struct Morceau {
     /// La retouche jusqu'à laquelle il est à jour, et la dernière image où il a servi.
     faite: u64,
     vu: u64,
+    /// La version de la voirie avec laquelle il a été fait.
+    voirie: u64,
     /// Ses arêtes, pour le rendu blanc (faites à la première demande).
     aretes: Option<Maillage3d>,
 }
@@ -250,6 +263,9 @@ impl Relief3d {
         cx.dl.rrect(zone, 0.0, [ciel[0], ciel[1], ciel[2], 255]);
         let donnees = carte.donnees.clone();
         let Ok(d) = donnees.read() else { return };
+        // La voirie refaite à part : posée dès qu'elle est prête
+        d.prendre_voirie();
+        let voirie = d.voirie_version();
         self.poser(&d);
         let mvp = self.mvp(zone.w / zone.h.max(1.0));
         let voulues = self.choisir(&d, &mvp);
@@ -257,7 +273,10 @@ impl Relief3d {
         let mut a_faire: Vec<(u8, usize, Cle)> = Vec::new();
         for (rang, &cle) in voulues.iter().enumerate() {
             let perime = match self.morceaux.get(&cle) {
-                Some(m) => !carte.a_jour(m.faite, boite_tuile(&d, cle)),
+                Some(m) => {
+                    let b = boite_tuile(&d, cle);
+                    !carte.a_jour(m.faite, b) || (m.voirie != voirie && (b[2] - b[0]) / COTES as f32 <= VOIRIE_CASE)
+                }
                 None => true,
             };
             if perime {
@@ -287,9 +306,9 @@ impl Relief3d {
             self.revision += 1;
             let id = 0x7233_6400_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
             let maillage = Maillage3d { id, revision: self.revision, sommets: Arc::new(sommets), indices: Arc::new(indices) };
-            self.morceaux.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, aretes: None });
+            self.morceaux.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, voirie, aretes: None });
         }
-        self.en_attente = faits.len() < a_faire.iter().map(|x| x.2).collect::<HashSet<_>>().len();
+        self.en_attente = faits.len() < a_faire.iter().map(|x| x.2).collect::<HashSet<_>>().len() || d.voirie_en_cours();
         // Les bâtiments, dans le temps qui reste
         let voulus = self.choisir_bati(&d, &mvp);
         for &cle in &voulus {
@@ -308,7 +327,7 @@ impl Relief3d {
             self.revision += 1;
             let id = 0x6261_7469_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
             let maillage = Maillage3d { id, revision: self.revision, sommets: Arc::new(sommets), indices: Arc::new(indices) };
-            self.batis.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, aretes: None });
+            self.batis.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, voirie: 0, aretes: None });
         }
         let (mut bati, mut aretes_bati) = (Vec::new(), Vec::new());
         for cle in &voulus {
@@ -341,7 +360,7 @@ impl Relief3d {
             let Some(m) = self.morceaux.get_mut(cle) else { continue };
             m.vu = self.image;
             if self.blanc {
-                aretes_sol.push(m.aretes(8, false));
+                aretes_sol.push(m.aretes(SOMMET, false));
             }
             let (image, uv) = match t {
                 Some((i, uv)) => (Some(i), uv),
@@ -425,30 +444,35 @@ fn dehors(mvp: &[f32; 16], b: [f32; 4], hmin: f32, hmax: f32) -> bool {
     (0..3).any(|a| coins.iter().all(|c| c[a] < -c[3]) || coins.iter().all(|c| c[a] > c[3]))
 }
 
-/// Le maillage de la tuile `cle` : sommets de 8 flottants (position, normale, texture)
+/// Le maillage de la tuile `cle` : sommets de `SOMMET` flottants (position, normale,
+/// texture, matière)
 /// et triangles, avec ses jupes.
 pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
     let l = &d.lieu;
     let b = boite_tuile(d, cle);
     let n = COTES;
     let s = (b[2] - b[0]) / n as f32;
-    // Les hauteurs, avec une case de plus tout autour pour les normales
+    // Près de l'œil, la voirie en volume : le sol terrassé le long des voies
+    let (_, vo) = d.voirie();
+    let terrasser = s <= VOIRIE_CASE && vo.pres([b[0] - s, b[1] - s, b[2] + s, b[3] + s]);
+    // Les hauteurs (terrassées), avec une case de plus tout autour pour les normales
     let m = n + 3;
     let mut h = vec![0f32; m * m];
     for k in 0..m {
         let z = b[1] + (k as f32 - 1.0) * s;
         for a in 0..m {
             let x = b[0] + (a as f32 - 1.0) * s;
-            h[k * m + a] = l.relief(x as f64, z as f64) as f32;
+            let r = l.relief(x as f64, z as f64) as f32;
+            h[k * m + a] = if terrasser { vo.sol(x, z, r, l.eau(x as f64, z as f64) > 0.5, s.min(crate::voirie3d::MARGE_MAX)) } else { r };
         }
     }
     let hh = |a: usize, k: usize| h[(k + 1) * m + a + 1];
-    let mut v = Vec::with_capacity(((n + 1) * (n + 1) + 4 * (n + 1)) * 8);
-    let sommet = |a: usize, k: usize, bas: f32| -> [f32; 8] {
+    let mut v = Vec::with_capacity(((n + 1) * (n + 1) + 4 * (n + 1)) * SOMMET);
+    let sommet = |a: usize, k: usize, bas: f32| -> [f32; SOMMET] {
         let y = hh(a, k);
         let (gx, gz) = ((h[(k + 1) * m + a + 2] - h[(k + 1) * m + a]) / (2.0 * s), (h[(k + 2) * m + a + 1] - h[k * m + a + 1]) / (2.0 * s));
         let nn = (gx * gx + 1.0 + gz * gz).sqrt();
-        [b[0] + a as f32 * s, y - bas, b[1] + k as f32 * s, -gx / nn, 1.0 / nn, -gz / nn, a as f32 / n as f32, k as f32 / n as f32]
+        [b[0] + a as f32 * s, y - bas, b[1] + k as f32 * s, -gx / nn, 1.0 / nn, -gz / nn, a as f32 / n as f32, k as f32 / n as f32, TERRE]
     };
     for k in 0..=n {
         for a in 0..=n {
@@ -464,20 +488,66 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
             e[k * (n + 1) + a] = l.eau((b[0] + a as f32 * s) as f64, (b[1] + k as f32 * s) as f64) as f32;
         }
     }
-    let mut eau = Eau { niveau: l.niveau, copies: vec![None; (n + 1) * (n + 1)], coupes: HashMap::new() };
+    // 1. L'eau : chaque triangle coupé à la rive ; la part d'eau, plane au niveau de
+    // l'eau, se dessine ; la part de terre passe à la suite
+    let niveau = l.niveau;
+    let champ_eau: Vec<f32> = e.iter().map(|x| 0.5 - x).collect();
+    let mut coupe = Decoupe::default();
+    let mut a_plat = HashMap::new();
+    let mut terre: Vec<[u32; 3]> = Vec::with_capacity(n * n * 2);
     for k in 0..n as u32 {
         for a in 0..n as u32 {
             let p = k * w + a;
             for t in [[p, p + w, p + 1], [p + 1, p + w, p + w + 1]] {
-                eau.trianguler(&mut v, &mut ind, &e, t);
+                let (dehors, dedans) = coupe.couper(&mut v, &champ_eau, t, |m| m[1] = niveau);
+                eventail(&dehors, |t| terre.push(t));
+                let dedans: Vec<u32> = dedans.iter().map(|&i| copie(&mut v, &mut a_plat, i, |m| *m = sommet_plat(m, niveau, EAU))).collect();
+                eventail(&dedans, |t| ind.extend_from_slice(&t));
             }
+        }
+    }
+    // 2. Les voies, près de l'œil : la terre coupée exactement au bord des rubans et des
+    // places (le point cherché sur l'arête), son bord à la hauteur de la voie ; ce
+    // qu'ils couvrent s'en va, et les rubans s'ajoutent
+    if terrasser {
+        let champ_voie: Vec<f32> = v.chunks(SOMMET).map(|m| if vo.sur(m[0], m[2]).is_some() { -1.0 } else { 1.0 }).collect();
+        let bord = |a: &[f32; SOMMET], c: &[f32; SOMMET], ca: f32, _: f32| {
+            // a dedans ou dehors, c de l'autre côté : la limite, par dichotomie
+            let dans = |t: f32| vo.sur(a[0] + (c[0] - a[0]) * t, a[2] + (c[2] - a[2]) * t).is_some();
+            let da = ca <= 0.0;
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..14 {
+                let mi = (lo + hi) / 2.0;
+                if dans(mi) == da { lo = mi } else { hi = mi }
+            }
+            (lo + hi) / 2.0
+        };
+        let mut coupe = Decoupe::default();
+        let mut fond = HashMap::new();
+        for t in terre {
+            let (dehors, dedans) = coupe.couper_par(&mut v, &champ_voie, t, &bord, |m| {
+                if let Some(y) = vo.hauteur(m[0], m[2]) {
+                    m[1] = y - crate::voirie3d::ENFOUI;
+                }
+            });
+            eventail(&dehors, |t| ind.extend_from_slice(&t));
+            // Sous les rubans, un fond un peu plus bas : il bouche les angles rentrants,
+            // où le bord de la coupe (droit) passe à côté des rubans
+            // (les points de coupe restent au bord, à la hauteur de la voie)
+            let dedans: Vec<u32> = dedans.iter().map(|&i| if (i as usize) < champ_voie.len() { copie(&mut v, &mut fond, i, |m| *m = sommet_plat(m, vo.hauteur(m[0], m[2]).unwrap_or(m[1]) - FOND, TERRE)) } else { i }).collect();
+            eventail(&dedans, |t| ind.extend_from_slice(&t));
+        }
+        vo.monter(b, &mut v, &mut ind);
+    } else {
+        for t in terre {
+            ind.extend_from_slice(&t);
         }
     }
     // Les jupes : chaque bord, doublé plus bas
     let jupe = s * 1.5 + 4.0;
     let bords: [Box<dyn Fn(usize) -> (usize, usize)>; 4] = [Box::new(|t| (t, 0)), Box::new(|t| (t, n)), Box::new(|t| (0, t)), Box::new(|t| (n, t))];
     for bord in &bords {
-        let depart = (v.len() / 8) as u32;
+        let depart = (v.len() / SOMMET) as u32;
         for t in 0..=n {
             let (a, k) = bord(t);
             v.extend_from_slice(&sommet(a, k, jupe));
@@ -497,7 +567,8 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
 /// de ses bouts (au centimètre) : les sommets doublés (la rive, les murs d'un bâtiment)
 /// n'en font qu'une. Sans `pli` (le relief), toutes, sauf celles des faces debout (les
 /// jupes) ; avec (les volumes), les bords et les plis de plus de 20° seulement : pas
-/// les diagonales d'une face plane.
+/// les diagonales d'une face plane. Les rubans de la voirie se tracent comme les volumes
+/// (en plus, la limite de la chaussée et de ses bords).
 pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
     type Point = (i64, i64, i64);
     let pos = |i: u32| {
@@ -506,7 +577,15 @@ pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
     };
     let cle = |p: [f32; 3]| -> Point { ((p[0] * 100.0).round() as i64, (p[1] * 100.0).round() as i64, (p[2] * 100.0).round() as i64) };
     // Chaque arête : ses sommets, la normale de sa première face, pliée, ses faces
-    let mut vues: HashMap<(Point, Point), (u32, u32, [f32; 3], bool, u32)> = HashMap::new();
+    // Le relief : la matière d'une face de la voirie (chaussée, bords), sinon -1
+    let voirie = |t: &[u32]| -> f32 {
+        if pli || flottants < SOMMET {
+            return -1.0;
+        }
+        let m = t.iter().map(|&i| v[i as usize * flottants + 8]).fold(f32::MAX, f32::min);
+        if m >= CHAUSSEE - 0.5 && t.iter().all(|&i| v[i as usize * flottants + 8] == m) { m } else { -1.0 }
+    };
+    let mut vues: HashMap<(Point, Point), (u32, u32, [f32; 3], bool, u32, f32)> = HashMap::new();
     let mut ordre = Vec::new();
     let pli_min = 20f32.to_radians().cos();
     for t in ind.chunks_exact(3) {
@@ -521,6 +600,7 @@ pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
         if !pli && n[1].abs() < 0.05 {
             continue;
         }
+        let mat = voirie(t);
         for (i, j) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
             let (ki, kj) = (cle(pos(i)), cle(pos(j)));
             if ki == kj {
@@ -529,11 +609,11 @@ pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
             let k = if ki < kj { (ki, kj) } else { (kj, ki) };
             match vues.get_mut(&k) {
                 Some(e) => {
-                    e.3 |= e.2[0] * n[0] + e.2[1] * n[1] + e.2[2] * n[2] < pli_min;
+                    e.3 |= e.2[0] * n[0] + e.2[1] * n[1] + e.2[2] * n[2] < pli_min || e.5 != mat;
                     e.4 += 1;
                 }
                 None => {
-                    vues.insert(k, (i, j, n, false, 1));
+                    vues.insert(k, (i, j, n, false, 1, mat));
                     ordre.push(k);
                 }
             }
@@ -542,106 +622,110 @@ pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
     let mut r = Vec::with_capacity(ordre.len() * 2);
     for k in ordre {
         let e = vues[&k];
-        if !pli || e.3 || e.4 == 1 {
+        // La voirie, comme les volumes : ses bords, ses plis, les limites des bandes
+        if (!pli && e.5 < 0.0) || e.3 || e.4 == 1 {
             r.extend_from_slice(&[e.0, e.1]);
         }
     }
     r
 }
 
-/// L'eau dans une tuile du relief : chaque triangle de la grille est coupé le long de la
-/// rive (là où l'eau vaut ½). La part de terre garde le relief et descend à la ligne
-/// d'eau ; la part d'eau est une surface plane, au niveau de l'eau, qui remplace le lit.
-/// Les deux parts partagent les points de la rive, calculés une fois par arête (et de
-/// même dans la tuile voisine) : la couture est étanche.
-struct Eau {
-    niveau: f32,
-    /// Le double, à la surface de l'eau, de chaque sommet de la grille.
-    copies: Vec<Option<u32>>,
-    /// Les points de la rive sur une arête (sommets triés) : côté terre, côté eau.
-    coupes: HashMap<(u32, u32), (u32, u32)>,
+/// Le côté des cases au-delà duquel les voies ne se découpent pas dans le relief (m) :
+/// de loin, elles restent peintes sur la carte.
+pub const VOIRIE_CASE: f32 = 6.0;
+/// Le fond sous les rubans, sous la voie (m).
+const FOND: f32 = 0.3;
+
+/// Un sommet posé à plat : à la hauteur `y`, la normale vers le haut, de la matière `mat`.
+fn sommet_plat(m: &[f32; SOMMET], y: f32, mat: f32) -> [f32; SOMMET] {
+    [m[0], y, m[2], 0.0, 1.0, 0.0, m[6], m[7], mat]
 }
 
-/// La surface de l'eau à partir d'un sommet (8 flottants) : à la hauteur `y`, vers le haut.
-fn a_plat(s: &[f32], y: f32) -> [f32; 8] {
-    [s[0], y, s[2], 0.0, 1.0, 0.0, s[6], s[7]]
+fn lire_sommet(v: &[f32], i: u32) -> [f32; SOMMET] {
+    let i = i as usize * SOMMET;
+    v[i..i + SOMMET].try_into().unwrap_or([0.0; SOMMET])
 }
 
-impl Eau {
-    fn sommet(v: &[f32], i: u32) -> [f32; 8] {
-        let i = i as usize * 8;
-        v[i..i + 8].try_into().unwrap_or([0.0; 8])
+fn pousser(v: &mut Vec<f32>, s: [f32; SOMMET]) -> u32 {
+    v.extend_from_slice(&s);
+    (v.len() / SOMMET - 1) as u32
+}
+
+/// Le double du sommet `i`, retouché par `f` (fait une fois : `faits`).
+fn copie(v: &mut Vec<f32>, faits: &mut HashMap<u32, u32>, i: u32, f: impl Fn(&mut [f32; SOMMET])) -> u32 {
+    if let Some(&c) = faits.get(&i) {
+        return c;
+    }
+    let mut m = lire_sommet(v, i);
+    f(&mut m);
+    let c = pousser(v, m);
+    faits.insert(i, c);
+    c
+}
+
+/// Un polygone convexe (dans son sens) en triangles, en éventail.
+fn eventail(p: &[u32], mut f: impl FnMut([u32; 3])) {
+    for k in 1..p.len().saturating_sub(1) {
+        f([p[0], p[k], p[k + 1]]);
+    }
+}
+
+/// Une découpe du relief le long de la ligne où un champ, donné à chaque sommet, passe
+/// par 0 (dedans : 0 ou moins). Les points de coupe se font une fois par arête : les deux
+/// triangles de part et d'autre (et la tuile voisine, qui calcule pareil) les partagent,
+/// et la couture est étanche. Les passes se suivent : l'eau, puis les voies sur la terre.
+#[derive(Default)]
+struct Decoupe {
+    coupes: HashMap<(u32, u32), u32>,
+}
+
+impl Decoupe {
+    /// Le triangle `t`, en deux parts (dehors, dedans), chacune un polygone dans le sens
+    /// du triangle. Un point de coupe est interpolé entre les deux bouts de l'arête, puis
+    /// retouché par `poser` (sa hauteur).
+    fn couper(&mut self, v: &mut Vec<f32>, champ: &[f32], t: [u32; 3], poser: impl Fn(&mut [f32; SOMMET])) -> (Vec<u32>, Vec<u32>) {
+        let lineaire = |_: &[f32; SOMMET], _: &[f32; SOMMET], ca: f32, cb: f32| if (ca - cb).abs() > 1e-9 { (ca / (ca - cb)).clamp(0.0, 1.0) } else { 0.5 };
+        self.couper_par(v, champ, t, &lineaire, poser)
     }
 
-    fn pousser(v: &mut Vec<f32>, s: [f32; 8]) -> u32 {
-        v.extend_from_slice(&s);
-        (v.len() / 8 - 1) as u32
-    }
-
-    /// Le double d'un sommet à la surface de l'eau.
-    fn copie(&mut self, v: &mut Vec<f32>, i: u32) -> u32 {
-        if let Some(c) = self.copies[i as usize] {
-            return c;
+    /// `couper`, le point de coupe sur l'arête (a, b) à la fraction `fraction(a, b,
+    /// champ en a, champ en b)`.
+    fn couper_par(&mut self, v: &mut Vec<f32>, champ: &[f32], t: [u32; 3], fraction: &dyn Fn(&[f32; SOMMET], &[f32; SOMMET], f32, f32) -> f32, poser: impl Fn(&mut [f32; SOMMET])) -> (Vec<u32>, Vec<u32>) {
+        let c = t.map(|i| champ[i as usize]);
+        let d = c.map(|x| x <= 0.0);
+        if d.iter().all(|x| !x) {
+            return (t.to_vec(), Vec::new());
         }
-        let c = Eau::pousser(v, a_plat(&Eau::sommet(v, i), self.niveau));
-        self.copies[i as usize] = Some(c);
-        c
-    }
-
-    /// Le point de la rive sur l'arête (i, j) : côté terre (le relief interpolé, posé à
-    /// la ligne d'eau), côté eau.
-    fn coupe(&mut self, v: &mut Vec<f32>, e: &[f32], i: u32, j: u32) -> (u32, u32) {
-        let cle = (i.min(j), i.max(j));
-        if let Some(&c) = self.coupes.get(&cle) {
-            return c;
+        if d.iter().all(|x| *x) {
+            return (Vec::new(), t.to_vec());
         }
-        let (a, b) = (Eau::sommet(v, cle.0), Eau::sommet(v, cle.1));
-        let (ea, eb) = (e[cle.0 as usize], e[cle.1 as usize]);
-        let t = if (eb - ea).abs() > 1e-6 { ((0.5 - ea) / (eb - ea)).clamp(0.0, 1.0) } else { 0.5 };
-        let mut m = [0f32; 8];
-        for k in 0..8 {
-            m[k] = a[k] + (b[k] - a[k]) * t;
-        }
-        m[1] = self.niveau;
-        let terre = Eau::pousser(v, m);
-        let eau = Eau::pousser(v, a_plat(&m, self.niveau));
-        self.coupes.insert(cle, (terre, eau));
-        (terre, eau)
-    }
-
-    /// Un triangle de la grille (sommets dans leur ordre), coupé à la rive s'il le faut.
-    fn trianguler(&mut self, v: &mut Vec<f32>, ind: &mut Vec<u32>, e: &[f32], t: [u32; 3]) {
-        let mouille = t.map(|i| e[i as usize] >= 0.5);
-        if mouille.iter().all(|m| !m) {
-            ind.extend_from_slice(&t);
-            return;
-        }
-        if mouille.iter().all(|m| *m) {
-            let c = t.map(|i| self.copie(v, i));
-            ind.extend_from_slice(&c);
-            return;
-        }
-        // On fait le tour : chaque sommet va à sa part, chaque arête qui change de part
-        // y ajoute son point de rive (le sens du triangle est gardé)
-        let (mut terre, mut eau) = (Vec::with_capacity(4), Vec::with_capacity(4));
+        let (mut dehors, mut dedans) = (Vec::with_capacity(4), Vec::with_capacity(4));
         for k in 0..3 {
             let (i, j) = (t[k], t[(k + 1) % 3]);
-            if mouille[k] {
-                eau.push(self.copie(v, i));
-            } else {
-                terre.push(i);
-            }
-            if mouille[k] != mouille[(k + 1) % 3] {
-                let (ct, ce) = self.coupe(v, e, i, j);
-                terre.push(ct);
-                eau.push(ce);
+            if d[k] { dedans.push(i) } else { dehors.push(i) }
+            if d[k] != d[(k + 1) % 3] {
+                let cle = (i.min(j), i.max(j));
+                let p = match self.coupes.get(&cle) {
+                    Some(&p) => p,
+                    None => {
+                        let (a, b) = (lire_sommet(v, cle.0), lire_sommet(v, cle.1));
+                        let (ca, cb) = (champ[cle.0 as usize], champ[cle.1 as usize]);
+                        let f = fraction(&a, &b, ca, cb);
+                        let mut m = [0f32; SOMMET];
+                        for k in 0..SOMMET {
+                            m[k] = a[k] + (b[k] - a[k]) * f;
+                        }
+                        poser(&mut m);
+                        let p = pousser(v, m);
+                        self.coupes.insert(cle, p);
+                        p
+                    }
+                };
+                dehors.push(p);
+                dedans.push(p);
             }
         }
-        for p in [terre, eau] {
-            for k in 1..p.len().saturating_sub(1) {
-                ind.extend_from_slice(&[p[0], p[k], p[k + 1]]);
-            }
-        }
+        (dehors, dedans)
     }
 }
 
@@ -664,16 +748,16 @@ mod tests {
         let d = donnees();
         let (v, ind) = fabriquer(&d, (0, 0, 0));
         let n = COTES + 1;
-        assert_eq!(v.len(), (n * n + 4 * n) * 8);
+        assert_eq!(v.len(), (n * n + 4 * n) * SOMMET);
         assert_eq!(ind.len(), COTES * COTES * 6 + 4 * COTES * 6);
-        assert!(ind.iter().all(|&i| (i as usize) < v.len() / 8));
+        assert!(ind.iter().all(|&i| (i as usize) < v.len() / SOMMET));
         // Un sommet du milieu : à la hauteur du relief, la normale penchée vers l'ouest
-        let k = (n / 2 * n + n / 2) * 8;
+        let k = (n / 2 * n + n / 2) * SOMMET;
         let (x, y, z) = (v[k], v[k + 1], v[k + 2]);
         assert!((y - d.lieu.relief(x as f64, z as f64) as f32).abs() < 0.05);
         assert!(v[k + 3] < -0.01 && v[k + 4] > 0.9);
         // Les jupes sous le bord
-        let j = n * n * 8;
+        let j = n * n * SOMMET;
         assert!(v[j + 1] < v[1] - 1.0);
     }
 
@@ -754,8 +838,8 @@ mod tests {
         let d = Donnees::new(Lieu::sur("R", 49.0, 1.0, 0.0, 0.0, pas, g, 5.0, &h, &eau, Vec::new(), Vec::new(), Vec::new()));
         for cle in [(0, 0, 0), (2, 1, 1), (3, 3, 2)] {
             let (v, ind) = fabriquer(&d, cle);
-            assert!(ind.iter().all(|&i| (i as usize) < v.len() / 8));
-            let p = |i: u32| [v[i as usize * 8], v[i as usize * 8 + 1], v[i as usize * 8 + 2]];
+            assert!(ind.iter().all(|&i| (i as usize) < v.len() / SOMMET));
+            let p = |i: u32| [v[i as usize * SOMMET], v[i as usize * SOMMET + 1], v[i as usize * SOMMET + 2]];
             let b = boite_tuile(&d, cle);
             let (mut plans, mut aretes) = (0, HashMap::new());
             for t in ind.chunks(3) {
@@ -767,7 +851,7 @@ mod tests {
                 }
                 // Rien ne descend sous l'eau : le lit est remplacé par la surface
                 assert!([a, bb, c].iter().all(|q| q[1] >= 5.0 - 1e-3), "{cle:?} {a:?} {bb:?} {c:?}");
-                if [a, bb, c].iter().all(|q| (q[1] - 5.0).abs() < 1e-3) && t.iter().all(|&i| v[i as usize * 8 + 4] > 0.999) {
+                if [a, bb, c].iter().all(|q| (q[1] - 5.0).abs() < 1e-3) && t.iter().all(|&i| v[i as usize * SOMMET + 4] > 0.999 && v[i as usize * SOMMET + 8] == EAU) {
                     plans += 1;
                 }
                 // Chaque arête intérieure est partagée par deux triangles (par position)
@@ -807,6 +891,63 @@ mod tests {
         // Sans pli (le relief) : ni les faces debout, ni les arêtes qu'elles seules
         // portent ; le dessus et le dessous, avec leur diagonale (2 × 5 arêtes)
         assert_eq!(aretes(&v, 9, &ind, false).len(), 2 * 10);
+    }
+
+    #[test]
+    fn les_voies_sont_decoupees_a_leur_hauteur_et_cousues() {
+        use sage_reel::{Route, GRANDE};
+        // Un plateau à 10 m, une route de 8 m posée à 11 m en travers, de biais
+        let pas = 4.0;
+        let g = Grille::emprise(pas, 2000.0, 2000.0);
+        let h = vec![10.0; g.points()];
+        let d0 = Donnees::new(Lieu::sur("V", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), Vec::new(), Vec::new()));
+        let (x0, z0, c) = d0.monde();
+        let route = Route { genre: GRANDE, largeur: 8.0, points: vec![[x0, z0 + c * 0.53, 11.0], [x0 + c, z0 + c * 0.55, 11.0]] };
+        let d = Donnees::new(Lieu::sur("V", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], vec![route], Vec::new(), Vec::new()));
+        // Une tuile fine sur la route (cases de moins de VOIRIE_CASE m), et une grossière
+        let z = (0..=NIVEAU_MAX).find(|&z| c / (1u32 << z) as f32 / COTES as f32 <= VOIRIE_CASE).unwrap();
+        let n = 1i32 << z;
+        let cle = (z, n / 2, ((0.54 * n as f32) as i32));
+        let (v, ind) = fabriquer(&d, cle);
+        let b = boite_tuile(&d, cle);
+        let p = |i: u32| [v[i as usize * SOMMET], v[i as usize * SOMMET + 1], v[i as usize * SOMMET + 2], v[i as usize * SOMMET + 8]];
+        // La distance à l'axe de la route
+        let axe = |x: f32, z: f32| {
+            let (a, bb) = (d.lieu.routes[0].points[0], d.lieu.routes[0].points[1]);
+            let (ex, ez) = (bb[0] - a[0], bb[1] - a[1]);
+            ((x - a[0]) * ez - (z - a[1]) * ex).abs() / ex.hypot(ez)
+        };
+        let mut dessus = 0;
+        for t in ind.chunks(3) {
+            let q = [p(t[0]), p(t[1]), p(t[2])];
+            let (u, w) = ([q[1][0] - q[0][0], q[1][2] - q[0][2]], [q[2][0] - q[0][0], q[2][2] - q[0][2]]);
+            if (u[0] * w[1] - u[1] * w[0]).abs() < 1e-6 {
+                continue;
+            }
+            // Rien plus haut que la route ni plus bas que le plateau (moins les jupes)
+            assert!(q.iter().all(|m| m[1] <= 11.0 + crate::voirie3d::TROTTOIR + 1e-3 && m[1] >= 10.0 - crate::voirie3d::JUPE - 1e-3), "{q:?}");
+            let (cx, cz) = ((q[0][0] + q[1][0] + q[2][0]) / 3.0, (q[0][2] + q[1][2] + q[2][2]) / 3.0);
+            // (hors le fond sous les rubans)
+            if q.iter().all(|m| m[3] == TERRE) && !q.iter().all(|m| (m[1] - 11.0 + crate::voirie3d::ENFOUI).abs() < 1e-3 || (m[1] - 11.0 + FOND).abs() < 1e-3) {
+                // Pas de terre sous la route, et la terre entre le plateau et la route
+                assert!(axe(cx, cz) > 4.0 + 2.0 - 0.5, "{q:?}");
+                assert!(q.iter().all(|m| m[1] >= 10.0 - 1e-3), "{q:?}");
+            }
+            if q.iter().all(|m| m[3] == CHAUSSEE && (m[1] - 11.0).abs() < 1e-3) {
+                assert!(axe(cx, cz) < 4.0 + 0.1);
+                dessus += 1;
+            }
+        }
+        assert!(dessus >= 1, "{dessus}");
+        // La terre au bord de la plateforme à la hauteur de la route ; loin, le plateau
+        let terre: Vec<[f32; 4]> = v.chunks(SOMMET).map(|m| [m[0], m[1], m[2], m[8]]).filter(|m| m[3] == TERRE && m[1] > 5.0).collect();
+        assert!(terre.iter().filter(|m| (axe(m[0], m[2]) - 6.0).abs() < 0.05).all(|m| (m[1] - 11.0 + crate::voirie3d::ENFOUI).abs() < 0.05));
+        for m in terre.iter().filter(|m| axe(m[0], m[2]) > 6.0 + crate::voirie3d::MARGE_MAX + crate::voirie3d::PORTEE) {
+            assert!((m[1] - 10.0).abs() < 1e-3, "{m:?} {} {b:?}", axe(m[0], m[2]));
+        }
+        // De loin, la route n'est pas découpée : tout le relief à 10 m
+        let (v, _) = fabriquer(&d, (0, 0, 0));
+        assert!(v.chunks(SOMMET).take((COTES + 1) * (COTES + 1)).all(|m| (m[1] - 10.0).abs() < 1e-3));
     }
 
     #[test]

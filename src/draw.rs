@@ -89,8 +89,8 @@ pub struct Maillage3d {
     pub indices: std::sync::Arc<Vec<u32>>,
 }
 
-/// Un morceau de terrain : un maillage aux sommets de 8 flottants (position, normale,
-/// coordonnées de texture de 0 à 1) et son image, dont il prend la partie
+/// Un morceau de terrain : un maillage aux sommets de 9 flottants (position, normale,
+/// coordonnées de texture de 0 à 1, matière) et son image, dont il prend la partie
 /// `uv` (u0, v0, largeur, hauteur) ; sans image, la couleur `couleur`.
 #[derive(Clone, Debug)]
 pub struct Morceau3d {
@@ -114,7 +114,7 @@ pub struct Terrain3d {
     pub morceaux: Vec<Morceau3d>,
     pub bati: Vec<Maillage3d>,
     /// Le rendu blanc : les faces blanches (sans les images), et les arêtes tracées
-    /// (`aretes` : du relief, sommets de 8 flottants ; `aretes_bati` : des volumes, de
+    /// (`aretes` : du relief, sommets de 9 flottants ; `aretes_bati` : des volumes, de
     /// 9 ; leurs indices vont deux par deux). Celles du relief s'effacent quand on le
     /// voit de biais, où elles se serrent.
     pub blanc: bool,
