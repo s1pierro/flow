@@ -113,6 +113,13 @@ pub struct Terrain3d {
     pub brume: [f32; 2],
     pub morceaux: Vec<Morceau3d>,
     pub bati: Vec<Maillage3d>,
+    /// Le rendu blanc : les faces blanches (sans les images), et les arêtes tracées
+    /// (`aretes` : du relief, sommets de 8 flottants ; `aretes_bati` : des volumes, de
+    /// 9 ; leurs indices vont deux par deux). Celles du relief s'effacent quand on le
+    /// voit de biais, où elles se serrent.
+    pub blanc: bool,
+    pub aretes: Vec<Maillage3d>,
+    pub aretes_bati: Vec<Maillage3d>,
 }
 
 /// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la

@@ -24,6 +24,7 @@ const LESS: u32 = 0x0201;
 const LEQUAL: u32 = 0x0203;
 const ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const UINT: u32 = 0x1405;
+const LINES: u32 = 1;
 
 const MAILLAGE_VS: &str = "#version 300 es
 precision highp float;
@@ -109,13 +110,14 @@ in vec3 v_c;
 in float v_d;
 uniform vec3 u_ciel;
 uniform vec2 u_brume;
+uniform float u_blanc;
 out vec4 o_color;
 void main() {
   vec3 n = normalize(v_n);
   float s = max(dot(n, normalize(vec3(-0.5, 0.8, -0.35))), 0.0);
   float h = 0.5 + 0.5 * n.y;
   // Le soleil vient du nord-ouest : les murs au sud gardent le jour du ciel
-  vec3 c = v_c * (0.62 + 0.34 * s + 0.12 * h);
+  vec3 c = mix(v_c, vec3(0.93), u_blanc) * (0.62 + 0.34 * s + 0.12 * h);
   float b = smoothstep(u_brume.x, u_brume.y, v_d);
   o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
 }";
@@ -142,6 +144,38 @@ void main() {
   vec3 n = normalize(v_n);
   float s = max(dot(n, normalize(vec3(-0.5, 0.8, -0.35))), 0.0);
   c *= 0.82 + 0.25 * s;
+  float b = smoothstep(u_brume.x, u_brume.y, v_d);
+  o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
+}";
+/// Les arêtes du rendu blanc : un trait uni, noyé dans la brume comme le reste.
+const LIGNE_VS: &str = "#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_normal;
+uniform mat4 u_mvp;
+uniform vec3 u_oeil;
+out float v_d;
+out float v_face;
+void main() {
+  v_d = distance(a_pos, u_oeil);
+  // Le relief vu de face (1) ou de biais (0)
+  v_face = abs(dot(normalize(a_normal), (u_oeil - a_pos) / max(v_d, 1e-3)));
+  gl_Position = u_mvp * vec4(a_pos, 1.0);
+}";
+/// Avec `u_biais`, le trait se fond dans la face blanche quand on la voit de biais
+/// (les cases s'y serrent) ; puis dans la brume.
+const LIGNE_FS: &str = "#version 300 es
+precision highp float;
+in float v_d;
+in float v_face;
+uniform vec3 u_couleur;
+uniform vec3 u_ciel;
+uniform vec2 u_brume;
+uniform float u_biais;
+out vec4 o_color;
+void main() {
+  float k = mix(1.0, smoothstep(0.12, 0.5, v_face), u_biais);
+  vec3 c = mix(vec3(0.95), u_couleur, k);
   float b = smoothstep(u_brume.x, u_brume.y, v_d);
   o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
 }";
@@ -211,8 +245,11 @@ pub struct Renderer {
     /// u_mvp, u_uv, u_oeil, u_avec_image, u_couleur, u_ciel, u_brume
     u_terrain: [i32; 7],
     bati_program: u32,
-    /// u_mvp, u_oeil, u_ciel, u_brume
-    u_bati: [i32; 4],
+    /// u_mvp, u_oeil, u_ciel, u_brume, u_blanc
+    u_bati: [i32; 5],
+    ligne_program: u32,
+    /// u_mvp, u_oeil, u_couleur, u_ciel, u_brume, u_biais
+    u_ligne: [i32; 6],
     tampons: RefCell<Vec<Tampon3d>>,
     /// Les images sur la carte graphique : id, révision, texture, taille, et l'image
     /// où elles ont servi (celles qui ne servent plus sont libérées).
@@ -304,9 +341,11 @@ impl Renderer {
             (gl.glUseProgram)(terrain_program);
             (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
             let bati_program = program(&gl, BATI_VS, BATI_FS)?;
-            let u_bati = ["u_mvp", "u_oeil", "u_ciel", "u_brume"].map(|n| loc(bati_program, n));
+            let u_bati = ["u_mvp", "u_oeil", "u_ciel", "u_brume", "u_blanc"].map(|n| loc(bati_program, n));
+            let ligne_program = program(&gl, LIGNE_VS, LIGNE_FS)?;
+            let u_ligne = ["u_mvp", "u_oeil", "u_couleur", "u_ciel", "u_brume", "u_biais"].map(|n| loc(ligne_program, n));
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, bati_program, u_bati, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, bati_program, u_bati, ligne_program, u_ligne, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
         }
     }
 
@@ -474,20 +513,26 @@ impl Renderer {
         (gl.glUniform3f)(u[2], t.oeil[0], t.oeil[1], t.oeil[2]);
         (gl.glUniform3f)(u[5], t.ciel[0], t.ciel[1], t.ciel[2]);
         (gl.glUniform2f)(u[6], t.brume[0], t.brume[1]);
+        // En blanc, les faces reculent un peu : les arêtes passent devant
+        if t.blanc {
+            (gl.glEnable)(POLYGON_OFFSET_FILL);
+            (gl.glPolygonOffset)(1.0, 1.0);
+        }
         for m in &t.morceaux {
             if m.maillage.indices.is_empty() {
                 continue;
             }
             let (vao, n) = self.tampon_de(&m.maillage, 8);
             match &m.image {
-                Some(img) => {
+                Some(img) if !t.blanc => {
                     self.lier_image(img);
                     (gl.glUniform1i)(u[3], 1);
                 }
-                None => (gl.glUniform1i)(u[3], 0),
+                _ => (gl.glUniform1i)(u[3], 0),
             }
             (gl.glUniform4f)(u[1], m.uv[0], m.uv[1], m.uv[2], m.uv[3]);
-            (gl.glUniform3f)(u[4], m.couleur[0], m.couleur[1], m.couleur[2]);
+            let c = if t.blanc { [0.95, 0.95, 0.94] } else { m.couleur };
+            (gl.glUniform3f)(u[4], c[0], c[1], c[2]);
             (gl.glBindVertexArray)(vao);
             (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
         }
@@ -499,6 +544,7 @@ impl Renderer {
             (gl.glUniform3f)(u[1], t.oeil[0], t.oeil[1], t.oeil[2]);
             (gl.glUniform3f)(u[2], t.ciel[0], t.ciel[1], t.ciel[2]);
             (gl.glUniform2f)(u[3], t.brume[0], t.brume[1]);
+            (gl.glUniform1f)(u[4], if t.blanc { 1.0 } else { 0.0 });
             for m in &t.bati {
                 if m.indices.is_empty() {
                     continue;
@@ -507,6 +553,32 @@ impl Renderer {
                 (gl.glBindVertexArray)(vao);
                 (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
             }
+        }
+        // Les arêtes, par-dessus les faces reculées
+        if t.blanc {
+            (gl.glDisable)(POLYGON_OFFSET_FILL);
+            (gl.glUseProgram)(self.ligne_program);
+            let u = &self.u_ligne;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform3f)(u[1], t.oeil[0], t.oeil[1], t.oeil[2]);
+            (gl.glUniform3f)(u[3], t.ciel[0], t.ciel[1], t.ciel[2]);
+            (gl.glUniform2f)(u[4], t.brume[0], t.brume[1]);
+            (gl.glLineWidth)(1.5);
+            (gl.glDepthFunc)(LEQUAL);
+            for (liste, flottants, c, biais) in [(&t.aretes, 8, [0.58, 0.6, 0.64], 1.0), (&t.aretes_bati, 9, [0.22, 0.23, 0.26], 0.0)] {
+                (gl.glUniform3f)(u[2], c[0], c[1], c[2]);
+                (gl.glUniform1f)(u[5], biais);
+                for m in liste {
+                    if m.indices.is_empty() {
+                        continue;
+                    }
+                    let (vao, n) = self.tampon_de(m, flottants);
+                    (gl.glBindVertexArray)(vao);
+                    (gl.glDrawElements)(LINES, n, UINT, std::ptr::null());
+                }
+            }
+            (gl.glDepthFunc)(LESS);
+            (gl.glLineWidth)(1.0);
         }
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);

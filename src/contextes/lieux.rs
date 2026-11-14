@@ -26,7 +26,9 @@
 //! - **La 3D** (`relief3d`) : le cube de la barre fait passer de la carte au relief en
 //!   3D, drapé des mêmes tuiles, les bâtiments en volume près de l'œil, et retour, sur
 //!   le même point ; un doigt tourne autour,
-//!   deux doigts rapprochent et déplacent. Un outil d'édition ramène à la carte.
+//!   deux doigts rapprochent et déplacent. Un outil d'édition ramène à la carte. Deux
+//!   pilules, en haut à gauche, choisissent le rendu : drapé de la carte, ou blanc aux
+//!   arêtes tracées (retenu dans l'espace).
 //! - **Dans la barre de la fenêtre** : la liste des lieux, la 3D, le nom, enregistrer,
 //!   annuler et rétablir.
 //!
@@ -192,6 +194,8 @@ pub struct Lieux {
     /// attendant le lieu ; le doigt qui la fait tourner.
     trois_d: Option<Relief3d>,
     camera3d: Option<Camera>,
+    /// Le rendu de la 3D : drapé de la carte, ou blanc aux arêtes tracées.
+    blanc3d: bool,
     orbite: Option<(f32, f32)>,
     /// Le plan où choisir la zone à générer, quand il est ouvert ; la recherche d'un
     /// nom (Nominatim), en cours ou faite.
@@ -258,6 +262,7 @@ impl Default for Lieux {
             dp: 1.0,
             trois_d: None,
             camera3d: None,
+            blanc3d: false,
             orbite: None,
             plan: None,
             recherche: Edition::default(),
@@ -288,6 +293,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         l.position = Edition::new(p);
     }
     l.plan_a_ouvrir = e.texte("plan") == Some("oui");
+    l.blanc3d = e.texte("rendu3d") == Some("blanc");
     if let Some(o) = e.texte("ordre") {
         l.ordre = crate::carte::ordre_lu(o);
     }
@@ -1150,9 +1156,19 @@ impl Lieux {
         if let Some((m, dt)) = manette {
             r.piloter(&m, dt);
         }
+        r.blanc = self.blanc3d;
         let Some(carte) = &mut self.carte else { return };
         cx.clip(Some(zone));
         r.dessiner(cx, zone, carte);
+        // Le rendu, en haut à gauche, par-dessus la vue (et ses gestes)
+        let m = cx.ecart();
+        let mut x = zone.x + m;
+        for (i, (nom, blanc)) in [("Carte", false), ("Blanc", true)].into_iter().enumerate() {
+            if cx.pill(sub_id(base, 30 + i), x, zone.y + m, nom, self.blanc3d == blanc) {
+                self.blanc3d = blanc;
+            }
+            x += cx.pill_width(nom) + m * 0.5;
+        }
         cx.clip(None);
     }
 
@@ -1869,6 +1885,9 @@ impl Contexte for Lieux {
         }
         if self.plan.is_some() {
             e.mettre("plan", "oui");
+        }
+        if self.blanc3d {
+            e.mettre("rendu3d", "blanc");
         }
         if self.ordre != crate::carte::ordre_par_defaut() {
             e.mettre("ordre", self.ordre.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));

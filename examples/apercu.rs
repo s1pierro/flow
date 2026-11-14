@@ -86,6 +86,7 @@ fn main() {
         Shot { name: "lieux-plan", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-plan-paysage", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-ordre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
+        Shot { name: "lieux-3d-pont", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-accueil", w: 1080, h: 2400, dp: 2.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-3d", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "lieux-3d-pres", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -337,9 +338,34 @@ fn main() {
                 // FLOW_LIEU : un autre lieu
                 let doc = std::env::var("FLOW_LIEU").unwrap_or_else(|_| "/sdcard/bang/lieux/les-andelys.reel".into());
                 // En 3D : lacet, tangage, distance, cible
-                let vue3d = match s.name { "lieux-3d" => "vue3d = 0.5 0.45 4000 0 0 0\n", "lieux-3d-pres" => "vue3d = 2.6 0.22 700 -150 0 -50\n", "lieux-3d-portrait" => "vue3d = -0.6 0.35 2500 0 0 0\n", _ => "" };
+                let mut vue3d = match s.name { "lieux-3d" => "vue3d = 0.5 0.45 4000 0 0 0\n", "lieux-3d-pres" => "vue3d = 2.6 0.22 700 -150 0 -50\n", "lieux-3d-portrait" => "vue3d = -0.6 0.35 2500 0 0 0\n", _ => "" }.to_string();
+                if s.name == "lieux-3d-pont" {
+                    // Le plus grand tablier du lieu (FLOW_PONT : le n-ième), vu de biais
+                    if let Ok(l) = sage_reel::Lieu::lire(std::path::Path::new(&doc)) {
+                        let mut t = sage_reel::tabliers::tabliers(&l.ponts);
+                        let aire = |t: &sage_reel::tabliers::Tablier| t.coupes.windows(2).map(|w| (w[1].0[0] - w[0].0[0]).hypot(w[1].0[1] - w[0].0[1]) * (w[0].0[0] - w[0].1[0]).hypot(w[0].0[1] - w[0].1[1])).sum::<f32>();
+                        t.sort_by(|a, b| aire(b).total_cmp(&aire(a)));
+                        // FLOW_PRES=« lat lon » : le tablier le plus proche de ce point
+                        if let Some((la, lo)) = std::env::var("FLOW_PRES").ok().and_then(|v| v.split_once(' ').and_then(|(a, b)| Some((a.parse::<f64>().ok()?, b.parse::<f64>().ok()?)))) {
+                            let (x, z) = l.vers_jeu(la, lo);
+                            let d = |t: &sage_reel::tabliers::Tablier| (t.centre()[0] - x as f32).hypot(t.centre()[1] - z as f32);
+                            t.sort_by(|a, b| d(a).total_cmp(&d(b)));
+                        }
+                        let k: usize = std::env::var("FLOW_PONT").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        if let Some(t) = t.get(k.min(t.len().saturating_sub(1))) {
+                            let c = t.centre();
+                            let h = t.coupes[t.coupes.len() / 2].0[2];
+                            println!("{} tabliers ; le n° {k} : centre {:.0} {:.0}, hauteur {h:.1}, {} coupes", sage_reel::tabliers::tabliers(&l.ponts).len(), c[0], c[1], t.coupes.len());
+                            vue3d = format!("vue3d = 0.9 0.3 220 {} {} {}\n", c[0], h, c[1]);
+                        }
+                    }
+                }
                 // lieux-ordre : les bois au-dessus de tout, les voies de bus au-dessus des voies
-                let ordre = if s.name == "lieux-ordre" { "ordre = 2 3 4 5 10 25 24 23 22 21 20 26 30 40 1\n" } else { "" };
+                let mut ordre = if s.name == "lieux-ordre" { "ordre = 2 3 4 5 10 25 24 23 22 21 20 26 30 40 1\n" } else { "" }.to_string();
+                // FLOW_RENDU=blanc : la 3D aux faces blanches, arêtes tracées
+                if std::env::var("FLOW_RENDU").as_deref() == Ok("blanc") {
+                    ordre.push_str("rendu3d = blanc\n");
+                }
                 app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}{ordre}outil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
             }
         }

@@ -6,6 +6,9 @@
 //!   (z, i, j) a toujours `COTES` × `COTES` cases, quelle que soit sa taille. Près de
 //!   l'œil, on descend jusqu'au niveau où une case vaut à peu près un pas de la grille
 //!   du lieu ; au loin, de grandes tuiles grossières.
+//! - **L'eau** : chaque triangle est coupé à la rive (`Eau`) ; la terre descend jusqu'à
+//!   la ligne d'eau, et une surface plane au niveau de l'eau remplace le lit, cousue sur
+//!   les mêmes points.
 //! - **Les jupes** : chaque tuile a un rebord qui descend sous elle, ce qui cache les
 //!   fentes entre deux niveaux voisins.
 //! - **Les maillages** se font au fil des images (quelques millisecondes par image),
@@ -15,8 +18,10 @@
 //! - **Les textures** sont les tuiles de la carte (`Carte::textures`), demandées aux
 //!   mêmes threads ; en attendant, la partie d'un ancêtre.
 //! - **Les bâtiments** se montent en volume (`toits::monter` : murs et pans du toit)
-//!   près de l'œil, à moins de `BATI_RAYON`, par tuiles d'environ 300 m : chacun dans
-//!   celle qui contient son centre. Ils se font dans le même temps que le relief, après
+//!   près de l'œil, et avec eux les tabliers des ponts (`tabliers::monter` : une dalle
+//!   un peu plus large que la chaussée, une seule pour des ponts parallèles voisins),
+//!   à moins de `BATI_RAYON`, par tuiles d'environ 300 m : chacun dans celle qui
+//!   contient son centre. Ils se font dans le même temps que le relief, après
 //!   lui, et se périment de même.
 
 use crate::carte::{boite_tuile, Carte, Cle, Donnees, NIVEAU_MAX};
@@ -50,6 +55,17 @@ struct Morceau {
     /// La retouche jusqu'à laquelle il est à jour, et la dernière image où il a servi.
     faite: u64,
     vu: u64,
+    /// Ses arêtes, pour le rendu blanc (faites à la première demande).
+    aretes: Option<Maillage3d>,
+}
+
+impl Morceau {
+    fn aretes(&mut self, flottants: usize, pli: bool) -> Maillage3d {
+        let m = &self.maillage;
+        self.aretes
+            .get_or_insert_with(|| Maillage3d { id: m.id ^ (1 << 63), revision: m.revision, sommets: m.sommets.clone(), indices: Arc::new(aretes(&m.sommets, flottants, &m.indices, pli)) })
+            .clone()
+    }
 }
 
 /// La vue 3D d'un lieu : sa caméra, ses maillages.
@@ -66,6 +82,8 @@ pub struct Relief3d {
     pub bati_dessinees: usize,
     /// Des maillages restent à faire.
     pub en_attente: bool,
+    /// Le rendu blanc : faces blanches, arêtes tracées.
+    pub blanc: bool,
 }
 
 impl Relief3d {
@@ -75,7 +93,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, blanc: false }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -269,7 +287,7 @@ impl Relief3d {
             self.revision += 1;
             let id = 0x7233_6400_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
             let maillage = Maillage3d { id, revision: self.revision, sommets: Arc::new(sommets), indices: Arc::new(indices) };
-            self.morceaux.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image });
+            self.morceaux.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, aretes: None });
         }
         self.en_attente = faits.len() < a_faire.iter().map(|x| x.2).collect::<HashSet<_>>().len();
         // Les bâtiments, dans le temps qui reste
@@ -290,14 +308,17 @@ impl Relief3d {
             self.revision += 1;
             let id = 0x6261_7469_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
             let maillage = Maillage3d { id, revision: self.revision, sommets: Arc::new(sommets), indices: Arc::new(indices) };
-            self.batis.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image });
+            self.batis.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, aretes: None });
         }
-        let mut bati = Vec::new();
+        let (mut bati, mut aretes_bati) = (Vec::new(), Vec::new());
         for cle in &voulus {
             if let Some(m) = self.batis.get_mut(cle) {
                 m.vu = self.image;
                 if !m.maillage.indices.is_empty() {
                     bati.push(m.maillage.clone());
+                    if self.blanc {
+                        aretes_bati.push(m.aretes(9, true));
+                    }
                 }
             }
         }
@@ -315,10 +336,13 @@ impl Relief3d {
             }
         }
         let textures = carte.textures(&montrees);
-        let mut morceaux = Vec::with_capacity(montrees.len());
+        let (mut morceaux, mut aretes_sol) = (Vec::with_capacity(montrees.len()), Vec::new());
         for (cle, t) in montrees.iter().zip(textures) {
             let Some(m) = self.morceaux.get_mut(cle) else { continue };
             m.vu = self.image;
+            if self.blanc {
+                aretes_sol.push(m.aretes(8, false));
+            }
             let (image, uv) = match t {
                 Some((i, uv)) => (Some(i), uv),
                 None => (None, [0.0, 0.0, 1.0, 1.0]),
@@ -327,7 +351,7 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati });
         // Les maillages qui n'ont pas servi depuis longtemps
         if self.batis.len() > GARDES / 2 {
             let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();
@@ -351,8 +375,9 @@ fn niveau_bati(c: f32) -> u8 {
     ((c / BATI_TUILE).log2().floor().max(0.0) as u8).min(NIVEAU_MAX)
 }
 
-/// Les bâtiments de la tuile `cle` (ceux dont le centre y tombe), en volume : sommets de
-/// 9 flottants (position, normale, couleur) et triangles.
+/// Les bâtiments et les tabliers des ponts de la tuile `cle` (ceux dont le centre y
+/// tombe), en volume : sommets de 9 flottants (position, normale, couleur) et triangles.
+/// Les tabliers ont le gris des quartiers habités, plus sombre dessous.
 pub fn fabriquer_bati(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
     let b = boite_tuile(d, cle);
     let l = &d.lieu;
@@ -365,6 +390,19 @@ pub fn fabriquer_bati(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
         }
         let (murs, toit) = teintes_bati(bt.genre);
         toits::monter(bt, murs, toit, &mut |p, n, coul| {
+            for q in p {
+                v.extend_from_slice(&[q[0], q[1], q[2], n[0], n[1], n[2], coul[0], coul[1], coul[2]]);
+            }
+        });
+    }
+    let dessus = crate::carte::couleur_sol(sage_reel::HABITE);
+    let dessous = dessus.map(|c| c * 0.72);
+    for t in &d.tabliers {
+        let c = t.centre();
+        if c[0] < b[0] || c[0] >= b[2] || c[1] < b[1] || c[1] >= b[3] {
+            continue;
+        }
+        sage_reel::tabliers::monter(t, dessus, dessous, &mut |p, n, coul| {
             for q in p {
                 v.extend_from_slice(&[q[0], q[1], q[2], n[0], n[1], n[2], coul[0], coul[1], coul[2]]);
             }
@@ -419,10 +457,20 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
     }
     let mut ind = Vec::with_capacity(n * n * 6 + 4 * n * 6);
     let w = (n + 1) as u32;
+    // L'eau aux sommets (de 0 à 1, interpolée entre les points du lieu)
+    let mut e = vec![0f32; (n + 1) * (n + 1)];
+    for k in 0..=n {
+        for a in 0..=n {
+            e[k * (n + 1) + a] = l.eau((b[0] + a as f32 * s) as f64, (b[1] + k as f32 * s) as f64) as f32;
+        }
+    }
+    let mut eau = Eau { niveau: l.niveau, copies: vec![None; (n + 1) * (n + 1)], coupes: HashMap::new() };
     for k in 0..n as u32 {
         for a in 0..n as u32 {
             let p = k * w + a;
-            ind.extend_from_slice(&[p, p + w, p + 1, p + 1, p + w, p + w + 1]);
+            for t in [[p, p + w, p + 1], [p + 1, p + w, p + w + 1]] {
+                eau.trianguler(&mut v, &mut ind, &e, t);
+            }
         }
     }
     // Les jupes : chaque bord, doublé plus bas
@@ -442,6 +490,159 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
         }
     }
     (v, ind)
+}
+
+/// Les arêtes à tracer d'un maillage (sommets de `flottants` flottants, la position
+/// d'abord), en indices deux par deux. Chaque arête une fois, repérée par la position
+/// de ses bouts (au centimètre) : les sommets doublés (la rive, les murs d'un bâtiment)
+/// n'en font qu'une. Sans `pli` (le relief), toutes, sauf celles des faces debout (les
+/// jupes) ; avec (les volumes), les bords et les plis de plus de 20° seulement : pas
+/// les diagonales d'une face plane.
+pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
+    type Point = (i64, i64, i64);
+    let pos = |i: u32| {
+        let k = i as usize * flottants;
+        [v[k], v[k + 1], v[k + 2]]
+    };
+    let cle = |p: [f32; 3]| -> Point { ((p[0] * 100.0).round() as i64, (p[1] * 100.0).round() as i64, (p[2] * 100.0).round() as i64) };
+    // Chaque arête : ses sommets, la normale de sa première face, pliée, ses faces
+    let mut vues: HashMap<(Point, Point), (u32, u32, [f32; 3], bool, u32)> = HashMap::new();
+    let mut ordre = Vec::new();
+    let pli_min = 20f32.to_radians().cos();
+    for t in ind.chunks_exact(3) {
+        let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
+        let (u, w) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+        let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if l < 1e-9 {
+            continue;
+        }
+        let n = n.map(|x| x / l);
+        if !pli && n[1].abs() < 0.05 {
+            continue;
+        }
+        for (i, j) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let (ki, kj) = (cle(pos(i)), cle(pos(j)));
+            if ki == kj {
+                continue;
+            }
+            let k = if ki < kj { (ki, kj) } else { (kj, ki) };
+            match vues.get_mut(&k) {
+                Some(e) => {
+                    e.3 |= e.2[0] * n[0] + e.2[1] * n[1] + e.2[2] * n[2] < pli_min;
+                    e.4 += 1;
+                }
+                None => {
+                    vues.insert(k, (i, j, n, false, 1));
+                    ordre.push(k);
+                }
+            }
+        }
+    }
+    let mut r = Vec::with_capacity(ordre.len() * 2);
+    for k in ordre {
+        let e = vues[&k];
+        if !pli || e.3 || e.4 == 1 {
+            r.extend_from_slice(&[e.0, e.1]);
+        }
+    }
+    r
+}
+
+/// L'eau dans une tuile du relief : chaque triangle de la grille est coupé le long de la
+/// rive (là où l'eau vaut ½). La part de terre garde le relief et descend à la ligne
+/// d'eau ; la part d'eau est une surface plane, au niveau de l'eau, qui remplace le lit.
+/// Les deux parts partagent les points de la rive, calculés une fois par arête (et de
+/// même dans la tuile voisine) : la couture est étanche.
+struct Eau {
+    niveau: f32,
+    /// Le double, à la surface de l'eau, de chaque sommet de la grille.
+    copies: Vec<Option<u32>>,
+    /// Les points de la rive sur une arête (sommets triés) : côté terre, côté eau.
+    coupes: HashMap<(u32, u32), (u32, u32)>,
+}
+
+/// La surface de l'eau à partir d'un sommet (8 flottants) : à la hauteur `y`, vers le haut.
+fn a_plat(s: &[f32], y: f32) -> [f32; 8] {
+    [s[0], y, s[2], 0.0, 1.0, 0.0, s[6], s[7]]
+}
+
+impl Eau {
+    fn sommet(v: &[f32], i: u32) -> [f32; 8] {
+        let i = i as usize * 8;
+        v[i..i + 8].try_into().unwrap_or([0.0; 8])
+    }
+
+    fn pousser(v: &mut Vec<f32>, s: [f32; 8]) -> u32 {
+        v.extend_from_slice(&s);
+        (v.len() / 8 - 1) as u32
+    }
+
+    /// Le double d'un sommet à la surface de l'eau.
+    fn copie(&mut self, v: &mut Vec<f32>, i: u32) -> u32 {
+        if let Some(c) = self.copies[i as usize] {
+            return c;
+        }
+        let c = Eau::pousser(v, a_plat(&Eau::sommet(v, i), self.niveau));
+        self.copies[i as usize] = Some(c);
+        c
+    }
+
+    /// Le point de la rive sur l'arête (i, j) : côté terre (le relief interpolé, posé à
+    /// la ligne d'eau), côté eau.
+    fn coupe(&mut self, v: &mut Vec<f32>, e: &[f32], i: u32, j: u32) -> (u32, u32) {
+        let cle = (i.min(j), i.max(j));
+        if let Some(&c) = self.coupes.get(&cle) {
+            return c;
+        }
+        let (a, b) = (Eau::sommet(v, cle.0), Eau::sommet(v, cle.1));
+        let (ea, eb) = (e[cle.0 as usize], e[cle.1 as usize]);
+        let t = if (eb - ea).abs() > 1e-6 { ((0.5 - ea) / (eb - ea)).clamp(0.0, 1.0) } else { 0.5 };
+        let mut m = [0f32; 8];
+        for k in 0..8 {
+            m[k] = a[k] + (b[k] - a[k]) * t;
+        }
+        m[1] = self.niveau;
+        let terre = Eau::pousser(v, m);
+        let eau = Eau::pousser(v, a_plat(&m, self.niveau));
+        self.coupes.insert(cle, (terre, eau));
+        (terre, eau)
+    }
+
+    /// Un triangle de la grille (sommets dans leur ordre), coupé à la rive s'il le faut.
+    fn trianguler(&mut self, v: &mut Vec<f32>, ind: &mut Vec<u32>, e: &[f32], t: [u32; 3]) {
+        let mouille = t.map(|i| e[i as usize] >= 0.5);
+        if mouille.iter().all(|m| !m) {
+            ind.extend_from_slice(&t);
+            return;
+        }
+        if mouille.iter().all(|m| *m) {
+            let c = t.map(|i| self.copie(v, i));
+            ind.extend_from_slice(&c);
+            return;
+        }
+        // On fait le tour : chaque sommet va à sa part, chaque arête qui change de part
+        // y ajoute son point de rive (le sens du triangle est gardé)
+        let (mut terre, mut eau) = (Vec::with_capacity(4), Vec::with_capacity(4));
+        for k in 0..3 {
+            let (i, j) = (t[k], t[(k + 1) % 3]);
+            if mouille[k] {
+                eau.push(self.copie(v, i));
+            } else {
+                terre.push(i);
+            }
+            if mouille[k] != mouille[(k + 1) % 3] {
+                let (ct, ce) = self.coupe(v, e, i, j);
+                terre.push(ct);
+                eau.push(ce);
+            }
+        }
+        for p in [terre, eau] {
+            for k in 1..p.len().saturating_sub(1) {
+                ind.extend_from_slice(&[p[0], p[k], p[k + 1]]);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +705,108 @@ mod tests {
         }
         assert_eq!(murs, 4);
         assert!(hauts.iter().all(|&y| (y - 9.0).abs() < 1e-3 || (y - 16.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn les_ponts_ont_leur_tablier_avec_les_batiments() {
+        use sage_reel::{Route, GRANDE};
+        let pas = 4.0;
+        let g = Grille::emprise(pas, 2000.0, 2000.0);
+        let h = vec![10.0; g.points()];
+        // Deux chaussées parallèles : un seul tablier, dans la tuile de son milieu
+        let ponts = vec![
+            Route { genre: GRANDE, largeur: 8.0, points: vec![[0.0, 0.0, 20.0], [100.0, 0.0, 20.0]] },
+            Route { genre: GRANDE, largeur: 8.0, points: vec![[100.0, 11.0, 20.0], [0.0, 11.0, 20.0]] },
+        ];
+        let d = Donnees::new(Lieu::sur("P", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), Vec::new(), ponts));
+        assert_eq!(d.tabliers.len(), 1);
+        let (_, _, c) = d.monde();
+        let z = niveau_bati(c);
+        let n = 1i32 << z;
+        let mut dessus = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let (v, _) = fabriquer_bati(&d, (z, i, j));
+                dessus.extend(v.chunks(9).filter(|s| s[4] > 0.9).map(|s| (s[1], s[2])));
+            }
+        }
+        // Le dessus de 20 m (aux bouts) à 20 m plus le bombement, de z = −4,75 à 15,75 (les
+        // deux chaussées et le débord)
+        let fleche = sage_reel::tabliers::FLECHE_MAX;
+        assert!(!dessus.is_empty() && dessus.iter().all(|&(y, _)| (20.0 - 1e-3..=20.0 + fleche).contains(&y)));
+        assert!(dessus.iter().any(|&(y, _)| (y - 20.0).abs() < 1e-3) && dessus.iter().any(|&(y, _)| y > 20.5));
+        let (zmin, zmax) = dessus.iter().fold((f32::MAX, f32::MIN), |a, &(_, z)| (a.0.min(z), a.1.max(z)));
+        assert!((zmin + 4.75).abs() < 0.05 && (zmax - 15.75).abs() < 0.05, "{zmin} {zmax}");
+    }
+
+    #[test]
+    fn l_eau_est_plane_et_cousue_a_la_rive() {
+        // Un plateau à 10 m, une rivière en biais (lit à 2 m), l'eau à 5 m
+        let pas = 4.0;
+        let g = Grille::emprise(pas, 2000.0, 2000.0);
+        let (a0, b0) = g.point(0);
+        let dans = |i: usize| {
+            let (a, b) = g.point(i);
+            ((a - a0) as f32 - (b - b0) as f32 * 0.3 - 225.0).abs() < 30.0
+        };
+        let h: Vec<f32> = (0..g.points()).map(|i| if dans(i) { 2.0 } else { 10.0 }).collect();
+        let eau: Vec<bool> = (0..g.points()).map(dans).collect();
+        let d = Donnees::new(Lieu::sur("R", 49.0, 1.0, 0.0, 0.0, pas, g, 5.0, &h, &eau, Vec::new(), Vec::new(), Vec::new()));
+        for cle in [(0, 0, 0), (2, 1, 1), (3, 3, 2)] {
+            let (v, ind) = fabriquer(&d, cle);
+            assert!(ind.iter().all(|&i| (i as usize) < v.len() / 8));
+            let p = |i: u32| [v[i as usize * 8], v[i as usize * 8 + 1], v[i as usize * 8 + 2]];
+            let b = boite_tuile(&d, cle);
+            let (mut plans, mut aretes) = (0, HashMap::new());
+            for t in ind.chunks(3) {
+                let (a, bb, c) = (p(t[0]), p(t[1]), p(t[2]));
+                let (u, w) = ([bb[0] - a[0], bb[2] - a[2]], [c[0] - a[0], c[2] - a[2]]);
+                // Les jupes sont debout : on ne regarde que le dessus
+                if (u[0] * w[1] - u[1] * w[0]).abs() < 1e-6 {
+                    continue;
+                }
+                // Rien ne descend sous l'eau : le lit est remplacé par la surface
+                assert!([a, bb, c].iter().all(|q| q[1] >= 5.0 - 1e-3), "{cle:?} {a:?} {bb:?} {c:?}");
+                if [a, bb, c].iter().all(|q| (q[1] - 5.0).abs() < 1e-3) && t.iter().all(|&i| v[i as usize * 8 + 4] > 0.999) {
+                    plans += 1;
+                }
+                // Chaque arête intérieure est partagée par deux triangles (par position)
+                for (q, r) in [(a, bb), (bb, c), (c, a)] {
+                    let k = |q: [f32; 3]| ((q[0] * 100.0).round() as i64, (q[2] * 100.0).round() as i64);
+                    let e = if k(q) < k(r) { (k(q), k(r)) } else { (k(r), k(q)) };
+                    *aretes.entry(e).or_insert(0) += 1;
+                }
+            }
+            assert!(plans > 0, "{cle:?}");
+            let bord = |x: i64, z: i64| {
+                let (x, z) = (x as f32 / 100.0, z as f32 / 100.0);
+                (x - b[0]).abs() < 0.02 || (x - b[2]).abs() < 0.02 || (z - b[1]).abs() < 0.02 || (z - b[3]).abs() < 0.02
+            };
+            for (e, n) in &aretes {
+                if !(bord(e.0 .0, e.0 .1) && bord(e.1 .0, e.1 .1)) {
+                    assert_eq!(*n, 2, "{cle:?} {e:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn les_aretes_d_un_cube_sont_ses_douze_bords() {
+        // Un cube en soupe de triangles (deux par face, sommets doublés), 9 flottants
+        let c = |x: f32, y: f32, z: f32| [x, y, z, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let p = [c(0., 0., 0.), c(1., 0., 0.), c(1., 1., 0.), c(0., 1., 0.), c(0., 0., 1.), c(1., 0., 1.), c(1., 1., 1.), c(0., 1., 1.)];
+        let faces = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [3, 7, 6, 2], [0, 4, 7, 3], [1, 2, 6, 5]];
+        let mut v = Vec::new();
+        for f in faces {
+            for k in [0, 1, 2, 0, 2, 3] {
+                v.extend_from_slice(&p[f[k]]);
+            }
+        }
+        let ind: Vec<u32> = (0..36).collect();
+        assert_eq!(aretes(&v, 9, &ind, true).len(), 24);
+        // Sans pli (le relief) : ni les faces debout, ni les arêtes qu'elles seules
+        // portent ; le dessus et le dessous, avec leur diagonale (2 × 5 arêtes)
+        assert_eq!(aretes(&v, 9, &ind, false).len(), 2 * 10);
     }
 
     #[test]

@@ -29,11 +29,17 @@ const CELLULE: f32 = 128.0;
 /// Une tuile : (niveau, colonne, ligne).
 pub type Cle = (u8, i32, i32);
 
+/// Ajouté au niveau d'une clé : la tuile sans les ponts (les textures de la 3D, où les
+/// tabliers sont en volume). Elle a sa place à part parmi les tuiles gardées.
+const SANS_PONTS: u8 = 0x40;
+
 /// Le lieu et ses index : les bâtiments, les routes et les ponts rangés par cellule.
 pub struct Donnees {
     pub lieu: Lieu,
     /// L'ordre où les couches se peignent, la première dessous (`ordre_par_defaut`).
     pub ordre: Vec<Couche>,
+    /// Les tabliers des ponts, pour la 3D (refaits avec les index).
+    pub tabliers: Vec<sage_reel::tabliers::Tablier>,
     bati: HashMap<(i32, i32), Vec<u32>>,
     routes: HashMap<(i32, i32), Vec<u32>>,
     ponts: HashMap<(i32, i32), Vec<u32>>,
@@ -79,7 +85,7 @@ fn dans(index: &HashMap<(i32, i32), Vec<u32>>, b: [f32; 4], tous: usize) -> Vec<
 
 impl Donnees {
     pub fn new(lieu: Lieu) -> Donnees {
-        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
+        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
         d.reindexer();
         d
     }
@@ -104,6 +110,7 @@ impl Donnees {
         self.routes = ranger(&self.lieu.routes);
         self.ponts = ranger(&self.lieu.ponts);
         self.bati = bati;
+        self.tabliers = sage_reel::tabliers::tabliers(&self.lieu.ponts);
     }
 
     /// Le carré de la pyramide des tuiles : son coin (x, z) et son côté, en mètres. Il
@@ -260,6 +267,8 @@ pub fn boite_tuile(d: &Donnees, (z, i, j): Cle) -> [f32; 4] {
 
 /// Dessine une tuile : RVBA, `TUILE` × `TUILE`.
 pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
+    let ponts = cle.0 & SANS_PONTS == 0;
+    let cle = (cle.0 & !SANS_PONTS, cle.1, cle.2);
     let l = &d.lieu;
     let b = boite_tuile(d, cle);
     let m = (b[2] - b[0]) / TUILE as f32; // mètres par pixel
@@ -352,7 +361,7 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
                     }
                 }
             }
-            COUCHE_PONTS => {
+            COUCHE_PONTS if ponts => {
                 let genres: Vec<u8> = ordre.iter().filter(|c| est_voie(**c)).map(|c| c - COUCHE_VOIE).collect();
                 peindre_voies(&mut px, d, b, m, true, &genres);
             }
@@ -664,10 +673,10 @@ impl Carte {
         if !self.tuiles.get(&cle).is_some_and(|tu| self.a_jour(tu.faite, bt)) {
             demandes.push((cle, self.compteur));
         }
-        let (z, i, j) = cle;
+        let (f, z, i, j) = (cle.0 & SANS_PONTS, cle.0 & !SANS_PONTS, cle.1, cle.2);
         for k in 0..=z {
             let (pi, pj) = (i >> k, j >> k);
-            if let Some(tu) = self.tuiles.get_mut(&(z - k, pi, pj)) {
+            if let Some(tu) = self.tuiles.get_mut(&((z - k) | f, pi, pj)) {
                 tu.vue = self.image;
                 let f = 1.0 / (1 << k) as f32;
                 return Some((tu.image.clone(), [(i - (pi << k)) as f32 * f, (j - (pj << k)) as f32 * f, f, f]));
@@ -689,7 +698,7 @@ impl Carte {
         }
         self.partage.signal.notify_all();
         if self.tuiles.len() > GARDEES {
-            let mut v: Vec<(u64, Cle)> = self.tuiles.iter().filter(|(k, _)| k.0 > 0).map(|(k, t)| (t.vue, *k)).collect();
+            let mut v: Vec<(u64, Cle)> = self.tuiles.iter().filter(|(k, _)| k.0 & !SANS_PONTS > 0).map(|(k, t)| (t.vue, *k)).collect();
             v.sort();
             for (_, k) in v.iter().take(self.tuiles.len() - GARDEES) {
                 self.tuiles.remove(k);
@@ -697,8 +706,9 @@ impl Carte {
         }
     }
 
-    /// Pour la 3D : les images des tuiles `cles` (la plus importante d'abord), ou d'un
-    /// ancêtre et la partie qui les couvre. La tuile du niveau 0 est toujours demandée.
+    /// Pour la 3D : les images des tuiles `cles` (la plus importante d'abord), sans les
+    /// ponts, ou d'un ancêtre et la partie qui les couvre. La tuile du niveau 0 est
+    /// toujours demandée.
     pub fn textures(&mut self, cles: &[Cle]) -> Vec<Option<(Image, [f32; 4])>> {
         self.image += 1;
         self.ranger();
@@ -707,10 +717,11 @@ impl Carte {
             Err(_) => return vec![None; cles.len()],
         };
         let mut demandes = Vec::new();
-        let mut v: Vec<_> = cles.iter().zip(&boites[1..]).map(|(&c, &b)| self.image_de(c, b, &mut demandes)).collect();
+        // Les tuiles sans les ponts : les tabliers sont en volume
+        let mut v: Vec<_> = cles.iter().zip(&boites[1..]).map(|(&c, &b)| self.image_de((c.0 | SANS_PONTS, c.1, c.2), b, &mut demandes)).collect();
         // La racine en premier : de quoi montrer en attendant
         let mut d0 = Vec::new();
-        self.image_de((0, 0, 0), boites[0], &mut d0);
+        self.image_de((SANS_PONTS, 0, 0), boites[0], &mut d0);
         d0.extend(demandes);
         self.envoyer(d0);
         v.shrink_to_fit();
@@ -871,6 +882,30 @@ mod tests {
         let o = ordre_lu("40 40 999 x 10");
         assert_eq!(o.len(), ordre_par_defaut().len());
         assert_eq!(&o[..2], &[COUCHE_BATI, COUCHE_EAU]);
+    }
+
+    #[test]
+    fn les_textures_de_la_3d_n_ont_pas_les_ponts() {
+        // Un pont sur l'eau, à l'ouest
+        let mut l = lieu();
+        let xo = origine() as f32 + 64.0 * 5.0;
+        l.ponts.push(Route { genre: GRANDE, largeur: 20.0, points: vec![[xo - 200.0, 0.0, 60.0], [xo + 200.0, 0.0, 60.0]] });
+        let d = Donnees::new(l);
+        let (x0, _, c) = d.monde();
+        let t = c / 256.0;
+        let cle = (8u8, ((xo - x0) / t).floor() as i32, ((0.0 - x0) / t).floor() as i32);
+        let pixel = |cle: Cle| {
+            let b = boite_tuile(&d, (cle.0 & !SANS_PONTS, cle.1, cle.2));
+            let px = rendre(&d, cle);
+            let m = (b[2] - b[0]) / TUILE as f32;
+            let i = ((0.0 - b[1]) / m) as usize * TUILE + ((xo - b[0]) / m) as usize;
+            [px[i * 4], px[i * 4 + 1], px[i * 4 + 2]]
+        };
+        let int = couleur_route(GRANDE, true).0.map(|v| (v * 255.0) as u8);
+        let p = pixel(cle);
+        assert!((0..3).all(|k| (p[k] as i32 - int[k] as i32).abs() <= 2), "{p:?} {int:?}");
+        let p = pixel((cle.0 | SANS_PONTS, cle.1, cle.2));
+        assert!(p[2] > p[0] && p[2] > 180, "{p:?}");
     }
 
     #[test]
