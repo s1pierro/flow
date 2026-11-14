@@ -4,8 +4,8 @@
 //! - **Des vues dans la fenêtre**, partagées comme l'espace de travail de Flow (le
 //!   titre de chaque vue ouvre son menu : changer de vue, la partager, la fermer) :
 //!   la **Vue 3D** (autant qu'on veut, chacune avec sa caméra), l'**Arborescence**
-//!   (les objets du fichier) et les **Opérations** (le tableau de tout ce qu'on peut
-//!   faire, et quand).
+//!   (les objets du fichier), les **Opérations** (le tableau de tout ce qu'on peut
+//!   faire, et quand) et les **Modifieurs** de l'objet actif.
 //! - **Vue 3D** : en haut, le mode (Sommets, Arêtes, Faces) et « Cadrer » ; toucher un
 //!   élément l'ajoute à la sélection ou l'en retire, toucher le vide la vide, toucher
 //!   un autre objet le rend actif. Un doigt qui glisse fait tourner la vue, deux
@@ -14,16 +14,28 @@
 //!   s'allument : glisser transforme alors la sélection au lieu de tourner la vue.
 //! - **En haut** : annuler, rétablir, le nom, « Enregistrer ».
 //!
+//! - **Modifieurs** (`crate::modifieurs`) : une pile par objet (Booléen avec une ou
+//!   plusieurs cibles, Répétition, Miroir), calculée dans un fil sans toucher à la forme
+//!   de base ; la vue 3D montre le résultat (la base reste en arêtes et sommets pour
+//!   l'éditer), les cibles en fil de fer. « Appliquer » fige un modifieur, « Couper en
+//!   deux » sépare l'objet par les cibles d'un booléen.
+//!
 //! Le fichier se réécrit en glTF binaire, un nœud par objet à sa place d'origine. Ce
 //! que Mailles ne sait pas réécrire (armatures, animations, textures) n'est pas
 //! perdu : le premier enregistrement va alors dans une copie (`nom-mailles.glb`).
+//! L'enregistrement fige les modifieurs : chaque objet y va modifié, les cibles des
+//! booléens non. Le brouillon (mis à l'abri), lui, garde les formes de base et leurs
+//! piles (dans `brouillon.modifs`, à côté).
 
 use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Maillage3d, Rect, Vue3d};
 use crate::gestes::Geste;
 use crate::glb;
+use crate::booleens::{Forme, Op};
 use crate::maille::{self as m, Element, Mode, Objet, Selection, Transfo};
+use crate::modifieurs::{self as mo, Genre as Gm, Modifieur, Resultats};
+use crate::widgets::Body;
 use crate::sculpture::{self as sc, Camera, V3};
 use crate::surface::{Changement, FenetreId, Placee, Sens, Surface};
 use crate::ui::{id, sub_id, Id, Sense};
@@ -43,10 +55,14 @@ const BROUILLONS: &str = "brouillons";
 const HISTORIQUE: usize = 40;
 
 /// Les vues de la fenêtre.
-const VUES: [(&str, Icon); 3] = [("Vue 3D", Icon::Cube), ("Arborescence", Icon::List), ("Opérations", Icon::Menu)];
+const VUES: [(&str, Icon); 4] = [("Vue 3D", Icon::Cube), ("Arborescence", Icon::List), ("Opérations", Icon::Menu), ("Modifieurs", Icon::Sliders)];
+/// Les clés des vues dans l'état (le lecteur de dispositions ne prend que lettres,
+/// chiffres, - et _ : pas les noms affichés).
+const CLES_VUES: [&str; 4] = ["vue3d", "arbre", "operations", "modifieurs"];
 const V3D: u32 = 0;
 const ARBRE: u32 = 1;
 const OPS: u32 = 2;
+const MODIFS: u32 = 3;
 
 /// Au-delà, la vue 3D ne montre que les arêtes choisies (le dessin deviendrait lent).
 const ARETES_MAX: usize = 20_000;
@@ -100,14 +116,21 @@ pub struct Mailles {
     pincement: f32,
     id: u64,
     revision: u64,
-    gpu: Option<(u64, Arc<Vec<f32>>, Arc<Vec<u32>>, Arc<Vec<(usize, usize)>>)>,
-    surligne: Option<(u64, Arc<Vec<u32>>)>,
+    gpu: Option<(u64, Arc<Vec<f32>>, Arc<Vec<u32>>)>,
+    surligne: Option<(u64, Arc<Vec<f32>>, Arc<Vec<u32>>)>,
     dp: f32,
     /// La boîte du premier enregistrement est ouverte : le nom se saisit dans `nom` ;
     /// l'erreur de la dernière tentative ; Entrée a été frappée.
     boite: bool,
     erreur: Option<String>,
     valider: bool,
+    /// Les résultats des modifieurs (calculés pour la révision `.0`), le calcul en
+    /// cours (pour sa révision), et un numéro qui change à chaque arrivée.
+    resultats: (u64, Arc<Resultats>),
+    calcul: Option<(u64, std::sync::mpsc::Receiver<Resultats>)>,
+    res_num: u64,
+    /// Le curseur qu'on glisse : ses retouches ne font qu'un pas d'annulation.
+    fusion: Option<Id>,
 }
 
 /// Les vues de départ : la 3D à gauche, l'arborescence et les opérations à droite.
@@ -156,6 +179,10 @@ impl Default for Mailles {
             boite: false,
             erreur: None,
             valider: false,
+            resultats: (u64::MAX, Arc::new(Resultats::new())),
+            calcul: None,
+            res_num: 0,
+            fusion: None,
         }
     }
 }
@@ -170,7 +197,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     if let Some(md) = e.texte("mode").and_then(Mode::depuis) {
         a.mode = md;
     }
-    if let Some(s) = e.texte("vues").and_then(|t| Surface::lire_avec(t, &|n| VUES.iter().position(|v| v.0 == n).map(|i| i as u32))) {
+    if let Some(s) = e.texte("vues").and_then(|t| Surface::lire_avec(t, &|n| CLES_VUES.iter().position(|v| *v == n).map(|i| i as u32))) {
         a.vues = s;
     }
     for p in a.vues.disposer(Rect::default()) {
@@ -206,6 +233,46 @@ fn distance_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let l = dx * dx + dy * dy;
     let t = if l > 0.0 { (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l).clamp(0.0, 1.0) } else { 0.0 };
     ((p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dy).powi(2)).sqrt()
+}
+
+/// Des pilules posées dans une colonne défilante (à la ligne quand la place manque) ;
+/// renvoie celle touchée.
+fn pilules(cx: &mut Cx, b: &mut Body, base: Id, items: &[(&str, bool)]) -> Option<usize> {
+    let (hc, gap) = (cx.commande(), cx.ecart() * 0.6);
+    let l: Vec<f32> = items.iter().map(|(n, _)| cx.pill_width(n)).collect();
+    let rang = super::fichiers::ranger(&l, b.w, gap);
+    let col = cx.couleurs();
+    let mut touchee = None;
+    for (i, (nom, on)) in items.iter().enumerate() {
+        let (x, ligne) = rang[i];
+        let rect = Rect::new(b.x + x, b.y + ligne as f32 * (hc + gap), l[i], hc);
+        let id = sub_id(base, i);
+        if cx.ui.click(id, rect, Some(b.id())) {
+            touchee = Some(i);
+        }
+        let ray = cx.theme.rayon(hc);
+        cx.dl.rrect(rect, ray, if *on { col.accent } else if cx.ui.pressed(id) { col.ligne } else { col.puce });
+        cx.centered(rect, nom, 15.0, if *on { col.sur_accent } else { col.texte });
+    }
+    let lignes = rang.iter().map(|x| x.1).max().map_or(0, |m| m + 1);
+    b.y += lignes as f32 * (hc + gap) + gap;
+    touchee
+}
+
+/// La normale d'un polygone (Newell).
+fn normale(s: &[V3], p: &[u32]) -> V3 {
+    let mut n = [0.0f32; 3];
+    for i in 0..p.len() {
+        let (a, b) = (s[p[i] as usize], s[p[(i + 1) % p.len()] as usize]);
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    if sc::norme(n) < 1e-12 {
+        [0.0, 0.0, 1.0]
+    } else {
+        sc::unitaire(n)
+    }
 }
 
 fn teinte(c: [f32; 3], a: u8) -> Color {
@@ -289,6 +356,8 @@ impl Mailles {
                     .collect();
                 if !brouillon {
                     self.perdu = s.perdu;
+                } else if let Some(t) = self.brouillon.as_ref().and_then(|b| std::fs::read_to_string(b.with_extension("modifs")).ok()) {
+                    self.lire_modifs(&t);
                 }
                 self.actif = 0;
                 self.sel = Selection::default();
@@ -440,15 +509,30 @@ impl Mailles {
     }
 
     /// Les objets en glTF binaire : chacun dans le repère de son nœud, en triangles,
-    /// avec des normales lissées.
-    fn octets(&self) -> Vec<u8> {
-        let prepares: Vec<(Vec<V3>, Vec<V3>, Vec<[u32; 3]>)> = self
+    /// avec des normales lissées. `figer` : chaque objet modifié par sa pile, les cibles
+    /// des booléens laissées de côté (l'enregistrement) ; sinon les formes de base (le
+    /// brouillon, qui garde les piles à côté).
+    fn octets(&mut self, figer: bool) -> Vec<u8> {
+        let (res, cibles) = if figer && self.objets.iter().any(|o| !o.modifs.is_empty()) {
+            self.attendre_calculs();
+            (self.resultats.1.clone(), mo::cibles(&self.objets))
+        } else {
+            (Arc::new(Resultats::new()), Default::default())
+        };
+        let formes: Vec<(usize, Forme)> = self
             .objets
             .iter()
-            .map(|o| {
-                let inv = glb::inverse(&o.matrice);
-                let local: Vec<V3> = o.sommets.iter().map(|p| glb::appliquer(&inv, *p)).collect();
-                let tris: Vec<[u32; 3]> = o.triangles().into_iter().map(|t| t.0).collect();
+            .enumerate()
+            .filter(|(k, _)| !cibles.contains(k))
+            .map(|(k, o)| (k, res.get(&o.id).map_or_else(|| mo::forme(o), |r| (*r.forme).clone())))
+            .filter(|(_, f)| !(figer && f.vide()))
+            .collect();
+        let prepares: Vec<(usize, Vec<V3>, Vec<V3>, Vec<[u32; 3]>)> = formes
+            .iter()
+            .map(|(k, f)| {
+                let inv = glb::inverse(&self.objets[*k].matrice);
+                let local: Vec<V3> = f.sommets.iter().map(|p| glb::appliquer(&inv, *p)).collect();
+                let tris: Vec<[u32; 3]> = f.faces.iter().flat_map(|p| (1..p.len().saturating_sub(1)).map(move |i| [p[0], p[i], p[i + 1]])).collect();
                 let mut normales = vec![[0.0f32; 3]; local.len()];
                 for t in &tris {
                     let [a, b, c] = t.map(|i| local[i as usize]);
@@ -458,26 +542,77 @@ impl Mailles {
                     }
                 }
                 let normales = normales.into_iter().map(|n| if sc::norme(n) > 1e-12 { sc::unitaire(n) } else { [0.0, 1.0, 0.0] }).collect();
-                (local, normales, tris)
+                (*k, local, normales, tris)
             })
             .collect();
-        let ecrits: Vec<glb::ObjetEcrit> = self
-            .objets
+        let ecrits: Vec<glb::ObjetEcrit> = prepares
             .iter()
-            .zip(&prepares)
-            .map(|(o, (p, n, t))| glb::ObjetEcrit { nom: &o.nom, matrice: o.matrice, positions: p, normales: n, triangles: t, couleur: o.couleur })
+            .map(|(k, p, n, t)| {
+                let o = &self.objets[*k];
+                glb::ObjetEcrit { nom: &o.nom, matrice: o.matrice, positions: p, normales: n, triangles: t, couleur: o.couleur }
+            })
             .collect();
         glb::ecrire_objets(&ecrits, "Flow · Mailles")
     }
 
+    /// Les piles de modifieurs, en texte (le brouillon) : `objet k`, puis une ligne par
+    /// modifieur ; les cibles par leur rang dans la liste des objets.
+    fn ecrire_modifs(&self) -> String {
+        let rang = |id: u64| self.objets.iter().position(|o| o.id == id);
+        let b = |x: bool| if x { "1" } else { "0" };
+        let mut t = String::new();
+        for (k, o) in self.objets.iter().enumerate().filter(|(_, o)| !o.modifs.is_empty()) {
+            t += &format!("objet {k}\n");
+            for m in &o.modifs {
+                let a = b(m.actif);
+                match &m.genre {
+                    Gm::Booleen { op, cibles } => {
+                        let op = Op::TOUTES.iter().position(|x| x == op).unwrap_or(0);
+                        let c: Vec<String> = cibles.iter().filter_map(|&id| rang(id)).map(|r| r.to_string()).collect();
+                        t += &format!("booleen {a} {op} {}\n", c.join(" "));
+                    }
+                    Gm::Repetition { n, relatif, decalage: d, unir } => t += &format!("repetition {a} {n} {} {} {} {} {}\n", b(*relatif), d[0], d[1], d[2], b(*unir)),
+                    Gm::Miroir { axes, souder } => t += &format!("miroir {a} {} {} {} {}\n", b(axes[0]), b(axes[1]), b(axes[2]), b(*souder)),
+                }
+            }
+        }
+        t
+    }
+
+    /// Relit les piles écrites par `ecrire_modifs` (ce qui ne se lit pas est ignoré).
+    fn lire_modifs(&mut self, texte: &str) {
+        let ids: Vec<u64> = self.objets.iter().map(|o| o.id).collect();
+        let mut k: Option<usize> = None;
+        for l in texte.lines() {
+            let mots: Vec<&str> = l.split_whitespace().collect();
+            let n = |i: usize| mots.get(i).and_then(|x| x.parse::<f32>().ok());
+            let oui = |i: usize| mots.get(i) == Some(&"1");
+            let genre = match mots.first().copied() {
+                Some("objet") => {
+                    k = n(1).map(|x| x as usize).filter(|&x| x < self.objets.len());
+                    continue;
+                }
+                Some("booleen") => Gm::Booleen { op: Op::TOUTES[(n(2).unwrap_or(0.0) as usize).min(2)], cibles: mots.iter().skip(3).filter_map(|x| x.parse::<usize>().ok()).filter_map(|r| ids.get(r).copied()).collect() },
+                Some("repetition") => Gm::Repetition { n: n(2).unwrap_or(1.0).max(1.0) as u32, relatif: oui(3), decalage: [n(4).unwrap_or(0.0), n(5).unwrap_or(0.0), n(6).unwrap_or(0.0)], unir: oui(7) },
+                Some("miroir") => Gm::Miroir { axes: [oui(2), oui(3), oui(4)], souder: oui(5) },
+                _ => continue,
+            };
+            if let Some(k) = k {
+                self.objets[k].modifs.push(Modifieur { genre, actif: oui(1) });
+            }
+        }
+    }
+
     fn enregistrer(&mut self, c: &Commun) -> Result<(), String> {
         let chemin = self.destination(c)?;
-        ecrire_octets(&chemin, &self.octets())?;
+        let octets = self.octets(true);
+        ecrire_octets(&chemin, &octets)?;
         self.chemin = Some(chemin);
         self.perdu.clear();
         self.modifie = false;
         self.nom = Edition::default();
         if let Some(b) = self.brouillon.take() {
+            let _ = std::fs::remove_file(b.with_extension("modifs"));
             let _ = std::fs::remove_file(b);
         }
         Ok(())
@@ -511,46 +646,123 @@ impl Mailles {
         }
     }
 
-    /// Ce qui part vers la carte graphique : les faces des objets visibles, à plat
-    /// (trois sommets par triangle, avec la normale de sa face), et le surlignage des
-    /// faces choisies.
-    fn maillages3d(&mut self) -> (Maillage3d, Option<Maillage3d>) {
-        if self.gpu.as_ref().is_none_or(|g| g.0 != self.revision) {
-            let mut sommets = Vec::new();
-            let mut origine = Vec::new();
-            for (k, o) in self.objets.iter().enumerate().filter(|(_, o)| o.visible) {
-                let normales: Vec<V3> = (0..o.faces.len()).map(|f| o.normale(f)).collect();
-                for (t, f) in o.triangles() {
-                    for i in t {
-                        sommets.extend_from_slice(&o.sommets[i as usize]);
-                        sommets.extend_from_slice(&normales[f]);
-                    }
-                    origine.push((k, f));
+    /// Suit le calcul des modifieurs : prend le résultat arrivé, et en lance un nouveau
+    /// si la forme a changé depuis (un seul à la fois ; en attendant, le dernier résultat
+    /// reste affiché).
+    fn suivre_calculs(&mut self) {
+        if let Some((rev, rx)) = &self.calcul {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.resultats = (*rev, Arc::new(r));
+                    self.calcul = None;
+                    self.res_num += 1;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => {
+                    // Le fil est tombé : ne pas recommencer sur la même forme
+                    self.resultats = (*rev, Arc::new(Resultats::new()));
+                    self.calcul = None;
+                    self.res_num += 1;
+                    self.message = Some(("Calcul des modifieurs impossible sur cette forme".into(), true));
                 }
             }
-            let indices: Vec<u32> = (0..origine.len() as u32 * 3).collect();
-            self.gpu = Some((self.revision, Arc::new(sommets), Arc::new(indices), Arc::new(origine)));
+        }
+        if self.resultats.0 == self.revision {
+            return;
+        }
+        if !self.objets.iter().any(|o| !o.modifs.is_empty()) {
+            if !self.resultats.1.is_empty() {
+                self.res_num += 1;
+            }
+            self.resultats = (self.revision, Arc::new(Resultats::new()));
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let objets = self.objets.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(mo::evaluer_tout(&objets));
+        });
+        self.calcul = Some((self.revision, rx));
+    }
+
+    /// Attend le calcul des modifieurs (essais, enregistrement).
+    fn attendre_calculs(&mut self) {
+        self.suivre_calculs();
+        if let Some((rev, rx)) = self.calcul.take() {
+            self.resultats = (rev, Arc::new(rx.recv().unwrap_or_default()));
+            self.res_num += 1;
+        }
+    }
+
+    /// La forme montrée d'un objet : son résultat s'il a des modifieurs (le dernier
+    /// calculé), sinon sa forme.
+    fn forme_vue(&self, o: &Objet) -> Option<Arc<Forme>> {
+        self.resultats.1.get(&o.id).map(|r| r.forme.clone())
+    }
+
+    /// Ce qui part vers la carte graphique : les faces des objets visibles (modifiés,
+    /// sans les cibles des booléens), à plat (trois sommets par triangle, avec la
+    /// normale de sa face), et le surlignage des faces choisies de l'objet actif.
+    fn maillages3d(&mut self) -> (Maillage3d, Option<Maillage3d>) {
+        let cle_gpu = self.revision.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.res_num;
+        if self.gpu.as_ref().is_none_or(|g| g.0 != cle_gpu) {
+            let mut sommets = Vec::new();
+            let cibles = mo::cibles(&self.objets);
+            for (k, o) in self.objets.iter().enumerate().filter(|(_, o)| o.visible) {
+                if cibles.contains(&k) {
+                    continue;
+                }
+                let vue = self.forme_vue(o);
+                let (s, faces) = match &vue {
+                    Some(f) => (&f.sommets, &f.faces),
+                    None => (&o.sommets, &o.faces),
+                };
+                for p in faces {
+                    let n = normale(s, p);
+                    for i in 1..p.len().saturating_sub(1) {
+                        for v in [p[0], p[i], p[i + 1]] {
+                            sommets.extend_from_slice(&s[v as usize]);
+                            sommets.extend_from_slice(&n);
+                        }
+                    }
+                }
+            }
+            let indices: Vec<u32> = (0..sommets.len() as u32 / 6).collect();
+            self.gpu = Some((cle_gpu, Arc::new(sommets), Arc::new(indices)));
             self.surligne = None;
         }
-        let (rev, sommets, indices, origine) = self.gpu.clone().unwrap();
-        let principal = Maillage3d { id: self.id, revision: rev, sommets: sommets.clone(), indices };
-        // Les faces choisies (ou couvertes par la sélection) de l'objet actif
-        let choisies = self.objets.get(self.actif).map(|o| self.sel.faces_de(o, self.mode)).unwrap_or_default();
+        let (rev, sommets, indices) = self.gpu.clone().unwrap();
+        let principal = Maillage3d { id: self.id, revision: rev, sommets, indices };
+        // Les faces choisies (ou couvertes par la sélection) de l'objet actif, sur sa
+        // forme de base
+        let Some(o) = self.objets.get(self.actif).filter(|o| o.visible) else { return (principal, None) };
+        let choisies = self.sel.faces_de(o, self.mode);
         if choisies.is_empty() {
             return (principal, None);
         }
         let cle = {
             use std::hash::{Hash, Hasher};
             let mut h = std::hash::DefaultHasher::new();
-            (rev, self.actif, &choisies).hash(&mut h);
+            (self.revision, self.actif, &choisies).hash(&mut h);
             h.finish()
         };
         if self.surligne.as_ref().is_none_or(|s| s.0 != cle) {
-            let ind: Vec<u32> = origine.iter().enumerate().filter(|(_, (k, f))| *k == self.actif && choisies.contains(f)).flat_map(|(t, _)| [t as u32 * 3, t as u32 * 3 + 1, t as u32 * 3 + 2]).collect();
-            self.surligne = Some((cle, Arc::new(ind)));
+            let mut v = Vec::new();
+            for &f in &choisies {
+                let p = &o.faces[f];
+                let n = normale(&o.sommets, p);
+                for i in 1..p.len().saturating_sub(1) {
+                    for k in [p[0], p[i], p[i + 1]] {
+                        v.extend_from_slice(&o.sommets[k as usize]);
+                        v.extend_from_slice(&n);
+                    }
+                }
+            }
+            let ind: Vec<u32> = (0..v.len() as u32 / 6).collect();
+            self.surligne = Some((cle, Arc::new(v), Arc::new(ind)));
         }
         let s = self.surligne.as_ref().unwrap();
-        (principal, Some(Maillage3d { id: self.id + 1, revision: s.0, sommets, indices: s.1.clone() }))
+        (principal, Some(Maillage3d { id: self.id + 1, revision: s.0, sommets: s.1.clone(), indices: s.2.clone() }))
     }
 
     /// Le contexte des opérations : mode, sélection, objet actif.
@@ -843,6 +1055,20 @@ impl Mailles {
         let accent3 = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
         cx.clip(Some(z));
         cx.dl.vue3d(Vue3d { rect: z, mvp, vue: cam.vue(), maillage: principal, couleur, dessus: dessus.map(|m3| (m3, accent3)) });
+        // Les cibles des booléens, en fil de fer (celle de l'objet actif l'est déjà)
+        let fil_cible = [col.pale[0], col.pale[1], col.pale[2], 150];
+        for k in mo::cibles(&self.objets) {
+            let o = &self.objets[k];
+            if !o.visible || k == self.actif {
+                continue;
+            }
+            let ecran: Vec<Option<[f32; 2]>> = o.sommets.iter().map(|q| projeter(&mvp, z, *q)).collect();
+            for ar in o.aretes().into_iter().take(ARETES_MAX) {
+                if let (Some(pa), Some(pb)) = (ecran[ar.0 as usize], ecran[ar.1 as usize]) {
+                    cx.dl.line(pa, pb, 1.0 * d, fil_cible);
+                }
+            }
+        }
         // Les arêtes et les sommets de l'objet actif, du côté de l'œil
         if let Some(o) = self.objets.get(self.actif).filter(|o| o.visible) {
             let oeil = cam.oeil();
@@ -945,6 +1171,7 @@ impl Mailles {
         let h = (cx.theme.ligne * d * 1.2).round();
         let mut actif = None;
         let mut voir = None;
+        let cibles = mo::cibles(&self.objets);
         for (k, o) in self.objets.iter().enumerate() {
             let ligne = Rect::new(r.x, b.y, r.w, h);
             let oeil = Rect::new(ligne.right() - h, ligne.y, h, h);
@@ -965,7 +1192,14 @@ impl Mailles {
             let x = b.x + s + 12.0 * d;
             cx.clip(Some(Rect::new(x, ligne.y, (oeil.x - x).max(0.0), h).intersect(&liste)));
             cx.text_at(x, ligne.y + h * 0.36, &o.nom, 15.0, if est { col.accent } else { col.texte });
-            cx.text_at(x, ligne.y + h * 0.72, &format!("{} sommets · {} faces", o.sommets.len(), o.faces.len()), 12.0, col.pale);
+            let mut info = format!("{} sommets · {} faces", o.sommets.len(), o.faces.len());
+            if !o.modifs.is_empty() {
+                info += &format!(" · {} modifieur{}", o.modifs.len(), if o.modifs.len() > 1 { "s" } else { "" });
+            }
+            if cibles.contains(&k) {
+                info += " · cible";
+            }
+            cx.text_at(x, ligne.y + h * 0.72, &info, 12.0, col.pale);
             cx.clip(Some(liste));
             // L'œil : plein si l'objet se voit
             let e = oeil.inset(h * 0.3);
@@ -1047,6 +1281,219 @@ impl Mailles {
         if let Some(k) = faite {
             self.executer(k);
         }
+    }
+
+    /// Les modifieurs de l'objet actif : chacun avec ses réglages, son interrupteur,
+    /// son erreur s'il n'a pas pu s'appliquer, et ses actions (monter, descendre,
+    /// appliquer, retirer ; couper en deux pour un booléen) ; en bas, de quoi en ajouter.
+    fn vue_modifieurs(&mut self, cx: &mut Cx, c: &mut Commun, p: &Placee, base: Id) {
+        let col = cx.couleurs();
+        let r = p.contenu;
+        let kv = sub_id(base, p.id as usize * 1000);
+        cx.dl.rrect(r, 0.0, col.surface);
+        let corps = sub_id(kv, 1);
+        let mut b = cx.body(corps, r, &c.scrolls);
+        let k = self.actif;
+        let Some(o) = self.objets.get(k) else {
+            cx.body_end(b, &mut c.scrolls);
+            return;
+        };
+        let avant = self.instantane();
+        let mut modifs = o.modifs.clone();
+        let autres: Vec<(u64, String, [f32; 3])> = self.objets.iter().filter(|x| x.id != o.id).map(|x| (x.id, x.nom.clone(), x.couleur)).collect();
+        let erreurs: Vec<Option<String>> = self.resultats.1.get(&o.id).map(|r| r.erreurs.clone()).unwrap_or_default();
+        let en_cours = self.calcul.is_some();
+        cx.section(&mut b, &o.nom.to_uppercase());
+        if modifs.is_empty() {
+            cx.paragraph(&mut b, "Aucun modifieur. Ils changent la forme montrée et enregistrée sans toucher à la forme de base, qui reste à éditer.");
+        } else if en_cours {
+            cx.paragraph(&mut b, "Calcul en cours…");
+        }
+        enum Action {
+            Monter(usize),
+            Descendre(usize),
+            Appliquer(usize),
+            Retirer(usize),
+            Couper(usize),
+            Ajouter(&'static str),
+        }
+        let mut action = None;
+        let mut glisse = None;
+        let n = modifs.len();
+        for (i, m) in modifs.iter_mut().enumerate() {
+            let mid = sub_id(kv, 100 + i * 100);
+            cx.section(&mut b, &format!("{} · {}", i + 1, m.nom()));
+            if let Some(Some(e)) = erreurs.get(i) {
+                let y = b.y + 10.0 * cx.dp;
+                cx.text_at(b.x, y, e, 14.0, col.accent);
+                b.y += 24.0 * cx.dp;
+            }
+            cx.toggle(&mut b, sub_id(mid, 1), "Actif", &mut m.actif);
+            match &mut m.genre {
+                Gm::Booleen { op, cibles } => {
+                    let ops: Vec<(&str, bool)> = Op::TOUTES.iter().map(|x| (x.nom(), x == op)).collect();
+                    if let Some(j) = pilules(cx, &mut b, sub_id(mid, 10), &ops) {
+                        *op = Op::TOUTES[j];
+                    }
+                    cx.section(&mut b, "CIBLES");
+                    if autres.is_empty() {
+                        cx.paragraph(&mut b, "Ajoutez un autre objet (Arborescence) pour qu'il serve de cible.");
+                    }
+                    for (j, (id, nom, couleur)) in autres.iter().enumerate() {
+                        let choisie = cibles.contains(id);
+                        if cx.row(&mut b, sub_id(mid, 20 + j), nom, Some(teinte(*couleur, 255)), choisie) {
+                            if choisie {
+                                cibles.retain(|x| x != id);
+                            } else {
+                                cibles.push(*id);
+                            }
+                        }
+                    }
+                }
+                Gm::Repetition { n, relatif, decalage, unir } => {
+                    let mut x = *n as f32;
+                    let id = sub_id(mid, 10);
+                    cx.slider(&mut b, id, "Copies", &n.to_string(), &mut x, 1.0, 20.0);
+                    if cx.ui.pressed(id) {
+                        glisse = Some(id);
+                    }
+                    *n = (x.round() as u32).clamp(1, 20);
+                    cx.toggle(&mut b, sub_id(mid, 11), "Décalage relatif à la taille", relatif);
+                    let lim = if *relatif { 3.0 } else { 10.0 };
+                    for (a, nom) in ["X", "Y", "Z"].iter().enumerate() {
+                        let id = sub_id(mid, 12 + a);
+                        let mut v = decalage[a];
+                        let montre = if *relatif { format!("{:.2} × taille", v) } else { format!("{:.2} m", v) };
+                        cx.slider(&mut b, id, &format!("Décalage {nom}"), &montre, &mut v, -lim, lim);
+                        if cx.ui.pressed(id) {
+                            glisse = Some(id);
+                            // Des pas ronds : un centième (relatif) ou un centimètre
+                            decalage[a] = (v * 100.0).round() / 100.0;
+                        }
+                    }
+                    cx.toggle(&mut b, sub_id(mid, 16), "Unir les copies", unir);
+                }
+                Gm::Miroir { axes, souder } => {
+                    let l: Vec<(&str, bool)> = ["X", "Y", "Z"].iter().enumerate().map(|(a, nom)| (*nom, axes[a])).collect();
+                    if let Some(j) = pilules(cx, &mut b, sub_id(mid, 10), &l) {
+                        axes[j] = !axes[j];
+                    }
+                    cx.toggle(&mut b, sub_id(mid, 14), "Souder sur le plan", souder);
+                }
+            }
+            let mut l: Vec<(&str, bool)> = Vec::new();
+            let mut quoi = Vec::new();
+            if i > 0 {
+                l.push(("Monter", false));
+                quoi.push(Action::Monter(i));
+            }
+            if i + 1 < n {
+                l.push(("Descendre", false));
+                quoi.push(Action::Descendre(i));
+            }
+            l.push(("Appliquer", false));
+            quoi.push(Action::Appliquer(i));
+            if matches!(m.genre, Gm::Booleen { .. }) {
+                l.push(("Couper en deux", false));
+                quoi.push(Action::Couper(i));
+            }
+            l.push(("Retirer", false));
+            quoi.push(Action::Retirer(i));
+            if let Some(j) = pilules(cx, &mut b, sub_id(mid, 50), &l) {
+                action = quoi.into_iter().nth(j);
+            }
+        }
+        cx.section(&mut b, "AJOUTER");
+        let l: Vec<(&str, bool)> = mo::GENRES.iter().map(|g| (g.1, false)).collect();
+        if let Some(j) = pilules(cx, &mut b, sub_id(kv, 90), &l) {
+            action = Some(Action::Ajouter(mo::GENRES[j].0));
+        }
+        for g in mo::GENRES {
+            let y = b.y + 8.0 * cx.dp;
+            cx.text_at(b.x, y, &format!("{} : {}", g.1, g.2), 12.5, col.pale);
+            b.y += 20.0 * cx.dp;
+        }
+        cx.body_end(b, &mut c.scrolls);
+        // Les réglages changés : un pas d'annulation (un seul pour tout un glissé)
+        if modifs != self.objets[k].modifs {
+            self.objets[k].modifs = modifs;
+            self.retouche();
+            if glisse.is_some() && self.fusion == glisse {
+                self.modifie = true;
+                self.futur.clear();
+            } else {
+                self.noter(avant.clone());
+            }
+        }
+        self.fusion = glisse;
+        let Some(a) = action else { return };
+        let avant = self.instantane();
+        match a {
+            Action::Monter(i) => self.objets[k].modifs.swap(i, i - 1),
+            Action::Descendre(i) => self.objets[k].modifs.swap(i, i + 1),
+            Action::Retirer(i) => {
+                self.objets[k].modifs.remove(i);
+            }
+            Action::Ajouter(cle) => {
+                if let Some(m) = Modifieur::neuf(cle) {
+                    self.objets[k].modifs.push(m);
+                }
+            }
+            Action::Appliquer(i) => match mo::appliquer(&self.objets, k, i) {
+                Ok(f) if !f.vide() => {
+                    let o = &mut self.objets[k];
+                    o.sommets = f.sommets;
+                    o.faces = f.faces;
+                    o.modifs.remove(i);
+                    self.sel = Selection::default();
+                    self.transfo = None;
+                }
+                Ok(_) => self.message = Some(("Le résultat est vide : rien n'est appliqué.".into(), true)),
+                Err(e) => self.message = Some((e, true)),
+            },
+            Action::Couper(i) => match mo::couper(&self.objets, k, i) {
+                Ok((dehors, dedans)) if !dehors.vide() || !dedans.vide() => {
+                    let cibles = match &self.objets[k].modifs[i].genre {
+                        Gm::Booleen { cibles, .. } => cibles.clone(),
+                        _ => Vec::new(),
+                    };
+                    let mut morceau = None;
+                    {
+                        let o = &mut self.objets[k];
+                        o.modifs.remove(i);
+                        let neuf = |f: Forme, nom: String, o: &Objet| Objet { id: m::nouvel_id(), nom, sommets: f.sommets, faces: f.faces, modifs: Vec::new(), ..o.clone() };
+                        match (dehors.vide(), dedans.vide()) {
+                            (false, false) => {
+                                morceau = Some(neuf(dedans, format!("{} (dedans)", o.nom), o));
+                                o.sommets = dehors.sommets;
+                                o.faces = dehors.faces;
+                            }
+                            (false, true) => {
+                                o.sommets = dehors.sommets;
+                                o.faces = dehors.faces;
+                            }
+                            _ => {
+                                o.sommets = dedans.sommets;
+                                o.faces = dedans.faces;
+                            }
+                        }
+                    }
+                    // Les cibles ont fait leur office : cachées
+                    for x in self.objets.iter_mut().filter(|x| cibles.contains(&x.id)) {
+                        x.visible = false;
+                    }
+                    if let Some(mc) = morceau {
+                        self.objets.insert(k + 1, mc);
+                    }
+                    self.sel = Selection::default();
+                    self.transfo = None;
+                }
+                Ok(_) => self.message = Some(("Rien à couper : le résultat est vide.".into(), true)),
+                Err(e) => self.message = Some((e, true)),
+            },
+        }
+        self.retouche();
+        self.noter(avant);
     }
 
     /// La barre de la fenêtre, à droite du titre : l'état (mode, objet, sélection, ou
@@ -1135,10 +1582,16 @@ impl Contexte for Mailles {
             e.mettre("brouillon", b.display());
         }
         e.mettre("mode", self.mode.cle());
-        e.mettre("vues", self.vues.ecrire_avec(&|v| VUES.get(v as usize).map_or("?", |x| x.0).to_string()));
+        e.mettre("vues", self.vues.ecrire_avec(&|v| CLES_VUES.get(v as usize).map_or("?", |x| x).to_string()));
         for (f, c) in &self.cameras {
             e.mettre(&format!("camera{f}"), format!("{} {} {} {} {} {}", c.lacet, c.tangage, c.distance, c.cible[0], c.cible[1], c.cible[2]));
         }
+    }
+
+    /// Tant que les modifieurs se calculent, l'image se redessine (pour voir le résultat
+    /// arriver).
+    fn anime(&self, _c: &Commun) -> bool {
+        self.calcul.is_some()
     }
 
     fn retour(&mut self, _c: &Commun) {
@@ -1153,6 +1606,7 @@ impl Contexte for Mailles {
         }
         if !self.modifie {
             if let Some(b) = self.brouillon.take() {
+                let _ = std::fs::remove_file(b.with_extension("modifs"));
                 let _ = std::fs::remove_file(b);
             }
             return;
@@ -1162,7 +1616,15 @@ impl Contexte for Mailles {
             c.dossier.as_ref().map(|d| d.join(BROUILLONS).join(format!("mailles-{t}.glb")))
         };
         let Some(chemin) = self.brouillon.clone().or_else(nouveau) else { return };
-        match ecrire_octets(&chemin, &self.octets()) {
+        let piles = self.ecrire_modifs();
+        let modifs = chemin.with_extension("modifs");
+        let ecrit = if piles.is_empty() {
+            let _ = std::fs::remove_file(&modifs);
+            Ok(())
+        } else {
+            std::fs::write(&modifs, piles).map_err(|e| e.to_string())
+        };
+        match ecrit.and_then(|_| ecrire_octets(&chemin, &self.octets(false))) {
             Ok(()) => self.brouillon = Some(chemin),
             Err(e) => crate::android::log(&format!("brouillon Mailles non écrit : {e}")),
         }
@@ -1187,6 +1649,7 @@ impl Contexte for Mailles {
         if !self.charge {
             self.charger();
         }
+        self.suivre_calculs();
         let r = p.contenu;
         let k = p.id as usize;
         self.dp = cx.dp;
@@ -1211,6 +1674,7 @@ impl Contexte for Mailles {
                 V3D => self.vue_3d(cx, vp, base),
                 ARBRE => self.vue_arbre(cx, c, vp, base),
                 OPS => self.vue_operations(cx, c, vp, base),
+                MODIFS => self.vue_modifieurs(cx, c, vp, base),
                 _ => {}
             }
         }
@@ -1348,4 +1812,57 @@ mod tests {
         assert!(b.boite && b.erreur.as_deref().is_some_and(|e| e.contains("existe déjà")));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Un cube creusé par un second, décalé d'une demi-largeur.
+    fn creuse() -> Mailles {
+        let mut a = pret();
+        a.objets = vec![m::cube("a", [0.0; 3], 0.5), m::cube("b", [0.5, 0.0, 0.0], 0.5)];
+        let id = a.objets[1].id;
+        a.objets[0].modifs.push(Modifieur { genre: Gm::Booleen { op: Op::Difference, cibles: vec![id] }, actif: true });
+        a.retouche();
+        a
+    }
+
+    #[test]
+    fn le_resultat_se_calcule_a_part_et_se_montre_sans_la_cible() {
+        let mut a = creuse();
+        a.attendre_calculs();
+        let r = &a.resultats.1[&a.objets[0].id];
+        assert!((r.forme.volume() - 0.5).abs() < 1e-5);
+        assert_eq!(a.objets[0].faces.len(), 6, "la forme de base ne change pas");
+        // La vue : le seul résultat (la cible en fil de fer), 6 faces en 12 triangles
+        let (p, _) = a.maillages3d();
+        assert_eq!(p.sommets.len(), 12 * 3 * 6);
+        // Une retouche relance le calcul
+        a.objets[1].visible = false;
+        a.retouche();
+        a.attendre_calculs();
+        let (p, _) = a.maillages3d();
+        assert_eq!(p.sommets.len(), 12 * 3 * 6, "une cible cachée creuse toujours");
+    }
+
+    #[test]
+    fn l_enregistrement_fige_et_le_brouillon_garde_les_piles() {
+        let mut a = creuse();
+        let lu = glb::lire_objets(&a.octets(true)).unwrap();
+        assert_eq!(lu.objets.len(), 1, "la cible n'est pas enregistrée");
+        let o = &lu.objets[0];
+        let f = Forme { sommets: o.positions.clone(), faces: o.triangles.iter().map(|t| t.to_vec()).collect() };
+        assert!((f.volume() - 0.5).abs() < 1e-5);
+        // Le brouillon : les deux formes de base, et la pile à côté
+        assert_eq!(glb::lire_objets(&a.octets(false)).unwrap().objets.len(), 2);
+        let t = a.ecrire_modifs();
+        let mut b = pret();
+        b.objets = vec![m::cube("a", [0.0; 3], 0.5), m::cube("b", [0.5, 0.0, 0.0], 0.5)];
+        b.lire_modifs(&t);
+        assert_eq!(b.objets[0].modifs, vec![Modifieur { genre: Gm::Booleen { op: Op::Difference, cibles: vec![b.objets[1].id] }, actif: true }]);
+        a.objets[0].modifs.push(Modifieur { genre: Gm::Repetition { n: 4, relatif: false, decalage: [0.5, -1.25, 0.0], unir: true }, actif: false });
+        a.objets[1].modifs.push(Modifieur::neuf("miroir").unwrap());
+        let mut c = pret();
+        c.objets = vec![m::cube("a", [0.0; 3], 0.5), m::cube("b", [0.5, 0.0, 0.0], 0.5)];
+        c.lire_modifs(&a.ecrire_modifs());
+        assert_eq!(c.objets[0].modifs[1], a.objets[0].modifs[1]);
+        assert_eq!(c.objets[1].modifs, a.objets[1].modifs);
+    }
+
 }

@@ -15,6 +15,8 @@ pub mod android;
 pub mod audio;
 pub mod carte;
 pub mod relief3d;
+pub mod booleens;
+pub mod modifieurs;
 pub mod voirie3d;
 pub mod clavier;
 pub mod contexte;

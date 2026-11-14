@@ -1,14 +1,15 @@
 [package]
 name = "flow"
-version = "0.66.0"
+version = "0.67.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 
-# Seule dépendance : fontdue, pour dessiner le texte à partir des polices du
-# système. OpenGL ES est chargé à l'exécution via dlopen : les libEGL de Termux
+# fontdue dessine le texte à partir des polices du système ; boolmesh (Rust pur,
+# MPL-2.0) calcule les booléens des modifieurs de Mailles. OpenGL ES est chargé à l'exécution via dlopen : les libEGL de Termux
 # (Mesa) n'existent pas sur Android, il ne faut surtout pas lier dessus.
 [dependencies]
 fontdue = "0.9"
+boolmesh = "0.2"
 # Les lieux réels de S.A.G.E. (format .reel, génération) : la crate partagée
 sage-reel = { path = "../sage/modules/sage-reel" }
 
@@ -18,5 +19,5 @@ crate-type = ["cdylib", "rlib"]
 [profile.release]
 opt-level = 3
 lto = true
-panic = "abort"
+# Pas de panic = "abort" : une panique de boolmesh est rattrapée (catch_unwind)
 strip = true

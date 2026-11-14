@@ -55,9 +55,12 @@ pub fn arete(a: u32, b: u32) -> Arete {
     (a.min(b), a.max(b))
 }
 
-/// Un objet : un nom, sa place d'origine, des sommets et des faces.
+/// Un objet : un nom, sa place d'origine, des sommets et des faces, ses modifieurs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Objet {
+    /// Unique le temps d'une session (les modifieurs désignent leurs cibles ainsi) ; il
+    /// ne s'enregistre pas.
+    pub id: u64,
     pub nom: String,
     /// La matrice du nœud lu (en colonnes) : les sommets se réécrivent dans son repère.
     pub matrice: [f32; 16],
@@ -65,6 +68,14 @@ pub struct Objet {
     pub faces: Vec<Vec<u32>>,
     pub couleur: [f32; 3],
     pub visible: bool,
+    pub modifs: Vec<crate::modifieurs::Modifieur>,
+}
+
+static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Un identifiant d'objet neuf.
+pub fn nouvel_id() -> u64 {
+    IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 pub const IDENTITE: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
@@ -73,14 +84,14 @@ pub const IDENTITE: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.
 pub fn cube(nom: &str, c: V3, demi: f32) -> Objet {
     let s: Vec<V3> = (0..8).map(|i| [c[0] + if i & 1 == 0 { -demi } else { demi }, c[1] + if i & 2 == 0 { -demi } else { demi }, c[2] + if i & 4 == 0 { -demi } else { demi }]).collect();
     let faces = vec![vec![0, 2, 3, 1], vec![4, 5, 7, 6], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 4, 6, 2], vec![1, 3, 7, 5]];
-    Objet { nom: nom.into(), matrice: IDENTITE, sommets: s, faces, couleur: [0.72, 0.74, 0.78], visible: true }
+    Objet { id: nouvel_id(), nom: nom.into(), matrice: IDENTITE, sommets: s, faces, couleur: [0.72, 0.74, 0.78], visible: true, modifs: Vec::new() }
 }
 
 impl Objet {
     /// Depuis des triangles : deux triangles voisins presque coplanaires qui forment un
     /// quadrilatère convexe se réunissent (comme à l'export, qui les avait coupés).
     pub fn depuis_triangles(nom: &str, matrice: [f32; 16], sommets: Vec<V3>, triangles: &[[u32; 3]], couleur: [f32; 3]) -> Objet {
-        let mut o = Objet { nom: nom.into(), matrice, sommets, faces: triangles.iter().map(|t| t.to_vec()).collect(), couleur, visible: true };
+        let mut o = Objet { id: nouvel_id(), nom: nom.into(), matrice, sommets, faces: triangles.iter().map(|t| t.to_vec()).collect(), couleur, visible: true, modifs: Vec::new() };
         o.reunir_triangles();
         o
     }

@@ -75,6 +75,7 @@ fn main() {
         Shot { name: "libre", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "libre-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mailles", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
+        Shot { name: "mailles-modifs", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
         Shot { name: "mailles-nom", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 21 },
         Shot { name: "mailles-portrait", w: 1200, h: 1920, dp: 2.0, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 20 },
         Shot { name: "boombox", w: 1920, h: 1200, dp: 1.5, end: false, help: false, fenetres: false, clavier: false, texte: false, disque: None, gestes: 0 },
@@ -396,7 +397,20 @@ fn main() {
             app.ouvrir_espace(&format!("fenetres = libre(F4:boombox 0.1 0.1 0.4 0.4 reduite;F1:fichiers 0.0300 0.0400 0.4500 0.7500;F2:aide 0.5200 0.0600 0.4500 0.5000;F3:mailles {mailles})\n[fenetre 3]\nmode = faces\n"));
             app.commun.theme.sombre = s.name == "libre-portrait";
         }
-        if s.name.starts_with("mailles") {
+        if s.name == "mailles-modifs" {
+            // Un brouillon : une dalle creusée par un cylindre de cubes (booléen à deux
+            // cibles) et reflétée (miroir), la vue des modifieurs ouverte
+            let dossier = std::env::var("HOME").unwrap_or_default() + "/apercu-flow";
+            let _ = std::fs::create_dir_all(&dossier);
+            let mut objets = vec![flow::maille::cube("Dalle", [1.0, 0.0, 0.0], 1.0), flow::maille::cube("Trou", [1.2, 0.0, 0.6], 0.6), flow::maille::cube("Entaille", [1.6, 0.7, -0.5], 0.5)];
+            objets[0].sommets.iter_mut().for_each(|p| p[1] *= 0.4);
+            let ecrits: Vec<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 3]>)> = objets.iter().map(|o| (o.sommets.clone(), vec![[0.0, 1.0, 0.0]; o.sommets.len()], o.triangles().into_iter().map(|t| t.0).collect())).collect();
+            let e: Vec<flow::glb::ObjetEcrit> = objets.iter().zip(&ecrits).map(|(o, (p, n, t))| flow::glb::ObjetEcrit { nom: &o.nom, matrice: o.matrice, positions: p, normales: n, triangles: t, couleur: o.couleur }).collect();
+            let chemin = format!("{dossier}/mailles-modifs.glb");
+            std::fs::write(&chemin, flow::glb::ecrire_objets(&e, "apercu")).unwrap();
+            std::fs::write(format!("{dossier}/mailles-modifs.modifs"), "objet 0\nbooleen 1 0 1 2\nmiroir 1 1 0 0 1\n").unwrap();
+            app.ouvrir_espace(&format!("fenetres = F1:mailles\n[fenetre 1]\nbrouillon = {chemin}\nmode = faces\nvues = C0.6200(F1:vue3d,F2:modifieurs)\n"));
+        } else if s.name.starts_with("mailles") {
             // Un cube en mode Faces ; un toucher choisit la face du milieu
             app.ouvrir_espace("fenetres = F1:mailles\n[fenetre 1]\nmode = faces\n");
             app.commun.theme.sombre = s.name == "mailles-portrait";
