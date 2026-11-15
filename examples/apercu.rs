@@ -381,6 +381,10 @@ fn main() {
                 if let Ok(t) = std::env::var("FLOW_SELECTION") {
                     ordre.push_str(&format!("selection = {t}\n"));
                 }
+                // FLOW_SEULES : ne fabriquer et ne voir que les tuiles sélectionnées
+                if std::env::var_os("FLOW_SEULES").is_some() {
+                    ordre.push_str("selection_seules = oui\n");
+                }
                 let outil = std::env::var("FLOW_OUTIL").ok().and_then(|o| o.parse::<usize>().ok()).unwrap_or(if s.name == "lieux" { 1 } else { 0 });
                 app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}{ordre}outil = {outil}\n"));
             }

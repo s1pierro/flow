@@ -201,6 +201,8 @@ pub struct Lieux {
     camera3d: Option<Camera>,
     /// Le rendu de la 3D : drapé de la carte, ou blanc aux arêtes tracées.
     blanc3d: bool,
+    /// En maquette : les volumes de défonce des lits montrés.
+    defonce3d: bool,
     /// Le rendu Maquette de la 3D (`maquette`).
     maquette3d: bool,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
@@ -276,6 +278,7 @@ impl Default for Lieux {
             trois_d: None,
             camera3d: None,
             blanc3d: false,
+            defonce3d: false,
             maquette3d: false,
             selection: Default::default(),
             resume: None,
@@ -314,6 +317,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     let rendu = e.texte("rendu3d").unwrap_or("");
     l.blanc3d = rendu.split_whitespace().any(|m| m == "blanc");
     l.maquette3d = rendu.split_whitespace().any(|m| m == "maquette");
+    l.defonce3d = rendu.split_whitespace().any(|m| m == "defonce");
     // Les tuiles sélectionnées : « selection = niveau/i/j … »
     l.selection = crate::selection::Selection::lire(e.texte("selection").unwrap_or(""), e.texte("selection_seules") == Some("oui"));
     if let Some(o) = e.texte("ordre") {
@@ -1284,6 +1288,7 @@ impl Lieux {
         }
         r.blanc = self.blanc3d;
         r.maquette = self.maquette3d;
+        r.defonce = self.maquette3d && self.defonce3d;
         if r.selection != self.selection.cles {
             r.selection = self.selection.cles.clone();
         }
@@ -1296,18 +1301,22 @@ impl Lieux {
         // Le rendu, en haut à gauche, par-dessus la vue (et ses gestes)
         let m = cx.ecart();
         let mut x = zone.x + m;
-        // Carte ou Maquette ; Blanc, en plus, sur l'un comme sur l'autre
-        for (i, nom) in ["Carte", "Maquette", "Blanc"].into_iter().enumerate() {
+        // Carte ou Maquette ; Blanc, en plus, sur l'un comme sur l'autre ; en maquette,
+        // la défonce des lits
+        let n = if self.maquette3d { 4 } else { 3 };
+        for (i, nom) in ["Carte", "Maquette", "Blanc", "Défonce"].into_iter().enumerate().take(n) {
             let choisi = match i {
                 0 => !self.maquette3d,
                 1 => self.maquette3d,
-                _ => self.blanc3d,
+                2 => self.blanc3d,
+                _ => self.defonce3d,
             };
             if cx.pill(sub_id(base, 30 + i), x, zone.y + m, nom, choisi) {
                 match i {
                     0 => self.maquette3d = false,
                     1 => self.maquette3d = true,
-                    _ => self.blanc3d = !self.blanc3d,
+                    2 => self.blanc3d = !self.blanc3d,
+                    _ => self.defonce3d = !self.defonce3d,
                 }
             }
             // Un peu plus d'écart avant l'interrupteur Blanc
@@ -2220,11 +2229,9 @@ impl Contexte for Lieux {
         if self.plan.is_some() {
             e.mettre("plan", "oui");
         }
-        match (self.maquette3d, self.blanc3d) {
-            (true, true) => e.mettre("rendu3d", "maquette blanc"),
-            (true, false) => e.mettre("rendu3d", "maquette"),
-            (false, true) => e.mettre("rendu3d", "blanc"),
-            _ => {}
+        let rendu: Vec<&str> = [(self.maquette3d, "maquette"), (self.blanc3d, "blanc"), (self.defonce3d, "defonce")].into_iter().filter(|r| r.0).map(|r| r.1).collect();
+        if !rendu.is_empty() {
+            e.mettre("rendu3d", rendu.join(" "));
         }
         if !self.selection.est_vide() {
             e.mettre("selection", self.selection.ecrire());

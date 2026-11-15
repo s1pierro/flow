@@ -57,6 +57,10 @@ pub struct Tuile {
     /// dessinée semi-transparente par-dessus le lit.
     pub eau_sommets: Vec<f32>,
     pub eau_indices: Vec<u32>,
+    /// Le volume de défonce de ses lits (`maillage_defonce`) : faces et arêtes.
+    pub defonce_sommets: Vec<f32>,
+    pub defonce_indices: Vec<u32>,
+    pub defonce_aretes: Vec<u32>,
     pub mesure: Mesure,
 }
 
@@ -103,7 +107,8 @@ pub fn contour(v: &[f32], ind: &[u32]) -> Vec<u32> {
 
 /// Une tuile finie, avec ses arêtes, son contour et sa mesure.
 pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
-    let (sommets, indices, pixels) = fabriquer(d, cle);
+    let (sommets, indices, pixels, def) = fabriquer_avec_defonce(d, cle);
+    let (defonce_sommets, defonce_indices, defonce_aretes) = maillage_defonce(&def);
     let aretes = aretes(&sommets, &indices);
     let contour = contour(&sommets, &indices);
     let (eau_sommets, eau_indices) = surface_eau(d, cle);
@@ -111,7 +116,7 @@ pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
     mesure.sommets += eau_sommets.len() / SOMMET;
     mesure.triangles += eau_indices.len() / 3;
     mesure.octets += (eau_sommets.len() + eau_indices.len()) * 4;
-    Tuile { cle, faite, sommets, indices, pixels, aretes, contour, eau_sommets, eau_indices, mesure }
+    Tuile { cle, faite, sommets, indices, pixels, aretes, contour, eau_sommets, eau_indices, defonce_sommets, defonce_indices, defonce_aretes, mesure }
 }
 
 /// Le fond du lit, sous l'eau : vase et sable.
@@ -410,33 +415,82 @@ pub fn solide(d: &Donnees, cle: Cle) -> Forme {
     if nx < 2 || nz < 2 {
         return Forme::default();
     }
-    let socle = socle(d);
     let rives = Rives::new(d, boite_tuile(d, cle));
     let mut f = Forme::default();
     let mut signe: Vec<f32> = Vec::with_capacity(nx * nz);
     for &z in &zs {
         for &x in &xs {
-            let s = rives.signe(d, x, z);
-            signe.push(s);
-            f.sommets.push([x, if s > 0.0 { lit(d, &rives, x, z) } else { terre(d, &rives, x, z) }, z]);
+            signe.push(rives.signe(d, x, z));
+            f.sommets.push([x, non_creuse(d, &rives, x, z), z]);
         }
     }
-    // Les côtés de la grille que la rive coupe : le point de la rive, deux fois (sur la
-    // terre, et au pied de la berge dans le lit)
-    let mut coupes: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
-    let mut couper = |f: &mut Forme, a: u32, b: u32| -> (u32, u32) {
-        *coupes.entry((a.min(b), a.max(b))).or_insert_with(|| {
-            let (sa, sb) = (signe[a as usize], signe[b as usize]);
-            let t = (sa / (sa - sb)).clamp(0.0, 1.0);
-            let (pa, pb) = (f.sommets[a as usize], f.sommets[b as usize]);
-            let (x, z) = (pa[0] + (pb[0] - pa[0]) * t, pa[2] + (pb[2] - pa[2]) * t);
-            let terre = terre(d, &rives, x, z);
-            let n = f.sommets.len() as u32;
-            f.sommets.push([x, terre, z]);
-            f.sommets.push([x, lit(d, &rives, x, z).min(terre), z]);
-            (n, n + 1)
-        })
-    };
+    let w = nx as u32;
+    for k in 0..nz as u32 - 1 {
+        for a in 0..w - 1 {
+            let p = k * w + a;
+            f.faces.push(vec![p, p + w, p + 1]);
+            f.faces.push(vec![p + 1, p + w, p + w + 1]);
+        }
+    }
+    murs_et_dessous(&mut f, &xs, &zs, socle(d), &HashMap::new(), &signe);
+    f
+}
+
+/// Le dessus non creusé en (x, z) : la terre ; dans l'eau, à plat à son niveau (le lit
+/// s'y fait par la défonce).
+fn non_creuse(d: &Donnees, rives: &Rives, x: f32, z: f32) -> f32 {
+    if rives.signe(d, x, z) > 0.0 { d.lieu.niveau } else { terre(d, rives, x, z) }
+}
+
+/// Le dépassement du dessus de la défonce au-dessus du plus haut point qu'elle
+/// traverse (m).
+pub const DEPASSE: f32 = 0.5;
+
+/// Le solide de la tuile `cle`, creusé de ses lits (la différence avec `defonce`) ; tel
+/// quel s'il n'y a pas d'eau ou si la différence échoue.
+pub fn creuser(f: Forme, def: &Forme) -> Forme {
+    if def.vide() {
+        return f;
+    }
+    crate::booleens::operation(&f, def, crate::booleens::Op::Difference).unwrap_or(f)
+}
+
+/// Le volume positif de la défonce des lits de la tuile `cle` : ce qu'on ôte au
+/// solide non creusé pour y faire le lit. Son plan suit les berges d'OSM (la rive
+/// coupe les cases de la grille de la tuile, prolongée d'une case tout autour : le
+/// volume déborde de la tuile, pas de face confondue avec ses murs) ; son fond est le
+/// lit (`lit` : la profondeur selon la distance à la rive et le type de la berge) ;
+/// son dessus, à plat, passe `DEPASSE` au-dessus du plus haut point du dessus non
+/// creusé qu'il couvre ; des murs debout sur son pourtour. Une variété fermée par
+/// étendue d'eau, faces tournées dehors.
+pub fn defonce(d: &Donnees, cle: Cle) -> Forme {
+    let (mut xs, mut zs) = grille(d, cle);
+    let mut r = Forme::default();
+    if xs.len() < 2 || zs.len() < 2 {
+        return r;
+    }
+    for v in [&mut xs, &mut zs] {
+        let (pa, pb) = (v[1] - v[0], v[v.len() - 1] - v[v.len() - 2]);
+        v.insert(0, v[0] - pa);
+        v.push(v[v.len() - 1] + pb);
+    }
+    let (nx, nz) = (xs.len(), zs.len());
+    let rives = Rives::new(d, boite_tuile(d, cle));
+    let mut sommets: Vec<[f32; 3]> = Vec::with_capacity(nx * nz);
+    let mut signe: Vec<f32> = Vec::with_capacity(nx * nz);
+    for &z in &zs {
+        for &x in &xs {
+            let s = rives.signe(d, x, z);
+            signe.push(s);
+            sommets.push([x, if s > 0.0 { lit(d, &rives, x, z) } else { terre(d, &rives, x, z) }, z]);
+        }
+    }
+    // Le plus haut du dessus non creusé sous la défonce : l'eau, et la terre des
+    // cases que la rive coupe
+    let mut haut = d.lieu.niveau;
+    // Le fond : les cases (ou leurs morceaux) dans l'eau ; la rive coupe les côtés
+    let mut coupes: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut fond: Vec<Vec<u32>> = Vec::new();
     let w = nx as u32;
     let mouille = |i: u32| signe[i as usize] > 0.0;
     for k in 0..nz as u32 - 1 {
@@ -444,25 +498,110 @@ pub fn solide(d: &Donnees, cle: Cle) -> Forme {
             let p = k * w + a;
             for t in [[p, p + w, p + 1], [p + 1, p + w, p + w + 1]] {
                 let m = t.map(mouille);
-                if m[0] == m[1] && m[1] == m[2] {
-                    f.faces.push(t.to_vec());
+                if m.iter().all(|&e| e) {
+                    fond.push(t.to_vec());
                     continue;
                 }
+                if !m.iter().any(|&e| e) {
+                    continue;
+                }
+                for &i in &t {
+                    if !mouille(i) {
+                        haut = haut.max(sommets[i as usize][1]);
+                    }
+                }
                 // Le sommet seul de son côté de la rive en tête (l'ordre tournant gardé)
-                let r = (0..3).find(|&i| m[i] != m[(i + 1) % 3] && m[i] != m[(i + 2) % 3]).unwrap();
-                let (sa, sb, sc) = (t[r], t[(r + 1) % 3], t[(r + 2) % 3]);
-                let (xab, xac) = (couper(&mut f, sa, sb), couper(&mut f, sa, sc));
-                let cote = |x: (u32, u32), eau: bool| if eau { x.1 } else { x.0 };
-                let ea = m[r];
-                f.faces.push(vec![sa, cote(xab, ea), cote(xac, ea)]);
-                f.faces.push(vec![cote(xab, !ea), sb, sc, cote(xac, !ea)]);
-                // La berge, debout entre la terre et le lit
-                f.faces.push(vec![cote(xac, ea), cote(xab, ea), cote(xab, !ea), cote(xac, !ea)]);
+                let r0 = (0..3).find(|&i| m[i] != m[(i + 1) % 3] && m[i] != m[(i + 2) % 3]).unwrap();
+                let (sa, sb, sc) = (t[r0], t[(r0 + 1) % 3], t[(r0 + 2) % 3]);
+                let mut couper = |u: u32, v: u32| -> u32 {
+                    *coupes.entry((u.min(v), u.max(v))).or_insert_with(|| {
+                        let (su, sv) = (signe[u as usize], signe[v as usize]);
+                        let t = (su / (su - sv)).clamp(0.0, 1.0);
+                        let (pu, pv) = (sommets[u as usize], sommets[v as usize]);
+                        let (x, z) = (pu[0] + (pv[0] - pu[0]) * t, pu[2] + (pv[2] - pu[2]) * t);
+                        sommets.push([x, lit(d, &rives, x, z), z]);
+                        (sommets.len() - 1) as u32
+                    })
+                };
+                let (xab, xac) = (couper(sa, sb), couper(sa, sc));
+                if m[r0] {
+                    fond.push(vec![sa, xab, xac]);
+                } else {
+                    fond.push(vec![xab, sb, sc, xac]);
+                }
             }
         }
     }
-    murs_et_dessous(&mut f, &xs, &zs, socle, &coupes, &signe);
-    f
+    if fond.is_empty() {
+        return r;
+    }
+    let haut = haut + DEPASSE;
+    // Les sommets du fond, puis ceux du dessus (`n` plus loin)
+    let mut numero: HashMap<u32, u32> = HashMap::new();
+    for p in &fond {
+        for &i in p.iter() {
+            numero.entry(i).or_insert_with(|| {
+                r.sommets.push(sommets[i as usize]);
+                (r.sommets.len() - 1) as u32
+            });
+        }
+    }
+    let n = r.sommets.len() as u32;
+    for k in 0..n as usize {
+        let p = r.sommets[k];
+        r.sommets.push([p[0], haut, p[2]]);
+    }
+    let mut cotes: HashSet<(u32, u32)> = HashSet::new();
+    for p in &fond {
+        let q: Vec<u32> = p.iter().map(|i| numero[i]).collect();
+        for k in 0..q.len() {
+            cotes.insert((q[k], q[(k + 1) % q.len()]));
+        }
+        r.faces.push(q.iter().rev().copied().collect());
+        r.faces.push(q.iter().map(|&i| i + n).collect());
+    }
+    // Les murs : sur chaque côté du pourtour (sans son côté retourné)
+    for &(a, b) in &cotes {
+        if !cotes.contains(&(b, a)) {
+            r.faces.push(vec![a, b, b + n, a + n]);
+        }
+    }
+    r
+}
+
+/// La matière des volumes de défonce (dessinés à part, semi-transparents).
+pub const MAQUETTE_DEFONCE: f32 = 4.3;
+
+/// Le maillage à dessiner d'un volume de défonce (sommets de `SOMMET` flottants, à
+/// plat : la normale de chaque face, matière `MAQUETTE_DEFONCE`) et ses arêtes vives
+/// (en indices deux par deux).
+pub fn maillage_defonce(f: &Forme) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+    let (mut v, mut ind, mut aretes) = (Vec::new(), Vec::new(), Vec::new());
+    if f.vide() {
+        return (v, ind, aretes);
+    }
+    for p in &f.faces {
+        // La normale de Newell (les faces à quatre côtés ne sont pas toujours planes)
+        let mut nm = [0f32; 3];
+        for k in 0..p.len() {
+            let (a, b) = (f.sommets[p[k] as usize], f.sommets[p[(k + 1) % p.len()] as usize]);
+            nm[0] += (a[1] - b[1]) * (a[2] + b[2]);
+            nm[1] += (a[2] - b[2]) * (a[0] + b[0]);
+            nm[2] += (a[0] - b[0]) * (a[1] + b[1]);
+        }
+        let l = (nm[0] * nm[0] + nm[1] * nm[1] + nm[2] * nm[2]).sqrt().max(1e-9);
+        let base = (v.len() / SOMMET) as u32;
+        for &i in p {
+            let s = f.sommets[i as usize];
+            v.extend_from_slice(&[s[0], s[1], s[2], nm[0] / l, nm[1] / l, nm[2] / l, 0.0, 0.0, MAQUETTE_DEFONCE]);
+        }
+        for k in 1..p.len() as u32 - 1 {
+            ind.extend_from_slice(&[base, base + k, base + k + 1]);
+        }
+    }
+    // Ses arêtes vives : les bords et les plis de plus de 20°
+    aretes = crate::relief3d::aretes(&v, SOMMET, &ind, true);
+    (v, ind, aretes)
 }
 
 /// Les abscisses et les profondeurs de la grille du dessus de la tuile `cle`, bornées
@@ -666,11 +805,19 @@ pub fn aretes(v: &[f32], ind: &[u32]) -> Vec<u32> {
 
 /// Fabrique la tuile `cle` : son solide, habillé, et sa texture.
 pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
+    let (v, ind, px, _) = fabriquer_avec_defonce(d, cle);
+    (v, ind, px)
+}
+
+/// `fabriquer`, et le volume de défonce des lits de la tuile.
+pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>, Forme) {
     let b = boite_tuile(d, cle);
-    // Le solide uni au remblai, ses plans hachés par l'union redevenus simples
-    let f = crate::dissolution::dissoudre(&remblayer(d, cle, solide(d, cle)));
+    let def = defonce(d, cle);
+    // Le solide creusé de ses lits, uni au remblai, ses plans hachés par les
+    // opérations redevenus simples
+    let f = crate::dissolution::dissoudre(&remblayer(d, cle, creuser(solide(d, cle), &def)));
     let (v, ind) = habiller(d, &f, b);
-    (v, ind, texture(d, b))
+    (v, ind, texture(d, b), def)
 }
 
 /// Le solide de la tuile uni au remblai de ses berges ; tel quel si l'union échoue.
@@ -1124,10 +1271,47 @@ mod tests {
         let n = 7u8;
         let t = c / (1u32 << n) as f32;
         let cle = (n, ((100.0 - x0) / t).floor() as i32, ((0.0 - z0) / t).floor() as i32);
-        let f = solide(&d, cle);
+        let f = creuser(solide(&d, cle), &defonce(&d, cle));
         let berge = f.sommets.iter().filter(|p| (p[0] - 100.0).abs() < 1e-3 && p[1] < d.lieu.niveau).count();
         assert!(berge >= 2, "{berge}");
         assert!(crate::booleens::operation(&f, &boite([-1e4, -1e4, -1e4], [1e4, 1e4, 1e4]), crate::booleens::Op::Intersection).is_ok());
+    }
+
+    #[test]
+    fn la_defonce_remplit_le_lit_et_est_fermee() {
+        let mut d = donnees();
+        let carre = vec![[-100.0, -100.0], [100.0, -100.0], [100.0, 100.0], [-100.0, 100.0]];
+        d.lieu.surfaces_eau = vec![sage_reel::cours_eau::SurfaceEau { nature: 0, anneaux: vec![carre] }];
+        let (x0, z0, c) = d.monde();
+        let n = 7u8;
+        let t = c / (1u32 << n) as f32;
+        let cle = (n, ((100.0 - x0) / t).floor() as i32, ((0.0 - z0) / t).floor() as i32);
+        let def = defonce(&d, cle);
+        let niveau = d.lieu.niveau;
+        // Seulement dans l'eau ; le dessus au-dessus de l'eau, le fond en dessous
+        assert!(!def.vide());
+        assert!(def.sommets.iter().all(|p| p[0] <= 100.0 + 1e-3));
+        assert!(def.sommets.iter().any(|p| p[1] >= niveau + DEPASSE - 1e-4) && def.sommets.iter().any(|p| p[1] < niveau - 1.0));
+        // Fermée : chaque côté de face une fois dans chaque sens
+        let mut cotes = std::collections::HashMap::new();
+        for p in &def.faces {
+            for k in 0..p.len() {
+                *cotes.entry((p[k], p[(k + 1) % p.len()])).or_insert(0) += 1;
+            }
+        }
+        assert!(cotes.iter().all(|(&(a, b), &n)| n == 1 && cotes.get(&(b, a)) == Some(&1)));
+        // Un volume positif (faces dehors), que les booléens prennent
+        assert!(def.volume() > 0.0);
+        assert!(crate::booleens::operation(&def, &boite([-1e4, -1e4, -1e4], [1e4, 1e4, 1e4]), crate::booleens::Op::Intersection).is_ok());
+        let (v, ind, aretes) = maillage_defonce(&def);
+        assert!(!ind.is_empty() && !aretes.is_empty() && aretes.iter().chain(&ind).all(|&i| (i as usize) < v.len() / SOMMET));
+        // Loin de l'eau : rien
+        assert!(defonce(&d, (n, ((1000.0 - x0) / t).floor() as i32, ((1000.0 - z0) / t).floor() as i32)).vide());
+        // Le solide creusé : moins de volume, le lit sous l'eau, toujours fermé
+        let f = solide(&d, cle);
+        let c = creuser(f.clone(), &def);
+        assert!(c.volume() < f.volume() - 1.0, "{} {}", c.volume(), f.volume());
+        assert!(c.sommets.iter().any(|p| p[1] < niveau - 1.0));
     }
 
     #[test]

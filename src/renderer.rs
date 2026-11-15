@@ -647,6 +647,54 @@ impl Renderer {
             }
             (gl.glDepthMask)(1);
         }
+        // Les volumes de défonce des lits : faces semi-transparentes, puis fil de fer
+        if !t.defonces.is_empty() {
+            const DEFONCE: [f32; 3] = [0.95, 0.42, 0.10];
+            (gl.glDisable)(POLYGON_OFFSET_FILL);
+            (gl.glUseProgram)(self.terrain_program);
+            let u = &self.u_terrain;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform1i)(u[3], 0);
+            (gl.glUniform4f)(u[1], 0.0, 0.0, 1.0, 1.0);
+            (gl.glUniform3f)(u[4], DEFONCE[0], DEFONCE[1], DEFONCE[2]);
+            // Sa propre couleur, même en blanc
+            (gl.glUniform1f)(u[7], 0.0);
+            (gl.glUniform1f)(u[8], 0.3);
+            (gl.glEnable)(BLEND);
+            (gl.glBlendFunc)(1, 0x0303);
+            (gl.glDepthMask)(0);
+            for m in &t.defonces {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                let (vao, n) = self.tampon_de(m, crate::relief3d::SOMMET as i32);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+            }
+            (gl.glDepthMask)(1);
+            (gl.glUniform1f)(u[7], if t.blanc { 1.0 } else { 0.0 });
+            (gl.glUniform1f)(u[8], 1.0);
+            (gl.glUseProgram)(self.ligne_program);
+            let u = &self.u_ligne;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform3f)(u[1], t.oeil[0], t.oeil[1], t.oeil[2]);
+            (gl.glUniform3f)(u[3], t.ciel[0], t.ciel[1], t.ciel[2]);
+            (gl.glUniform2f)(u[4], t.brume[0], t.brume[1]);
+            (gl.glUniform3f)(u[2], DEFONCE[0] * 0.8, DEFONCE[1] * 0.8, DEFONCE[2] * 0.8);
+            (gl.glUniform1f)(u[5], 0.0);
+            (gl.glLineWidth)(1.5);
+            (gl.glDepthFunc)(LEQUAL);
+            for m in &t.defonces_aretes {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                let (vao, n) = self.tampon_de(m, crate::relief3d::SOMMET as i32);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(LINES, n, UINT, std::ptr::null());
+            }
+            (gl.glDepthFunc)(LESS);
+            (gl.glLineWidth)(1.0);
+        }
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);
         (gl.glViewport)(0, 0, w as i32, h as i32);

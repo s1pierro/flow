@@ -128,6 +128,11 @@ pub struct Terrain3d {
     /// l'eau), semi-transparentes, de leur propre couleur : dessinées après le reste,
     /// sans écrire la profondeur, on voit le lit au travers.
     pub eaux: Vec<Maillage3d>,
+    /// Les volumes de défonce des lits (sommets de `SOMMET` flottants) : leurs faces,
+    /// semi-transparentes, et leurs arêtes (`defonces_aretes`, deux par deux), d'une
+    /// même couleur franche, dessinées après l'eau.
+    pub defonces: Vec<Maillage3d>,
+    pub defonces_aretes: Vec<Maillage3d>,
 }
 
 /// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la

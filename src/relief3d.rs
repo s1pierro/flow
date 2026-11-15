@@ -97,6 +97,9 @@ pub struct Relief3d {
     pub en_attente: bool,
     /// Le rendu blanc : faces blanches, arêtes tracées.
     pub blanc: bool,
+    /// En maquette : les volumes de défonce des lits, montrés en fil de fer et en
+    /// surface semi-transparente.
+    pub defonce: bool,
     /// Le rendu Maquette (`maquette`) : des tuiles en volume, fabriquées à part.
     pub maquette: bool,
     fabrique: Option<crate::maquette::Fabrique>,
@@ -117,6 +120,8 @@ struct Faite {
     contour: Maillage3d,
     /// Sa surface d'eau, s'il y en a.
     eau: Option<Maillage3d>,
+    /// Le volume de défonce de ses lits, s'il y en a : faces et arêtes.
+    defonce: Option<(Maillage3d, Maillage3d)>,
     mesure: crate::maquette::Mesure,
 }
 
@@ -127,7 +132,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, blanc: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -347,7 +352,11 @@ impl Relief3d {
             let contour = Maillage3d { id: id ^ (1 << 62), revision: self.revision, sommets: maillage.sommets.clone(), indices: Arc::new(t.contour) };
             let image = crate::draw::Image { id, revision: self.revision, largeur: crate::maquette::TEX as u32, hauteur: (crate::maquette::TEX + crate::maquette::BANDE) as u32, pixels: Arc::new(t.pixels) };
             let eau = (!t.eau_indices.is_empty()).then(|| Maillage3d { id: id ^ (1 << 61), revision: self.revision, sommets: Arc::new(t.eau_sommets), indices: Arc::new(t.eau_indices) });
-            self.tuiles_maquette.insert(t.cle, Faite { morceau: Morceau { maillage, faite: t.faite, vu: self.image, voirie: 0, aretes }, image, contour, eau, mesure: t.mesure });
+            let defonce = (!t.defonce_indices.is_empty()).then(|| {
+                let sommets = Arc::new(t.defonce_sommets);
+                (Maillage3d { id: id ^ (1 << 60), revision: self.revision, sommets: sommets.clone(), indices: Arc::new(t.defonce_indices) }, Maillage3d { id: id ^ (1 << 59), revision: self.revision, sommets, indices: Arc::new(t.defonce_aretes) })
+            });
+            self.tuiles_maquette.insert(t.cle, Faite { morceau: Morceau { maillage, faite: t.faite, vu: self.image, voirie: 0, aretes }, image, contour, eau, defonce, mesure: t.mesure });
         }
         let mut montrees: Vec<Cle> = Vec::new();
         let mut vues = HashSet::new();
@@ -363,6 +372,7 @@ impl Relief3d {
             }
         }
         let (mut morceaux, mut aretes_sol, mut choix, mut eaux) = (Vec::with_capacity(montrees.len()), Vec::new(), Vec::new(), Vec::new());
+        let (mut defonces, mut defonces_aretes) = (Vec::new(), Vec::new());
         for cle in &montrees {
             let Some(f) = self.tuiles_maquette.get_mut(cle) else { continue };
             f.morceau.vu = self.image;
@@ -374,6 +384,10 @@ impl Relief3d {
             morceaux.push(Morceau3d { maillage: f.morceau.maillage.clone(), image: Some(f.image.clone()), uv: [0.0, 0.0, 1.0, 1.0], couleur: [0.72, 0.76, 0.62] });
             if let Some(e) = &f.eau {
                 eaux.push(e.clone());
+            }
+            if let (true, Some((faces, traits))) = (self.defonce, &f.defonce) {
+                defonces.push(faces.clone());
+                defonces_aretes.push(traits.clone());
             }
         }
         // Le contour des sélectionnées faites, montrées ou non
@@ -387,7 +401,7 @@ impl Relief3d {
         self.dessinees = morceaux.len();
         self.bati_dessinees = 0;
         let dist = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: Vec::new(), blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: Vec::new(), blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes });
         if self.tuiles_maquette.len() > GARDES {
             let sel = &self.selection;
             let mut v: Vec<(u64, Cle)> = self.tuiles_maquette.iter().filter(|(k, _)| k.0 > 0 && !sel.contains(k)).map(|(k, m)| (m.morceau.vu, *k)).collect();
@@ -535,7 +549,7 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new() });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new() });
         // Les maillages qui n'ont pas servi depuis longtemps
         if self.batis.len() > GARDES / 2 {
             let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();
