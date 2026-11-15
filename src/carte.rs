@@ -270,9 +270,13 @@ pub const EAU: [f32; 3] = [0.62, 0.78, 0.92];
 /// Le tracé d'un cours d'eau : un bleu plus soutenu que sa surface.
 pub const COURS_EAU: [f32; 3] = [0.20, 0.45, 0.80];
 /// Un quai (le côté d'une surface d'eau d'OSM le long de la ville).
-pub const BERGE: [f32; 3] = [0.22, 0.22, 0.26];
-/// Une berge naturelle.
-pub const BERGE_NATURELLE: [f32; 3] = [0.20, 0.52, 0.18];
+pub const BERGE: [f32; 3] = [0.16, 0.16, 0.19];
+/// Une berge naturelle : un vert vif, qui tranche sur les prés de la rive.
+pub const BERGE_NATURELLE: [f32; 3] = [0.15, 0.88, 0.20];
+/// La largeur du trait des berges sur la carte (m), au moins `BERGE_PX` pixels.
+pub const BERGE_LARGEUR: f32 = 1.5;
+/// La largeur minimale du trait des berges (px).
+pub const BERGE_PX: f32 = 3.0;
 
 /// Une couche de la carte : une occupation du sol (`BOIS` à `ZONE`), l'eau, les voies
 /// d'un genre (`COUCHE_VOIE` + genre), les ponts, les bâtiments. Le sol nu est toujours
@@ -702,8 +706,9 @@ fn peindre_cours_eau(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
         let (a, tirets) = if c.souterrain { (0.45, Some((10.0 / m).max(6.0))) } else { (0.9, None) };
         peindre_trait(px, &mut cov, &c.points, b, m, demi, COURS_EAU, a, tirets);
     }
-    // Les berges : les côtés des surfaces d'eau d'OSM, d'un trait fin, de la couleur de
-    // leur type (quai gris, berge naturelle verte)
+    // Les berges : les côtés des surfaces d'eau d'OSM, d'un trait de 1,5 m (3 px au
+    // moins), d'une couleur franche selon leur type lissé : quai (≥ 0,5) gris anthracite,
+    // berge naturelle vert vif
     let large = [b[0] - 4.0, b[1] - 4.0, b[2] + 4.0, b[3] + 4.0];
     let types = d.berges();
     for g in types.iter().flatten() {
@@ -719,8 +724,8 @@ fn peindre_cours_eau(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
                 continue;
             }
             let v = (g.quai[i] + g.quai[j]) / 2.0;
-            let c = [0, 1, 2].map(|k| BERGE_NATURELLE[k] + (BERGE[k] - BERGE_NATURELLE[k]) * v);
-            peindre_trait(px, &mut cov, &[p, q], b, m, 1.2, c, 1.0, None);
+            let c = if v >= 0.5 { BERGE } else { BERGE_NATURELLE };
+            peindre_trait(px, &mut cov, &[p, q], b, m, (BERGE_LARGEUR / m / 2.0).max(BERGE_PX / 2.0), c, 1.0, None);
         }
     }
 }
