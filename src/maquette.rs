@@ -452,7 +452,20 @@ pub fn creuser(f: Forme, def: &Forme) -> Forme {
     if def.vide() {
         return f;
     }
-    crate::booleens::operation(&f, def, crate::booleens::Op::Difference).unwrap_or(f)
+    match crate::booleens::operation(&f, def, crate::booleens::Op::Difference) {
+        Ok(c) => {
+            if std::env::var_os("FLOW_TRACE_DEFONCE").is_some() {
+                eprintln!("creuser : volume {:.0} -> {:.0} m3 (défonce {:.0} m3)", f.volume(), c.volume(), def.volume());
+            }
+            c
+        }
+        Err(e) => {
+            if std::env::var_os("FLOW_TRACE_DEFONCE").is_some() {
+                eprintln!("creuser : la différence a échoué : {e:?}");
+            }
+            f
+        }
+    }
 }
 
 /// Le volume positif de la défonce des lits de la tuile `cle` : ce qu'on ôte au
@@ -813,9 +826,10 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
 pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>, Forme) {
     let b = boite_tuile(d, cle);
     let def = defonce(d, cle);
-    // Le solide creusé de ses lits, uni au remblai, ses plans hachés par les
+    // Le solide uni au remblai de ses berges, puis creusé de ses lits (la défonce
+    // coupe aussi ce que le remblai avance dans l'eau), ses plans hachés par les
     // opérations redevenus simples
-    let f = crate::dissolution::dissoudre(&remblayer(d, cle, creuser(solide(d, cle), &def)));
+    let f = crate::dissolution::dissoudre(&creuser(remblayer(d, cle, solide(d, cle)), &def));
     let (v, ind) = habiller(d, &f, b);
     (v, ind, texture(d, b), def)
 }

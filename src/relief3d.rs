@@ -95,6 +95,10 @@ pub struct Relief3d {
     pub bati_dessinees: usize,
     /// Des maillages restent à faire.
     pub en_attente: bool,
+    /// La génération en cours : (tuiles faites, tuiles du lot), pour l'indicateur ;
+    /// `None` quand tout est fait. Le lot court depuis la dernière fois que tout
+    /// était fait, et grandit si la vue en demande d'autres en route.
+    pub generation: Option<(usize, usize)>,
     /// Le rendu blanc : faces blanches, arêtes tracées.
     pub blanc: bool,
     /// En maquette : les volumes de défonce des lits, montrés en fil de fer et en
@@ -132,7 +136,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -282,6 +286,18 @@ impl Relief3d {
         v.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// Tient le compte de la génération : `finies` tuiles faites à cette image, `restantes`
+    /// encore à faire ; le lot repart de zéro quand il ne reste rien.
+    fn compter(&mut self, restantes: usize, finies: usize) {
+        if restantes == 0 {
+            self.generation = None;
+            return;
+        }
+        let (faites, total) = self.generation.unwrap_or((0, 0));
+        let faites = faites + finies;
+        self.generation = Some((faites, total.max(faites + restantes)));
+    }
+
     /// Dessine le lieu de `carte` dans `zone` en Maquette : les tuiles demandées à la
     /// fabrique (les plus grossières d'abord, et les ancêtres absents), quelques-unes
     /// prises par image ; en attendant, l'ancêtre le plus proche déjà fait.
@@ -344,6 +360,7 @@ impl Relief3d {
             }
         };
         drop(d);
+        self.compter(a_faire.len().saturating_sub(finies.len()), finies.len());
         for t in finies {
             self.revision += 1;
             let id = 0x6d61_7100_0000_0000u64 ^ (self.num << 40) ^ ((t.cle.0 as u64) << 32) ^ ((t.cle.1 as u64 & 0xFFFF) << 16) ^ (t.cle.2 as u64 & 0xFFFF);
@@ -488,6 +505,7 @@ impl Relief3d {
             self.morceaux.insert(cle, Morceau { maillage, faite: carte.compteur, vu: self.image, voirie, aretes: None });
         }
         self.en_attente = faits.len() < a_faire.iter().map(|x| x.2).collect::<HashSet<_>>().len() || d.voirie_en_cours();
+        self.compter(a_faire.len() - faits.len(), faits.len());
         // Les bâtiments, dans le temps qui reste
         let voulus = self.choisir_bati(&d, &mvp);
         for &cle in &voulus {

@@ -1322,6 +1322,24 @@ impl Lieux {
             // Un peu plus d'écart avant l'interrupteur Blanc
             x += cx.pill_width(nom) + m * if i == 1 { 1.5 } else { 0.5 };
         }
+        // La génération en cours, en bas à gauche : tuiles faites sur tuiles du lot, et
+        // une barre d'avancement au pied de la pastille
+        if let Some((faites, total)) = r.generation {
+            let texte = format!("Génération · {faites} / {}", pluriel(total, "tuile", "tuiles"));
+            let c = cx.couleurs();
+            let h = cx.commande();
+            let w = cx.measure(&texte, 13.0) + 2.0 * cx.pad();
+            let p = Rect::new(zone.x + m, zone.y + zone.h - m - h, w, h);
+            let rayon = cx.theme.rayon(h);
+            cx.ombre(p, rayon, 6.0);
+            cx.dl.rrect(p, rayon, c.surface);
+            cx.text_at(p.x + cx.pad(), p.y + h * 0.45, &texte, 13.0, c.texte);
+            let (bx, bw, bh) = (p.x + rayon * 0.6, p.w - rayon * 1.2, (2.5 * cx.dp).round());
+            let by = p.y + h - bh - (4.0 * cx.dp).round();
+            cx.dl.rrect(Rect::new(bx, by, bw, bh), bh / 2.0, c.puce);
+            let f = faites as f32 / total.max(1) as f32;
+            cx.dl.rrect(Rect::new(bx, by, (bw * f).max(bh), bh), bh / 2.0, c.accent);
+        }
         cx.clip(None);
     }
 
