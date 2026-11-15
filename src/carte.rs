@@ -3,7 +3,8 @@
 //! dessinées par deux threads à la demande et gardées tant qu'elles servent.
 //!
 //! Une tuile montre le relief ombré (lumière du nord-ouest), l'eau, l'occupation du sol,
-//! les routes et les ponts (bordés), les bâtiments. Ce qui est choisi ou édité se
+//! les routes et les ponts (bordés), les tunnels (en tirets), les voies ferrées, les
+//! lignes de bus, de tram et de métro, les arrêts, les bâtiments. Ce qui est choisi ou édité se
 //! dessine par-dessus, en vecteurs, par le contexte.
 //!
 //! Les données sont partagées (`Arc<RwLock<Donnees>>`) : le contexte les modifie sous
@@ -49,6 +50,15 @@ pub struct Donnees {
     bati: HashMap<(i32, i32), Vec<u32>>,
     routes: HashMap<(i32, i32), Vec<u32>>,
     ponts: HashMap<(i32, i32), Vec<u32>>,
+    tunnels: HashMap<(i32, i32), Vec<u32>>,
+    rails: HashMap<(i32, i32), Vec<u32>>,
+    arrets: HashMap<(i32, i32), Vec<u32>>,
+    cours: HashMap<(i32, i32), Vec<u32>>,
+    /// Les morceaux des tracés des lignes (ligne, morceau), et leur index.
+    morceaux: Vec<(u32, u32)>,
+    traces: HashMap<(i32, i32), Vec<u32>>,
+    /// Le type des berges (quai ou naturelle), calculé au premier besoin.
+    berges: std::sync::OnceLock<Arc<crate::berges::Types>>,
 }
 
 /// La boîte (x0, z0, x1, z1) d'une suite de points.
@@ -91,13 +101,14 @@ fn dans(index: &HashMap<(i32, i32), Vec<u32>>, b: [f32; 4], tous: usize) -> Vec<
 
 impl Donnees {
     pub fn new(lieu: Lieu) -> Donnees {
-        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new() };
+        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new(), tunnels: HashMap::new(), rails: HashMap::new(), arrets: HashMap::new(), cours: HashMap::new(), morceaux: Vec::new(), traces: HashMap::new(), berges: std::sync::OnceLock::new() };
         d.reindexer();
         d
     }
 
     /// Refait les index (après un changement des bâtiments, des routes ou des ponts).
     pub fn reindexer(&mut self) {
+        self.berges = std::sync::OnceLock::new();
         let mut bati: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (k, b) in self.lieu.batiments.iter().enumerate() {
             for c in cellules(boite_bati(b)) {
@@ -116,7 +127,27 @@ impl Donnees {
         self.routes = ranger(&self.lieu.routes);
         self.ponts = ranger(&self.lieu.ponts);
         self.bati = bati;
-        self.tabliers = sage_reel::tabliers::tabliers(&self.lieu.ponts);
+        let t = &self.lieu.transports;
+        self.tunnels = ranger(&t.tunnels);
+        let par_boites = |boites: &mut dyn Iterator<Item = [f32; 4]>| {
+            let mut m: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+            for (k, b) in boites.enumerate() {
+                for c in cellules(b) {
+                    m.entry(c).or_default().push(k as u32);
+                }
+            }
+            m
+        };
+        let elargir = |b: [f32; 4], e: f32| [b[0] - e, b[1] - e, b[2] + e, b[3] + e];
+        self.rails = par_boites(&mut t.rails.iter().map(|r| elargir(boite(r.points.iter().map(|p| &p[..])), 4.0)));
+        self.arrets = par_boites(&mut t.arrets.iter().map(|a| elargir([a.x, a.z, a.x, a.z], 8.0)));
+        self.cours = par_boites(&mut self.lieu.cours_eau.iter().map(|c| elargir(boite(c.points.iter().map(|p| &p[..])), 4.0)));
+        self.morceaux = t.lignes.iter().enumerate().flat_map(|(k, l)| (0..l.trace.len()).map(move |j| (k as u32, j as u32))).collect();
+        self.traces = par_boites(&mut self.morceaux.iter().map(|&(k, j)| elargir(boite(t.lignes[k as usize].trace[j as usize].points.iter().map(|p| &p[..])), 4.0)));
+        // Les tabliers des ponts, et ceux des voies ferrées (une voie sans trottoirs)
+        let mut ponts_3d = self.lieu.ponts.clone();
+        ponts_3d.extend(self.lieu.transports.rails.iter().filter(|r| r.ou == sage_reel::transports::PONT).map(|r| Route { genre: CHEMIN, largeur: sage_reel::transports::largeur(r.mode) + 2.0, points: r.points.clone() }));
+        self.tabliers = sage_reel::tabliers::tabliers(&ponts_3d);
         self.voirie_demandee += 1;
         let (n, routes, ponts, tabliers, prete) = (self.voirie_demandee, self.lieu.routes.clone(), self.lieu.ponts.clone(), self.tabliers.clone(), self.voirie_prete.clone());
         let faire = move || {
@@ -184,6 +215,11 @@ impl Donnees {
         (x0 as f32, z0 as f32, (x1 - x0).max(z1 - z0) as f32)
     }
 
+    /// Le type des berges des surfaces d'eau (`berges::calculer`), au premier besoin.
+    pub fn berges(&self) -> Arc<crate::berges::Types> {
+        self.berges.get_or_init(|| Arc::new(crate::berges::calculer(self))).clone()
+    }
+
     pub fn batiments_dans(&self, b: [f32; 4]) -> Vec<u32> {
         dans(&self.bati, b, self.lieu.batiments.len())
     }
@@ -194,6 +230,27 @@ impl Donnees {
         } else {
             dans(&self.routes, b, self.lieu.routes.len())
         }
+    }
+
+    pub fn tunnels_dans(&self, b: [f32; 4]) -> Vec<u32> {
+        dans(&self.tunnels, b, self.lieu.transports.tunnels.len())
+    }
+
+    pub fn rails_dans(&self, b: [f32; 4]) -> Vec<u32> {
+        dans(&self.rails, b, self.lieu.transports.rails.len())
+    }
+
+    pub fn cours_eau_dans(&self, b: [f32; 4]) -> Vec<u32> {
+        dans(&self.cours, b, self.lieu.cours_eau.len())
+    }
+
+    pub fn arrets_dans(&self, b: [f32; 4]) -> Vec<u32> {
+        dans(&self.arrets, b, self.lieu.transports.arrets.len())
+    }
+
+    /// Les morceaux de tracés de lignes qui approchent la boîte : (ligne, morceau).
+    pub fn traces_dans(&self, b: [f32; 4]) -> Vec<(u32, u32)> {
+        dans(&self.traces, b, self.morceaux.len()).into_iter().map(|k| self.morceaux[k as usize]).collect()
     }
 }
 
@@ -210,31 +267,44 @@ pub fn couleur_sol(classe: u8) -> [f32; 3] {
 }
 
 pub const EAU: [f32; 3] = [0.62, 0.78, 0.92];
+/// Le tracé d'un cours d'eau : un bleu plus soutenu que sa surface.
+pub const COURS_EAU: [f32; 3] = [0.20, 0.45, 0.80];
+/// Un quai (le côté d'une surface d'eau d'OSM le long de la ville).
+pub const BERGE: [f32; 3] = [0.22, 0.22, 0.26];
+/// Une berge naturelle.
+pub const BERGE_NATURELLE: [f32; 3] = [0.20, 0.52, 0.18];
 
 /// Une couche de la carte : une occupation du sol (`BOIS` à `ZONE`), l'eau, les voies
 /// d'un genre (`COUCHE_VOIE` + genre), les ponts, les bâtiments. Le sol nu est toujours
 /// le fond.
 pub type Couche = u8;
 pub const COUCHE_EAU: Couche = 10;
+pub const COUCHE_COURS_EAU: Couche = 12;
+pub const COUCHE_TUNNELS: Couche = 15;
 pub const COUCHE_VOIE: Couche = 20;
+pub const COUCHE_RAILS: Couche = 28;
 pub const COUCHE_PONTS: Couche = 30;
+pub const COUCHE_LIGNES: Couche = 35;
 pub const COUCHE_BATI: Couche = 40;
+pub const COUCHE_ARRETS: Couche = 45;
 
 fn est_voie(c: Couche) -> bool {
     (COUCHE_VOIE..COUCHE_VOIE + GENRES).contains(&c)
 }
 
-/// L'ordre de toujours, du dessous au dessus : le sol, l'eau, les petites voies sous
-/// les grandes, les ponts, les bâtiments.
+/// L'ordre de toujours, du dessous au dessus : le sol, l'eau, les tunnels, les petites
+/// voies sous les grandes, les voies ferrées, les ponts, les lignes, les bâtiments, les
+/// arrêts.
 pub fn ordre_par_defaut() -> Vec<Couche> {
-    let mut v = vec![BOIS, PRE, CHAMP, HABITE, ZONE, COUCHE_EAU];
+    let mut v = vec![BOIS, PRE, CHAMP, HABITE, ZONE, COUCHE_EAU, COUCHE_COURS_EAU, COUCHE_TUNNELS];
     v.extend([SENTIER, CHEMIN, PIETONNE, SERVICE, ROUTE, BUS, GRANDE].map(|g| COUCHE_VOIE + g));
-    v.extend([COUCHE_PONTS, COUCHE_BATI]);
+    v.extend([COUCHE_RAILS, COUCHE_PONTS, COUCHE_LIGNES, COUCHE_BATI, COUCHE_ARRETS]);
     v
 }
 
 /// Un ordre écrit (les numéros des couches, séparés d'espaces) : les couches connues,
-/// sans doublon, puis celles qui manquent dans l'ordre par défaut.
+/// sans doublon ; celles qui manquent (une couche nouvelle) se glissent juste au-dessus
+/// de celle qui les précède dans l'ordre par défaut.
 pub fn ordre_lu(t: &str) -> Vec<Couche> {
     let defaut = ordre_par_defaut();
     let mut v: Vec<Couche> = Vec::new();
@@ -243,7 +313,12 @@ pub fn ordre_lu(t: &str) -> Vec<Couche> {
             v.push(c);
         }
     }
-    v.extend(defaut.into_iter().filter(|c| !v.contains(c)).collect::<Vec<_>>());
+    for (i, &c) in defaut.iter().enumerate() {
+        if !v.contains(&c) {
+            let apres = defaut[..i].iter().rev().find_map(|p| v.iter().position(|x| x == p)).map_or(0, |p| p + 1);
+            v.insert(apres, c);
+        }
+    }
     v
 }
 
@@ -256,8 +331,13 @@ pub fn nom_couche(c: Couche) -> &'static str {
         HABITE => "Habité",
         ZONE => "Zones",
         COUCHE_EAU => "Eau",
+        COUCHE_COURS_EAU => "Cours d'eau",
+        COUCHE_TUNNELS => "Tunnels",
+        COUCHE_RAILS => "Voies ferrées",
         COUCHE_PONTS => "Ponts",
+        COUCHE_LIGNES => "Lignes",
         COUCHE_BATI => "Bâtiments",
+        COUCHE_ARRETS => "Arrêts",
         _ => ["Grandes routes", "Routes", "Voies de service", "Voies piétonnes", "Chemins", "Sentiers", "Voies de bus"].get((c.wrapping_sub(COUCHE_VOIE)) as usize).copied().unwrap_or("?"),
     }
 }
@@ -266,7 +346,12 @@ pub fn nom_couche(c: Couche) -> &'static str {
 pub fn couleur_couche(c: Couche) -> [f32; 3] {
     match c {
         COUCHE_EAU => EAU,
+        COUCHE_COURS_EAU => COURS_EAU,
         COUCHE_PONTS => [0.25, 0.25, 0.28],
+        COUCHE_TUNNELS => [0.55, 0.55, 0.58],
+        COUCHE_RAILS => [0.33, 0.33, 0.36],
+        COUCHE_LIGNES => sage_reel::transports::teinte(sage_reel::transports::METRO),
+        COUCHE_ARRETS => sage_reel::transports::teinte(sage_reel::transports::BUS),
         COUCHE_BATI => couleur_bati(1),
         _ if est_voie(c) => {
             let (int, bord) = couleur_route(c - COUCHE_VOIE, false);
@@ -430,6 +515,11 @@ pub fn rendre(d: &Donnees, cle: Cle) -> Vec<u8> {
                 peindre_voies(&mut px, d, b, m, true, &genres);
             }
             COUCHE_BATI => peindre_bati(&mut px, d, b, m),
+            COUCHE_TUNNELS => peindre_tunnels(&mut px, d, b, m, &ordre.iter().filter(|c| est_voie(**c)).map(|c| c - COUCHE_VOIE).collect::<Vec<_>>()),
+            COUCHE_RAILS => peindre_rails(&mut px, d, b, m, ponts),
+            COUCHE_COURS_EAU => peindre_cours_eau(&mut px, d, b, m),
+            COUCHE_LIGNES => peindre_lignes(&mut px, d, b, m),
+            COUCHE_ARRETS => peindre_arrets(&mut px, d, b, m),
             classe if classe < CLASSES => {
                 let cs = couleur_sol(classe);
                 for i in 0..n * n {
@@ -507,6 +597,202 @@ fn peindre_voies(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32, pont: bool, ge
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Un trait le long d'une ligne (en mètres) : `demi` pixels de part et d'autre,
+/// couleur `c`, opacité `a` ; en tirets de `tirets` pixels (moitié peinte). Chaque
+/// pixel prend la plus forte couverture de la ligne : les jointures ne foncent pas.
+#[allow(clippy::too_many_arguments)]
+fn peindre_trait(px: &mut [u8], cov: &mut Vec<f32>, pts: &[[f32; 2]], b: [f32; 4], m: f32, demi: f32, c: [f32; 3], a: f32, tirets: Option<f32>) {
+    let n = TUILE;
+    if cov.len() != n * n {
+        *cov = vec![0.0; n * n];
+    }
+    let vers = |p: [f32; 2]| ((p[0] - b[0]) / m, (p[1] - b[1]) / m);
+    let mut touches: Vec<usize> = Vec::new();
+    let mut cumul = 0.0f32;
+    for s in pts.windows(2) {
+        let (p, q) = (vers(s[0]), vers(s[1]));
+        let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+        let l2 = dx * dx + dy * dy;
+        let long = l2.sqrt();
+        let e = demi + 1.0;
+        if p.0.max(q.0) + e < 0.0 || p.1.max(q.1) + e < 0.0 || p.0.min(q.0) - e > n as f32 || p.1.min(q.1) - e > n as f32 {
+            cumul += long;
+            continue;
+        }
+        let (x0, x1) = ((p.0.min(q.0) - e).floor().max(0.0) as i32, (p.0.max(q.0) + e).ceil().min(n as f32 - 1.0) as i32);
+        let (y0, y1) = ((p.1.min(q.1) - e).floor().max(0.0) as i32, (p.1.max(q.1) + e).ceil().min(n as f32 - 1.0) as i32);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (qx, qy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let t = if l2 > 0.0 { (((qx - p.0) * dx + (qy - p.1) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                if let Some(per) = tirets {
+                    if ((cumul + t * long) / per).fract() >= 0.5 {
+                        continue;
+                    }
+                }
+                let dd = (qx - p.0 - dx * t).hypot(qy - p.1 - dy * t);
+                let k = (demi + 0.5 - dd).clamp(0.0, 1.0);
+                let i = y as usize * n + x as usize;
+                if k > cov[i] {
+                    if cov[i] == 0.0 {
+                        touches.push(i);
+                    }
+                    cov[i] = k;
+                }
+            }
+        }
+        cumul += long;
+    }
+    for i in touches {
+        melanger(px, i, c, cov[i] * a);
+        cov[i] = 0.0;
+    }
+}
+
+/// Peint les tunnels des routes (des genres donnés) : un fond pâle, bordé de tirets ;
+/// ceux des voies ferrées, en tirets de leur couleur.
+fn peindre_tunnels(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32, genres: &[u8]) {
+    use sage_reel::transports as tr;
+    let t = &d.lieu.transports;
+    let marge = [b[0] - 40.0, b[1] - 40.0, b[2] + 40.0, b[3] + 40.0];
+    let mut cov = Vec::new();
+    let choisis = d.tunnels_dans(marge);
+    for &g in genres {
+        for &k in choisis.iter().filter(|&&k| t.tunnels[k as usize].genre == g) {
+            let r = &t.tunnels[k as usize];
+            if !(r.genre == GRANDE || m < 6.0) {
+                continue;
+            }
+            let pts: Vec<[f32; 2]> = r.points.iter().map(|p| [p[0], p[1]]).collect();
+            let demi = (r.largeur / m / 2.0).max(0.6);
+            let (int, _) = couleur_route(r.genre, false);
+            peindre_trait(px, &mut cov, &pts, b, m, demi + 1.0, [0.40, 0.40, 0.44], 0.85, Some(7.0));
+            peindre_trait(px, &mut cov, &pts, b, m, demi, int, 0.45, None);
+        }
+    }
+    for k in d.rails_dans(marge) {
+        let r = &t.rails[k as usize];
+        if r.ou != tr::TUNNEL {
+            continue;
+        }
+        let pts: Vec<[f32; 2]> = r.points.iter().map(|p| [p[0], p[1]]).collect();
+        peindre_trait(px, &mut cov, &pts, b, m, (tr::largeur(r.mode) / m / 2.0).max(0.9), tr::teinte(r.mode), 0.7, Some(8.0));
+    }
+}
+
+/// Peint les tracés des cours d'eau : un trait fin sur l'axe des rivières et des
+/// canaux (leur surface est déjà peinte), les ruisseaux et les fossés à leur largeur
+/// (2 m et 1 m sans indication d'OSM) ; sous terre, en tirets plus pâles. Puis les
+/// berges : les côtés des surfaces d'eau d'OSM, d'un trait fin plus sombre.
+fn peindre_cours_eau(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
+    use sage_reel::cours_eau as ce;
+    let mut cov = Vec::new();
+    for k in d.cours_eau_dans([b[0] - 20.0, b[1] - 20.0, b[2] + 20.0, b[3] + 20.0]) {
+        let c = &d.lieu.cours_eau[k as usize];
+        let demi = match c.genre {
+            ce::RIVIERE | ce::CANAL => 0.8,
+            ce::RUISSEAU => (if c.largeur > 0.0 { c.largeur } else { 2.0 } / m / 2.0).max(0.8),
+            _ => (if c.largeur > 0.0 { c.largeur } else { 1.0 } / m / 2.0).max(0.6),
+        };
+        let (a, tirets) = if c.souterrain { (0.45, Some((10.0 / m).max(6.0))) } else { (0.9, None) };
+        peindre_trait(px, &mut cov, &c.points, b, m, demi, COURS_EAU, a, tirets);
+    }
+    // Les berges : les côtés des surfaces d'eau d'OSM, d'un trait fin, de la couleur de
+    // leur type (quai gris, berge naturelle verte)
+    let large = [b[0] - 4.0, b[1] - 4.0, b[2] + 4.0, b[3] + 4.0];
+    let types = d.berges();
+    for g in types.iter().flatten() {
+        let r = &g.points;
+        let bt = r.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |a, p| [a[0].min(p[0]), a[1].min(p[1]), a[2].max(p[0]), a[3].max(p[1])]);
+        if r.len() < 2 || bt[2] < large[0] || bt[0] > large[2] || bt[3] < large[1] || bt[1] > large[3] {
+            continue;
+        }
+        for i in 0..r.len() {
+            let j = (i + 1) % r.len();
+            let (p, q) = (r[i], r[j]);
+            if p[0].max(q[0]) < large[0] || p[0].min(q[0]) > large[2] || p[1].max(q[1]) < large[1] || p[1].min(q[1]) > large[3] {
+                continue;
+            }
+            let v = (g.quai[i] + g.quai[j]) / 2.0;
+            let c = [0, 1, 2].map(|k| BERGE_NATURELLE[k] + (BERGE[k] - BERGE_NATURELLE[k]) * v);
+            peindre_trait(px, &mut cov, &[p, q], b, m, 1.2, c, 1.0, None);
+        }
+    }
+}
+
+/// Peint les voies ferrées hors des tunnels (et hors des ponts si `ponts` est faux) :
+/// les trains en noir coupé de blanc, les métros et les trams de leur couleur.
+fn peindre_rails(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32, ponts: bool) {
+    use sage_reel::transports as tr;
+    let t = &d.lieu.transports;
+    let mut cov = Vec::new();
+    for k in d.rails_dans([b[0] - 40.0, b[1] - 40.0, b[2] + 40.0, b[3] + 40.0]) {
+        let r = &t.rails[k as usize];
+        if r.ou == tr::TUNNEL || (r.ou == tr::PONT && !ponts) {
+            continue;
+        }
+        let pts: Vec<[f32; 2]> = r.points.iter().map(|p| [p[0], p[1]]).collect();
+        let demi = (tr::largeur(r.mode) / m / 2.0).max(0.8);
+        if r.ou == tr::PONT {
+            peindre_trait(px, &mut cov, &pts, b, m, demi + 1.5, [0.25, 0.25, 0.28], 1.0, None);
+        }
+        match r.mode {
+            tr::TRAIN | tr::AUTRE => {
+                peindre_trait(px, &mut cov, &pts, b, m, demi.max(1.0), [0.33, 0.33, 0.36], 1.0, None);
+                if demi >= 1.5 {
+                    peindre_trait(px, &mut cov, &pts, b, m, demi * 0.45, [1.0, 1.0, 1.0], 1.0, Some((12.0 / m).max(8.0)));
+                }
+            }
+            mode => peindre_trait(px, &mut cov, &pts, b, m, demi, tr::teinte(mode), 0.9, None),
+        }
+    }
+}
+
+/// Peint les tracés des lignes (hors trains, déjà sur leurs rails) : un trait fin de
+/// leur couleur, plus pâle sous terre ; les lignes de bus de près seulement.
+fn peindre_lignes(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
+    use sage_reel::transports as tr;
+    let t = &d.lieu.transports;
+    let mut cov = Vec::new();
+    let demi = (1.5 / m).clamp(1.0, 2.5);
+    for (k, j) in d.traces_dans([b[0] - 10.0, b[1] - 10.0, b[2] + 10.0, b[3] + 10.0]) {
+        let l = &t.lignes[k as usize];
+        if l.mode == tr::TRAIN || (l.mode == tr::BUS && m >= 6.0) {
+            continue;
+        }
+        let morceau = &l.trace[j as usize];
+        let a = if morceau.ou == tr::TUNNEL { 0.35 } else { 0.75 };
+        peindre_trait(px, &mut cov, &morceau.points, b, m, demi, l.teinte(), a, None);
+    }
+}
+
+/// Peint les arrêts : un rond de la couleur de leur mode, cerclé de blanc ; les arrêts
+/// de bus de près seulement, les gares et stations de plus loin.
+fn peindre_arrets(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
+    use sage_reel::transports as tr;
+    let n = TUILE;
+    let t = &d.lieu.transports;
+    for k in d.arrets_dans([b[0] - 20.0, b[1] - 20.0, b[2] + 20.0, b[3] + 20.0]) {
+        let a = &t.arrets[k as usize];
+        let mode = a.mode();
+        if m >= if mode == tr::BUS { 3.0 } else { 12.0 } {
+            continue;
+        }
+        let r = (3.0 / m).clamp(2.5, 7.0) * if mode == tr::BUS { 1.0 } else { 1.3 };
+        let (cx, cy) = ((a.x - b[0]) / m, (a.z - b[1]) / m);
+        let c = tr::teinte(mode);
+        let e = r + 2.0;
+        for y in ((cy - e).floor().max(0.0) as i32)..=((cy + e).ceil().min(n as f32 - 1.0) as i32) {
+            for x in ((cx - e).floor().max(0.0) as i32)..=((cx + e).ceil().min(n as f32 - 1.0) as i32) {
+                let dd = (x as f32 + 0.5 - cx).hypot(y as f32 + 0.5 - cy);
+                let i = y as usize * n + x as usize;
+                melanger(px, i, [1.0, 1.0, 1.0], r + 1.5 - dd);
+                melanger(px, i, c, r + 0.5 - dd);
             }
         }
     }
@@ -929,7 +1215,7 @@ mod tests {
         assert_eq!(pixel(&d, 60.0, 50.0), [255, 255, 255]);
         // La route au-dessus de tout : elle passe sur le bus
         d.ordre = ordre_lu(&format!("{}", COUCHE_VOIE + BUS));
-        assert_eq!(d.ordre.last(), Some(&COUCHE_BATI));
+        assert_eq!(d.ordre.last(), Some(&COUCHE_ARRETS));
         let mut o = d.ordre.clone();
         o.retain(|&c| c != COUCHE_VOIE + ROUTE);
         o.push(COUCHE_VOIE + ROUTE);
@@ -945,7 +1231,43 @@ mod tests {
         // Un ordre écrit de travers garde toutes les couches, une fois
         let o = ordre_lu("40 40 999 x 10");
         assert_eq!(o.len(), ordre_par_defaut().len());
-        assert_eq!(&o[..2], &[COUCHE_BATI, COUCHE_EAU]);
+        let pos = |c: Couche| o.iter().position(|&x| x == c).unwrap();
+        assert!(pos(COUCHE_BATI) < pos(COUCHE_EAU));
+        // Les couches nouvelles se glissent à leur place : un ordre d'avant les
+        // transports se relit dans l'ordre par défaut d'aujourd'hui
+        assert_eq!(pos(COUCHE_COURS_EAU), pos(COUCHE_EAU) + 1);
+        assert_eq!(pos(COUCHE_TUNNELS), pos(COUCHE_EAU) + 2);
+        let ancien = "1 2 3 4 5 10 25 24 23 22 21 26 20 30 40";
+        assert_eq!(ordre_lu(ancien), ordre_par_defaut());
+    }
+
+    #[test]
+    fn les_transports_se_peignent() {
+        use sage_reel::transports::*;
+        let mut l = lieu();
+        l.transports.tunnels.push(Route { genre: GRANDE, largeur: 10.0, points: vec![[100.0, -200.0, 40.0], [100.0, 300.0, 40.0]] });
+        l.transports.rails.push(Rail { mode: METRO, ou: SOL, niveau: 0, points: vec![[-200.0, 50.0, 50.0], [300.0, 50.0, 50.0]] });
+        l.transports.arrets.push(Arret { modes: 1 << BUS, x: 0.0, z: 0.0, nom: "Essai".into(), abri: true, niveau: 0 });
+        let d = Donnees::new(l);
+        let (x0, _, c) = d.monde();
+        let t = c / 256.0;
+        let pixel = |x: f32, z: f32| {
+            let cle = (8u8, ((x - x0) / t).floor() as i32, ((z - x0) / t).floor() as i32);
+            let b = boite_tuile(&d, cle);
+            let px = rendre(&d, cle);
+            let m = (b[2] - b[0]) / TUILE as f32;
+            let i = ((z - b[1]) / m) as usize * TUILE + ((x - b[0]) / m) as usize;
+            [px[i * 4], px[i * 4 + 1], px[i * 4 + 2]]
+        };
+        // Le métro de sa couleur, l'arrêt de la sienne
+        let violet = teinte(METRO).map(|v| (v * 255.0) as i32);
+        let p = pixel(160.0, 50.0).map(|v| v as i32);
+        assert!((0..3).all(|k| (p[k] - violet[k]).abs() < 30), "{p:?}");
+        let p = pixel(0.0, 0.0);
+        assert!(p[0] > p[2] + 60, "{p:?}");
+        // Le tunnel : des tirets, pas un trait plein
+        let bord: Vec<i32> = (0..40).map(|k| pixel(100.0 - 5.2, -100.0 + k as f32 * 0.3)[1] as i32).collect();
+        assert!(bord.iter().max().unwrap() - bord.iter().min().unwrap() > 40, "{bord:?}");
     }
 
     #[test]
@@ -998,4 +1320,5 @@ mod tests {
         let m = v.monde(z, e[0], e[1]);
         assert!((m.0 - 100.0).abs() < 1e-3 && (m.1 + 50.0).abs() < 1e-3);
     }
+
 }

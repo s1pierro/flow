@@ -97,6 +97,27 @@ pub struct Relief3d {
     pub en_attente: bool,
     /// Le rendu blanc : faces blanches, arêtes tracées.
     pub blanc: bool,
+    /// Le rendu Maquette (`maquette`) : des tuiles en volume, fabriquées à part.
+    pub maquette: bool,
+    fabrique: Option<crate::maquette::Fabrique>,
+    tuiles_maquette: HashMap<Cle, Faite>,
+    /// Les tuiles sélectionnées de la maquette (surlignées de `accent`), et s'il ne
+    /// faut montrer qu'elles.
+    pub selection: std::collections::BTreeSet<Cle>,
+    pub seules: bool,
+    pub accent: [f32; 3],
+    /// Les tuiles de la maquette montrées à la dernière image (pour le toucher).
+    montrees: Vec<Cle>,
+}
+
+/// Une tuile de la maquette reçue de la fabrique.
+struct Faite {
+    morceau: Morceau,
+    image: crate::draw::Image,
+    contour: Maillage3d,
+    /// Sa surface d'eau, s'il y en a.
+    eau: Option<Maillage3d>,
+    mesure: crate::maquette::Mesure,
 }
 
 impl Relief3d {
@@ -106,7 +127,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, blanc: false }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, blanc: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -256,9 +277,153 @@ impl Relief3d {
         v.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// Dessine le lieu de `carte` dans `zone` en Maquette : les tuiles demandées à la
+    /// fabrique (les plus grossières d'abord, et les ancêtres absents), quelques-unes
+    /// prises par image ; en attendant, l'ancêtre le plus proche déjà fait.
+    fn dessiner_maquette(&mut self, cx: &mut Cx, zone: Rect, carte: &mut Carte) {
+        let ciel = CIEL.map(|c| (c * 255.0) as u8);
+        cx.dl.rrect(zone, 0.0, [ciel[0], ciel[1], ciel[2], 255]);
+        let donnees = carte.donnees.clone();
+        let synchrone = cfg!(test) || std::env::var_os("FLOW_MAQUETTE_SYNC").is_some();
+        if self.fabrique.is_none() && !synchrone {
+            self.fabrique = Some(crate::maquette::Fabrique::new(donnees.clone()));
+        }
+        let Ok(d) = donnees.read() else { return };
+        self.poser(&d);
+        let mvp = self.mvp(zone.w / zone.h.max(1.0));
+        // Les seules tuiles sélectionnées, à leur niveau ; sinon, celles de la vue
+        let seules = self.seules && !self.selection.is_empty();
+        let voulues: Vec<Cle> = if seules {
+            let mut v: Vec<Cle> = self.selection.iter().copied().collect();
+            v.sort();
+            v
+        } else {
+            self.choisir(&d, &mvp)
+        };
+        let perime = |t: &HashMap<Cle, Faite>, cle: Cle| t.get(&cle).is_none_or(|m| !carte.a_jour(m.morceau.faite, boite_tuile(&d, cle)));
+        let mut a_faire: Vec<(u8, usize, Cle)> = Vec::new();
+        for (rang, &cle) in voulues.iter().enumerate() {
+            if perime(&self.tuiles_maquette, cle) {
+                a_faire.push((cle.0, rang, cle));
+                let (z, i, j) = cle;
+                for k in (1..=z).filter(|_| !seules) {
+                    let a = (z - k, i >> k, j >> k);
+                    if !self.tuiles_maquette.contains_key(&a) {
+                        a_faire.push((a.0, rang, a));
+                    }
+                }
+            }
+        }
+        a_faire.sort();
+        // Les sélectionnées hors de la vue, après (pour leur contour et leur mesure)
+        for &cle in &self.selection {
+            if perime(&self.tuiles_maquette, cle) {
+                a_faire.push((cle.0, usize::MAX, cle));
+            }
+        }
+        let mut vues = HashSet::new();
+        let a_faire: Vec<(Cle, u64)> = a_faire.into_iter().filter(|x| vues.insert(x.2)).map(|x| (x.2, carte.compteur)).collect();
+        // Les tuiles finies : quelques-unes par image (l'interface d'abord)
+        let finies = match &self.fabrique {
+            Some(f) => {
+                f.demander(a_faire.clone());
+                let finies = f.prendre(3);
+                self.en_attente = f.occupee();
+                finies
+            }
+            None => {
+                // Essais et aperçus : tout de suite
+                let v: Vec<crate::maquette::Tuile> = a_faire.iter().map(|&(cle, faite)| crate::maquette::tuile(&d, cle, faite)).collect();
+                self.en_attente = false;
+                v
+            }
+        };
+        drop(d);
+        for t in finies {
+            self.revision += 1;
+            let id = 0x6d61_7100_0000_0000u64 ^ (self.num << 40) ^ ((t.cle.0 as u64) << 32) ^ ((t.cle.1 as u64 & 0xFFFF) << 16) ^ (t.cle.2 as u64 & 0xFFFF);
+            let maillage = Maillage3d { id, revision: self.revision, sommets: Arc::new(t.sommets), indices: Arc::new(t.indices) };
+            let aretes = Some(Maillage3d { id: id ^ (1 << 63), revision: self.revision, sommets: maillage.sommets.clone(), indices: Arc::new(t.aretes) });
+            let contour = Maillage3d { id: id ^ (1 << 62), revision: self.revision, sommets: maillage.sommets.clone(), indices: Arc::new(t.contour) };
+            let image = crate::draw::Image { id, revision: self.revision, largeur: crate::maquette::TEX as u32, hauteur: (crate::maquette::TEX + crate::maquette::BANDE) as u32, pixels: Arc::new(t.pixels) };
+            let eau = (!t.eau_indices.is_empty()).then(|| Maillage3d { id: id ^ (1 << 61), revision: self.revision, sommets: Arc::new(t.eau_sommets), indices: Arc::new(t.eau_indices) });
+            self.tuiles_maquette.insert(t.cle, Faite { morceau: Morceau { maillage, faite: t.faite, vu: self.image, voirie: 0, aretes }, image, contour, eau, mesure: t.mesure });
+        }
+        let mut montrees: Vec<Cle> = Vec::new();
+        let mut vues = HashSet::new();
+        for &cle in &voulues {
+            let (z, i, j) = cle;
+            // En attendant une tuile, l'ancêtre le plus proche déjà fait (pas pour les
+            // seules sélectionnées : rien d'autre qu'elles)
+            let a = if seules { Some(cle).filter(|c| self.tuiles_maquette.contains_key(c)) } else { (0..=z).map(|k| (z - k, i >> k, j >> k)).find(|a| self.tuiles_maquette.contains_key(a)) };
+            if let Some(a) = a {
+                if vues.insert(a) {
+                    montrees.push(a);
+                }
+            }
+        }
+        let (mut morceaux, mut aretes_sol, mut choix, mut eaux) = (Vec::with_capacity(montrees.len()), Vec::new(), Vec::new(), Vec::new());
+        for cle in &montrees {
+            let Some(f) = self.tuiles_maquette.get_mut(cle) else { continue };
+            f.morceau.vu = self.image;
+            if self.blanc {
+                if let Some(a) = &f.morceau.aretes {
+                    aretes_sol.push(a.clone());
+                }
+            }
+            morceaux.push(Morceau3d { maillage: f.morceau.maillage.clone(), image: Some(f.image.clone()), uv: [0.0, 0.0, 1.0, 1.0], couleur: [0.72, 0.76, 0.62] });
+            if let Some(e) = &f.eau {
+                eaux.push(e.clone());
+            }
+        }
+        // Le contour des sélectionnées faites, montrées ou non
+        for cle in &self.selection {
+            if let Some(f) = self.tuiles_maquette.get_mut(cle) {
+                f.morceau.vu = self.image;
+                choix.push(f.contour.clone());
+            }
+        }
+        self.montrees = montrees;
+        self.dessinees = morceaux.len();
+        self.bati_dessinees = 0;
+        let dist = self.camera.distance;
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: Vec::new(), blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux });
+        if self.tuiles_maquette.len() > GARDES {
+            let sel = &self.selection;
+            let mut v: Vec<(u64, Cle)> = self.tuiles_maquette.iter().filter(|(k, _)| k.0 > 0 && !sel.contains(k)).map(|(k, m)| (m.morceau.vu, *k)).collect();
+            v.sort();
+            let n = self.tuiles_maquette.len() - GARDES;
+            for (_, k) in v.iter().take(n) {
+                self.tuiles_maquette.remove(k);
+            }
+        }
+    }
+
+    /// La tuile de la maquette montrée sous le point (x, y) de `zone`, s'il touche le
+    /// terrain.
+    pub fn tuile_touchee(&self, d: &Donnees, zone: Rect, x: f32, y: f32) -> Option<Cle> {
+        let (nx, ny) = ((x - zone.x) / zone.w.max(1.0) * 2.0 - 1.0, 1.0 - (y - zone.y) / zone.h.max(1.0) * 2.0);
+        let p = crate::selection::pointer(d, &self.camera, zone.w / zone.h.max(1.0), nx, ny)?;
+        self.montrees.iter().copied().filter(|&c| {
+            let b = boite_tuile(d, c);
+            p[0] >= b[0] && p[0] <= b[2] && p[2] >= b[1] && p[2] <= b[3]
+        }).max_by_key(|c| c.0)
+    }
+
+    /// La mesure d'une tuile de la maquette, si elle est faite.
+    pub fn mesure(&self, cle: Cle) -> Option<crate::maquette::Mesure> {
+        self.tuiles_maquette.get(&cle).map(|f| f.mesure)
+    }
+
     /// Dessine le lieu de `carte` dans `zone`.
     pub fn dessiner(&mut self, cx: &mut Cx, zone: Rect, carte: &mut Carte) {
         self.image += 1;
+        if self.maquette {
+            self.dessiner_maquette(cx, zone, carte);
+            return;
+        }
+        // Hors de la maquette, sa fabrique s'arrête (ses tuiles restent pour le retour)
+        self.fabrique = None;
         let ciel = CIEL.map(|c| (c * 255.0) as u8);
         cx.dl.rrect(zone, 0.0, [ciel[0], ciel[1], ciel[2], 255]);
         let donnees = carte.donnees.clone();
@@ -370,7 +535,7 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new() });
         // Les maillages qui n'ont pas servi depuis longtemps
         if self.batis.len() > GARDES / 2 {
             let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();
@@ -583,7 +748,8 @@ pub fn aretes(v: &[f32], flottants: usize, ind: &[u32], pli: bool) -> Vec<u32> {
             return -1.0;
         }
         let m = t.iter().map(|&i| v[i as usize * flottants + 8]).fold(f32::MAX, f32::min);
-        if m >= CHAUSSEE - 0.5 && t.iter().all(|&i| v[i as usize * flottants + 8] == m) { m } else { -1.0 }
+        // (la maquette, matière 4 et plus, n'est pas de la voirie)
+        if m >= CHAUSSEE - 0.5 && m < crate::maquette::MAQUETTE - 0.5 && t.iter().all(|&i| v[i as usize * flottants + 8] == m) { m } else { -1.0 }
     };
     let mut vues: HashMap<(Point, Point), (u32, u32, [f32; 3], bool, u32, f32)> = HashMap::new();
     let mut ordre = Vec::new();

@@ -120,6 +120,14 @@ pub struct Terrain3d {
     pub blanc: bool,
     pub aretes: Vec<Maillage3d>,
     pub aretes_bati: Vec<Maillage3d>,
+    /// Les contours de ce qui est sélectionné, tracés de la couleur `accent` (de 0 à
+    /// 1), plus épais, dans tous les rendus.
+    pub choix: Vec<Maillage3d>,
+    pub accent: [f32; 3],
+    /// Les surfaces d'eau de la maquette (sommets de `SOMMET` flottants, matière de
+    /// l'eau), semi-transparentes, de leur propre couleur : dessinées après le reste,
+    /// sans écrire la profondeur, on voit le lit au travers.
+    pub eaux: Vec<Maillage3d>,
 }
 
 /// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la

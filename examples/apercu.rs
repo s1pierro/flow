@@ -329,6 +329,9 @@ fn main() {
             // Les Andelys (s'il est là) : le bourg de près, toute la carte, en portrait ;
             // l'accueil sur le dossier des lieux
             let vue = match s.name { "lieux-loin" => "0 0 0.05", "lieux-portrait" => "-300 -100 1.6", _ => "-200 0 0.9" };
+            // FLOW_VUE2D=« x z échelle » : une autre vue de la carte ; FLOW_LIGNE=« mode numéro »
+            let vue = std::env::var("FLOW_VUE2D").unwrap_or(vue.to_string());
+            let vue = match std::env::var("FLOW_LIGNE") { Ok(l) => format!("{vue}\nligne = {l}"), _ => vue };
             if s.name == "lieux-accueil" {
                 app.ouvrir_espace("fenetres = F1:lieux\n");
             } else if s.name.starts_with("lieux-plan") {
@@ -368,10 +371,18 @@ fn main() {
                 // lieux-ordre : les bois au-dessus de tout, les voies de bus au-dessus des voies
                 let mut ordre = if s.name == "lieux-ordre" { "ordre = 2 3 4 5 10 25 24 23 22 21 20 26 30 40 1\n" } else { "" }.to_string();
                 // FLOW_RENDU=blanc : la 3D aux faces blanches, arêtes tracées
-                if std::env::var("FLOW_RENDU").as_deref() == Ok("blanc") {
-                    ordre.push_str("rendu3d = blanc\n");
+                // FLOW_RENDU=maquette : la maquette (FLOW_MAQUETTE_SYNC pour l'attendre) ;
+                // « maquette blanc » : les deux
+                if let Ok(r) = std::env::var("FLOW_RENDU") {
+                    ordre.push_str(&format!("rendu3d = {r}\n"));
                 }
-                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}{ordre}outil = {}\n", if s.name == "lieux" { 1 } else { 0 }));
+                // FLOW_SELECTION=« niveau/i/j … » : des tuiles de la maquette sélectionnées ;
+                // FLOW_OUTIL : l'onglet du panneau (6 : Sélection)
+                if let Ok(t) = std::env::var("FLOW_SELECTION") {
+                    ordre.push_str(&format!("selection = {t}\n"));
+                }
+                let outil = std::env::var("FLOW_OUTIL").ok().and_then(|o| o.parse::<usize>().ok()).unwrap_or(if s.name == "lieux" { 1 } else { 0 });
+                app.ouvrir_espace(&format!("fenetres = F1:lieux\n[fenetre 1]\ndocument = {doc}\nvue = {vue}\n{vue3d}{ordre}outil = {outil}\n"));
             }
         }
         if s.name == "telecommande-manette" {

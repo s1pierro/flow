@@ -34,7 +34,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "flow"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "boolmesh",
  "fontdue",
@@ -82,7 +82,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "sage-reel"
-version = "0.3.0"
+version = "0.6.0"
 
 [[package]]
 name = "ttf-parser"

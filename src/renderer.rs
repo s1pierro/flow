@@ -124,7 +124,7 @@ void main() {
   o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
 }";
 /// La couleur vient de la carte (déjà ombrée) ; un peu de soleil en plus pour le
-/// relief vu de biais, et la brume au loin. Hors du lieu (transparent), rien. En blanc,
+/// relief vu de biais (la maquette, sans ombrage cuit : plus franc), et la brume au loin. Hors du lieu (transparent), rien. En blanc,
 /// la matière teinte un peu : l'eau bleu pâle, la chaussée gris clair.
 const TERRAIN_FS: &str = "#version 300 es
 precision highp float;
@@ -138,11 +138,16 @@ uniform vec3 u_couleur;
 uniform vec3 u_ciel;
 uniform vec2 u_brume;
 uniform float u_blanc;
+uniform float u_alpha;
 out vec4 o_color;
 void main() {
   vec3 c = u_couleur;
   if (u_blanc > 0.5) {
-    if (v_mat > 2.5) c = vec3(0.90, 0.90, 0.91);
+    // La maquette (4) : blanche, la chaussée (4,1) gris clair, l'eau (4,2) bleu pâle
+    if (v_mat > 4.15) c = vec3(0.76, 0.86, 0.95);
+    else if (v_mat > 4.05) c = vec3(0.80, 0.80, 0.83);
+    else if (v_mat > 3.5) c = vec3(0.95, 0.95, 0.94);
+    else if (v_mat > 2.5) c = vec3(0.90, 0.90, 0.91);
     else if (v_mat > 1.5) c = vec3(0.80, 0.80, 0.83);
     else if (v_mat > 0.5) c = vec3(0.76, 0.86, 0.95);
   }
@@ -153,9 +158,12 @@ void main() {
   }
   vec3 n = normalize(v_n);
   float s = max(dot(n, normalize(vec3(-0.5, 0.8, -0.35))), 0.0);
-  c *= 0.82 + 0.25 * s;
+  // La maquette (matière 4) : rien de cuit dans l'image, le soleil et le ciel donnent le relief
+  if (v_mat > 3.5) c *= 0.55 + 0.42 * s + 0.12 * (0.5 + 0.5 * n.y);
+  else c *= 0.82 + 0.25 * s;
   float b = smoothstep(u_brume.x, u_brume.y, v_d);
-  o_color = vec4(mix(c, u_ciel, b * 0.85), 1.0);
+  // Prémultipliée : l'eau de la maquette est semi-transparente
+  o_color = vec4(mix(c, u_ciel, b * 0.85) * u_alpha, u_alpha);
 }";
 /// Les arêtes du rendu blanc : un trait uni, noyé dans la brume comme le reste.
 const LIGNE_VS: &str = "#version 300 es
@@ -253,7 +261,7 @@ pub struct Renderer {
     u_couleur: i32,
     terrain_program: u32,
     /// u_mvp, u_uv, u_oeil, u_avec_image, u_couleur, u_ciel, u_brume, u_blanc
-    u_terrain: [i32; 8],
+    u_terrain: [i32; 9],
     bati_program: u32,
     /// u_mvp, u_oeil, u_ciel, u_brume, u_blanc
     u_bati: [i32; 5],
@@ -347,7 +355,7 @@ impl Renderer {
             let u_vue = loc(maillage_program, "u_vue");
             let u_couleur = loc(maillage_program, "u_couleur");
             let terrain_program = program(&gl, TERRAIN_VS, TERRAIN_FS)?;
-            let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume", "u_blanc"].map(|n| loc(terrain_program, n));
+            let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume", "u_blanc", "u_alpha"].map(|n| loc(terrain_program, n));
             (gl.glUseProgram)(terrain_program);
             (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
             let bati_program = program(&gl, BATI_VS, BATI_FS)?;
@@ -524,8 +532,10 @@ impl Renderer {
         (gl.glUniform3f)(u[5], t.ciel[0], t.ciel[1], t.ciel[2]);
         (gl.glUniform2f)(u[6], t.brume[0], t.brume[1]);
         (gl.glUniform1f)(u[7], if t.blanc { 1.0 } else { 0.0 });
-        // En blanc, les faces reculent un peu : les arêtes passent devant
-        if t.blanc {
+        (gl.glUniform1f)(u[8], 1.0);
+        // En blanc ou sous une sélection, les faces reculent un peu : les arêtes passent
+        // devant
+        if t.blanc || !t.choix.is_empty() {
             (gl.glEnable)(POLYGON_OFFSET_FILL);
             (gl.glPolygonOffset)(1.0, 1.0);
         }
@@ -590,6 +600,52 @@ impl Renderer {
             }
             (gl.glDepthFunc)(LESS);
             (gl.glLineWidth)(1.0);
+        }
+        // Les contours de la sélection, de la couleur d'accent, dans tous les rendus
+        if !t.choix.is_empty() {
+            (gl.glDisable)(POLYGON_OFFSET_FILL);
+            (gl.glUseProgram)(self.ligne_program);
+            let u = &self.u_ligne;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform3f)(u[1], t.oeil[0], t.oeil[1], t.oeil[2]);
+            (gl.glUniform3f)(u[3], t.ciel[0], t.ciel[1], t.ciel[2]);
+            (gl.glUniform2f)(u[4], t.brume[0], t.brume[1]);
+            (gl.glUniform3f)(u[2], t.accent[0], t.accent[1], t.accent[2]);
+            (gl.glUniform1f)(u[5], 0.0);
+            (gl.glLineWidth)(3.0);
+            (gl.glDepthFunc)(LEQUAL);
+            for m in &t.choix {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                let (vao, n) = self.tampon_de(m, crate::relief3d::SOMMET as i32);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(LINES, n, UINT, std::ptr::null());
+            }
+            (gl.glDepthFunc)(LESS);
+            (gl.glLineWidth)(1.0);
+        }
+        // L'eau de la maquette, semi-transparente, par-dessus le lit
+        if !t.eaux.is_empty() {
+            (gl.glDisable)(POLYGON_OFFSET_FILL);
+            (gl.glUseProgram)(self.terrain_program);
+            let u = &self.u_terrain;
+            (gl.glUniform1i)(u[3], 0);
+            (gl.glUniform4f)(u[1], 0.0, 0.0, 1.0, 1.0);
+            (gl.glUniform3f)(u[4], 0.26, 0.50, 0.72);
+            (gl.glUniform1f)(u[8], 0.55);
+            (gl.glEnable)(BLEND);
+            (gl.glBlendFunc)(1, 0x0303);
+            (gl.glDepthMask)(0);
+            for m in &t.eaux {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                let (vao, n) = self.tampon_de(m, crate::relief3d::SOMMET as i32);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+            }
+            (gl.glDepthMask)(1);
         }
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);

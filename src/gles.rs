@@ -85,6 +85,7 @@ api!(GlApi {
     glScissor: fn(i32, i32, i32, i32);
     glEnable: fn(u32);
     glDepthFunc: fn(u32);
+    glDepthMask: fn(u8);
     glPolygonOffset: fn(f32, f32);
     glLineWidth: fn(f32);
     glDisable: fn(u32);

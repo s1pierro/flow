@@ -13,7 +13,9 @@
 //!   doigts zooment et déplacent ; à côté (en paysage) ou dessous (en portrait), le
 //!   panneau des outils :
 //!   - **Voir** : toucher la carte dit ce qu'il y a là (position, altitude, sol, voie,
-//!     bâtiment) ; un doigt déplace la carte.
+//!     tunnel, voie ferrée, arrêt et ses lignes, bâtiment) ; un doigt déplace la carte.
+//!     Le panneau liste les lignes (bus, tram, métro, train) : en choisir une la
+//!     surligne sur la carte, avec ses arrêts.
 //!   - **Bâti** : toucher un bâtiment le choisit, le glisser le déplace ; son genre, ses
 //!     hauteurs, son toit se règlent dans le panneau ; « Nouveau bâtiment » se trace
 //!     point par point.
@@ -27,8 +29,9 @@
 //!   3D, drapé des mêmes tuiles, les bâtiments en volume près de l'œil, et retour, sur
 //!   le même point ; un doigt tourne autour,
 //!   deux doigts rapprochent et déplacent. Un outil d'édition ramène à la carte. Deux
-//!   pilules, en haut à gauche, choisissent le rendu : drapé de la carte, ou blanc aux
-//!   arêtes tracées (retenu dans l'espace).
+//!   pilules, en haut à gauche, choisissent le rendu : drapé de la carte ou Maquette ;
+//!   Blanc (faces blanches, arêtes tracées) s'ajoute à l'un comme à l'autre (retenu dans
+//!   l'espace).
 //! - **Dans la barre de la fenêtre** : la liste des lieux, la 3D, le nom, enregistrer,
 //!   annuler et rétablir.
 //!
@@ -37,7 +40,7 @@
 //!
 //! Un lieu généré est dérivé d'OpenStreetMap (ODbL) : il ne se publie pas.
 
-use crate::carte::{boite_bati, boite_route, Carte, Donnees, Vue};
+use crate::carte::{boite_bati, boite_route, boite_tuile, Carte, Donnees, Vue};
 use crate::clavier::{self, Edition, Frappe};
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Color, Rect};
@@ -65,13 +68,15 @@ const RECHERCHE: Id = id("lieux/recherche");
 pub const DOSSIER: &str = "lieux";
 const HISTORIQUE: usize = 60;
 
-const OUTILS: [&str; 6] = ["Voir", "Bâti", "Voies", "Relief", "Eau", "Sol"];
+const OUTILS: [&str; 7] = ["Voir", "Bâti", "Voies", "Relief", "Eau", "Sol", "Sélection"];
 const VOIR: usize = 0;
 const BATI: usize = 1;
 const VOIES: usize = 2;
 const RELIEF: usize = 3;
 const EAU: usize = 4;
 const SOL: usize = 5;
+/// La sélection de tuiles de la maquette (en 3D, comme Voir).
+const SELECTION: usize = 6;
 
 const GENRES_BATI: [&str; 5] = ["Maison", "Immeuble", "Industriel", "Édifice", "Annexe"];
 const FORMES: [&str; 4] = ["Plat", "Deux pans", "Croupe", "Appentis"];
@@ -196,6 +201,12 @@ pub struct Lieux {
     camera3d: Option<Camera>,
     /// Le rendu de la 3D : drapé de la carte, ou blanc aux arêtes tracées.
     blanc3d: bool,
+    /// Le rendu Maquette de la 3D (`maquette`).
+    maquette3d: bool,
+    /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
+    /// la carte changent).
+    selection: crate::selection::Selection,
+    resume: Option<(std::collections::BTreeSet<crate::carte::Cle>, u64, crate::selection::Resume)>,
     orbite: Option<(f32, f32)>,
     /// Le plan où choisir la zone à générer, quand il est ouvert ; la recherche d'un
     /// nom (Nominatim), en cours ou faite.
@@ -208,6 +219,8 @@ pub struct Lieux {
     /// L'ordre de dessin des couches de la carte, et la couche choisie pour le changer.
     ordre: Vec<crate::carte::Couche>,
     couche: Option<crate::carte::Couche>,
+    /// La ligne surlignée : (mode, numéro).
+    ligne: Option<(u8, String)>,
 }
 
 /// Cherche un lieu par son nom (Nominatim, en France : le relief vient de l'IGN) :
@@ -263,6 +276,9 @@ impl Default for Lieux {
             trois_d: None,
             camera3d: None,
             blanc3d: false,
+            maquette3d: false,
+            selection: Default::default(),
+            resume: None,
             orbite: None,
             plan: None,
             recherche: Edition::default(),
@@ -271,6 +287,7 @@ impl Default for Lieux {
             plan_a_ouvrir: false,
             ordre: crate::carte::ordre_par_defaut(),
             couche: None,
+            ligne: None,
         }
     }
 }
@@ -293,9 +310,18 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         l.position = Edition::new(p);
     }
     l.plan_a_ouvrir = e.texte("plan") == Some("oui");
-    l.blanc3d = e.texte("rendu3d") == Some("blanc");
+    // « rendu3d = maquette blanc » : les deux, dans n'importe quel ordre
+    let rendu = e.texte("rendu3d").unwrap_or("");
+    l.blanc3d = rendu.split_whitespace().any(|m| m == "blanc");
+    l.maquette3d = rendu.split_whitespace().any(|m| m == "maquette");
+    // Les tuiles sélectionnées : « selection = niveau/i/j … »
+    l.selection = crate::selection::Selection::lire(e.texte("selection").unwrap_or(""), e.texte("selection_seules") == Some("oui"));
     if let Some(o) = e.texte("ordre") {
         l.ordre = crate::carte::ordre_lu(o);
+    }
+    // La ligne surlignée : « mode numéro »
+    if let Some((m, n)) = e.texte("ligne").and_then(|t| t.split_once(' ')) {
+        l.ligne = m.parse().ok().map(|m| (m, n.to_string()));
     }
     Box::new(l)
 }
@@ -767,6 +793,29 @@ impl Lieux {
         } else {
             v.push(format!("sol : {}", CLASSES[(l.classe(x as f64, z as f64) as usize).min(5)]));
         }
+        // Le cours d'eau le plus proche : dans l'eau, celui dont c'est la surface (à
+        // 300 m de son axe au plus) ; ailleurs, un ruisseau tout près
+        let portee = if l.eau(x as f64, z as f64) >= 0.5 { 300.0 } else { 8.0 };
+        let proche = d
+            .cours_eau_dans([x - portee, z - portee, x + portee, z + portee])
+            .into_iter()
+            .map(|k| (l.cours_eau[k as usize].points.windows(2).map(|s| distance_segment((x, z), s[0], s[1])).fold(f32::MAX, f32::min), k))
+            .filter(|(e, _)| *e < portee)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((e, k)) = proche {
+            let c = &l.cours_eau[k as usize];
+            let mut t = sage_reel::cours_eau::NOMS[(c.genre as usize).min(3)].to_string();
+            if !c.nom.is_empty() {
+                t = format!("{t} · {}", c.nom);
+            }
+            if c.largeur > 0.0 {
+                t = format!("{t} · {:.1} m de large (OSM)", c.largeur).replace('.', ",");
+            }
+            if c.souterrain {
+                t.push_str(" · sous terre");
+            }
+            v.push(format!("{t} · axe à {e:.0} m"));
+        }
         if let Some(k) = Lieux::bati_sous(d, x, z) {
             let b = &l.batiments[k];
             v.push(format!("{} · {} · faîtage à {:.1} m", GENRES_BATI[(b.genre as usize).min(4)], FORMES[(b.forme as usize).min(3)], b.toit - b.pied - 1.0).replace('.', ","));
@@ -775,7 +824,71 @@ impl Lieux {
             let r = if pont { &l.ponts[k] } else { &l.routes[k] };
             v.push(format!("{}{} · {:.1} m de large", GENRES_VOIE[(r.genre as usize).min(GENRES_VOIE.len() - 1)], if pont { " (pont)" } else { "" }, r.largeur).replace('.', ","));
         }
+        v.extend(Lieux::decrire_transports(d, x, z));
         v
+    }
+
+    /// Les tunnels, voies ferrées et arrêts près de (x, z).
+    fn decrire_transports(d: &Donnees, x: f32, z: f32) -> Vec<String> {
+        use sage_reel::transports as tr;
+        let (l, t) = (&d.lieu, &d.lieu.transports);
+        let mut v = Vec::new();
+        let pres = |pts: &mut dyn Iterator<Item = [f32; 2]>| {
+            let pts: Vec<[f32; 2]> = pts.collect();
+            pts.windows(2).map(|s| distance_segment((x, z), s[0], s[1])).fold(f32::MAX, f32::min)
+        };
+        let marge = 8.0;
+        let boite = [x - marge, z - marge, x + marge, z + marge];
+        let sol = l.relief(x as f64, z as f64) as f32;
+        if let Some((_, k)) = d.tunnels_dans(boite).into_iter().map(|k| (pres(&mut t.tunnels[k as usize].points.iter().map(|p| [p[0], p[1]])) - t.tunnels[k as usize].largeur / 2.0, k)).filter(|(e, _)| *e < 4.0).min_by(|a, b| a.0.total_cmp(&b.0)) {
+            let r = &t.tunnels[k as usize];
+            let y = r.points.iter().min_by(|a, b| (a[0] - x).hypot(a[1] - z).total_cmp(&(b[0] - x).hypot(b[1] - z))).map_or(sol, |p| p[2]);
+            v.push(format!("tunnel · {} · {:.1} m sous le sol", GENRES_VOIE[(r.genre as usize).min(GENRES_VOIE.len() - 1)], (sol - y).max(0.0)).replace('.', ","));
+        }
+        if let Some((_, k)) = d.rails_dans(boite).into_iter().map(|k| (pres(&mut t.rails[k as usize].points.iter().map(|p| [p[0], p[1]])), k)).filter(|(e, _)| *e < 5.0).min_by(|a, b| a.0.total_cmp(&b.0)) {
+            let r = &t.rails[k as usize];
+            let ou = match r.ou {
+                tr::PONT => " (pont)",
+                tr::TUNNEL => " (tunnel)",
+                _ => "",
+            };
+            let niveau = if r.niveau != 0 { format!(" · niveau {}", r.niveau) } else { String::new() };
+            v.push(format!("voie ferrée · {}{ou}{niveau}", tr::NOMS_MODES[r.mode.min(tr::MODES - 1) as usize]));
+        }
+        let arret = d.arrets_dans([x - 25.0, z - 25.0, x + 25.0, z + 25.0]).into_iter().map(|k| ((t.arrets[k as usize].x - x).hypot(t.arrets[k as usize].z - z), k as usize)).filter(|(e, _)| *e < 25.0).min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, k)) = arret {
+            let a = &t.arrets[k];
+            let modes: Vec<&str> = (0..tr::MODES).filter(|m| a.modes & (1 << m) != 0).map(|m| tr::NOMS_MODES[m as usize]).collect();
+            let nom = if a.nom.is_empty() { "sans nom" } else { a.nom.as_str() };
+            let sous = if a.niveau < 0 { format!(" · sous terre (niveau {})", a.niveau) } else { String::new() };
+            v.push(format!("arrêt {nom} · {}{}{sous}", modes.join(", "), if a.abri { " · abri" } else { "" }));
+            let mut lignes: Vec<String> = t.lignes.iter().filter(|li| li.arrets.contains(&(k as u32))).map(|li| li.titre()).collect();
+            lignes.sort();
+            lignes.dedup();
+            if !lignes.is_empty() {
+                v.push(format!("lignes : {}", lignes.join(", ")));
+            }
+        }
+        v
+    }
+
+    /// Les lignes du lieu, une par mode et numéro (l'aller et le retour ensemble),
+    /// rangées par mode puis par numéro : (mode, numéro, indices des relations).
+    fn groupes_lignes(t: &sage_reel::transports::Transports) -> Vec<(u8, String, Vec<usize>)> {
+        let mut g: Vec<(u8, String, Vec<usize>)> = Vec::new();
+        for (k, l) in t.lignes.iter().enumerate() {
+            match g.iter_mut().find(|e| e.0 == l.mode && e.1 == l.numero) {
+                Some(e) => e.2.push(k),
+                None => g.push((l.mode, l.numero.clone(), vec![k])),
+            }
+        }
+        // Les numéros dans l'ordre naturel (2 avant 10)
+        let cle = |n: &str| {
+            let chiffres: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
+            (chiffres.is_empty(), chiffres.parse::<u32>().unwrap_or(0), n.to_string())
+        };
+        g.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| cle(&a.1).cmp(&cle(&b.1))));
+        g
     }
 
     /// Le plus petit bâtiment qui contient (x, z).
@@ -1109,7 +1222,9 @@ impl Lieux {
         r.poser(&d);
         drop(d);
         self.trois_d = Some(r);
-        self.outil = VOIR;
+        if self.outil != SELECTION {
+            self.outil = VOIR;
+        }
         self.choix = None;
     }
 
@@ -1150,6 +1265,17 @@ impl Lieux {
                     self.pincement = echelle;
                     r.pincer(k, deplacement.0, deplacement.1, zone.h);
                 }
+                // En Maquette, un toucher ajoute la tuile sous le doigt à la sélection, ou
+                // l'en retire
+                Geste::Tap { x, y, .. } if self.maquette3d => {
+                    if let Some(carte) = &self.carte {
+                        if let Ok(d) = carte.donnees.read() {
+                            if let Some(c) = r.tuile_touchee(&d, zone, x, y) {
+                                self.selection.basculer(c);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1157,17 +1283,35 @@ impl Lieux {
             r.piloter(&m, dt);
         }
         r.blanc = self.blanc3d;
+        r.maquette = self.maquette3d;
+        if r.selection != self.selection.cles {
+            r.selection = self.selection.cles.clone();
+        }
+        r.seules = self.selection.seules;
+        let a = cx.couleurs().accent;
+        r.accent = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
         let Some(carte) = &mut self.carte else { return };
         cx.clip(Some(zone));
         r.dessiner(cx, zone, carte);
         // Le rendu, en haut à gauche, par-dessus la vue (et ses gestes)
         let m = cx.ecart();
         let mut x = zone.x + m;
-        for (i, (nom, blanc)) in [("Carte", false), ("Blanc", true)].into_iter().enumerate() {
-            if cx.pill(sub_id(base, 30 + i), x, zone.y + m, nom, self.blanc3d == blanc) {
-                self.blanc3d = blanc;
+        // Carte ou Maquette ; Blanc, en plus, sur l'un comme sur l'autre
+        for (i, nom) in ["Carte", "Maquette", "Blanc"].into_iter().enumerate() {
+            let choisi = match i {
+                0 => !self.maquette3d,
+                1 => self.maquette3d,
+                _ => self.blanc3d,
+            };
+            if cx.pill(sub_id(base, 30 + i), x, zone.y + m, nom, choisi) {
+                match i {
+                    0 => self.maquette3d = false,
+                    1 => self.maquette3d = true,
+                    _ => self.blanc3d = !self.blanc3d,
+                }
             }
-            x += cx.pill_width(nom) + m * 0.5;
+            // Un peu plus d'écart avant l'interrupteur Blanc
+            x += cx.pill_width(nom) + m * if i == 1 { 1.5 } else { 0.5 };
         }
         cx.clip(None);
     }
@@ -1216,6 +1360,48 @@ impl Lieux {
                     }
                 }
                 _ => {}
+            }
+            // La ligne surlignée : son tracé, ses arrêts, leurs noms de près
+            if let Some((mode, numero)) = &self.ligne {
+                let t = &dn.lieu.transports;
+                let choisies: Vec<&sage_reel::transports::Ligne> = t.lignes.iter().filter(|l| l.mode == *mode && &l.numero == numero).collect();
+                if let Some(l0) = choisies.first() {
+                    let c = l0.teinte().map(|v| (v * 255.0) as u8);
+                    let large = (4.0 * vue.echelle).clamp(3.0 * d, 8.0 * d);
+                    // Sous terre : un trait creux (le blanc au milieu) ; dessous d'abord,
+                    // pour que l'aller et le retour superposés restent lisibles
+                    for sous in [true, false] {
+                        for m in choisies.iter().flat_map(|l| l.trace.iter()).filter(|m| (m.ou == sage_reel::transports::TUNNEL) == sous) {
+                            for s in m.points.windows(2) {
+                                let (a, b) = (vue.ecran(zone, s[0][0], s[0][1]), vue.ecran(zone, s[1][0], s[1][1]));
+                                cx.dl.line(a, b, large + 3.0 * d, [255, 255, 255, 220]);
+                                cx.dl.line(a, b, large, [c[0], c[1], c[2], 255]);
+                                if sous {
+                                    cx.dl.line(a, b, large * 0.4, [255, 255, 255, 255]);
+                                }
+                            }
+                        }
+                    }
+                    let mut vus = HashSet::new();
+                    let mut noms: Vec<(&str, f32, f32)> = Vec::new();
+                    for &k in choisies.iter().flat_map(|l| l.arrets.iter()) {
+                        if !vus.insert(k) {
+                            continue;
+                        }
+                        let a = &t.arrets[k as usize];
+                        let p = vue.ecran(zone, a.x, a.z);
+                        // Une station souterraine : un carré
+                        let rr = 6.0 * d;
+                        let coin = if a.niveau < 0 { 1.5 * d } else { rr };
+                        cx.dl.rrect(Rect::new(p[0] - rr, p[1] - rr, 2.0 * rr, 2.0 * rr), coin, [255, 255, 255, 255]);
+                        cx.dl.rrect(Rect::new(p[0] - rr + 2.0 * d, p[1] - rr + 2.0 * d, 2.0 * rr - 4.0 * d, 2.0 * rr - 4.0 * d), coin, [c[0], c[1], c[2], 255]);
+                        // Un nom une fois (les quais des deux sens sont voisins)
+                        if vue.echelle > 0.15 && !a.nom.is_empty() && !noms.iter().any(|n| n.0 == a.nom && (n.1 - a.x).hypot(n.2 - a.z) < 80.0) {
+                            noms.push((&a.nom, a.x, a.z));
+                            cx.text_at(p[0] + rr + 3.0 * d, p[1] + 4.0 * d, &a.nom, 12.0, [0x20, 0x20, 0x28, 255]);
+                        }
+                    }
+                }
             }
         }
         // Le tracé en cours
@@ -1327,6 +1513,85 @@ impl Lieux {
                     cx.paragraph(&mut b, &format!("{} · centre {:.4}, {:.4}", l.nom, l.lat, l.lon));
                     cx.paragraph(&mut b, &format!("{} × {} points de {} m · eau à {:.1} m", l.grille.nx, l.grille.nz, l.pas, l.niveau).replace('.', ","));
                     cx.paragraph(&mut b, &format!("{} bâtiments, {} routes, {} ponts", l.batiments.len(), l.routes.len(), l.ponts.len()));
+                    // Les cours d'eau, par nom : genre, longueur, part sous terre
+                    if !l.cours_eau.is_empty() {
+                        cx.section(&mut b, "Cours d'eau");
+                        let mut noms: Vec<(String, u8, f32, f32)> = Vec::new();
+                        let mut sans_nom = 0;
+                        for c in &l.cours_eau {
+                            let long: f32 = c.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+                            if c.nom.is_empty() {
+                                sans_nom += 1;
+                                continue;
+                            }
+                            match noms.iter_mut().find(|n| n.0 == c.nom) {
+                                Some(n) => {
+                                    n.2 += long;
+                                    n.3 += if c.souterrain { long } else { 0.0 };
+                                }
+                                None => noms.push((c.nom.clone(), c.genre, long, if c.souterrain { long } else { 0.0 })),
+                            }
+                        }
+                        noms.sort_by(|a, b| b.2.total_cmp(&a.2));
+                        for (nom, genre, long, sous) in noms {
+                            let mut t = format!("{nom} · {} · {:.1} km", sage_reel::cours_eau::NOMS[(genre as usize).min(3)].to_lowercase(), long / 1000.0);
+                            if sous > 0.0 {
+                                t = format!("{t}, dont {:.1} sous terre", sous / 1000.0);
+                            }
+                            cx.paragraph(&mut b, &t.replace('.', ","));
+                        }
+                        if sans_nom > 0 {
+                            cx.paragraph(&mut b, &format!("et {sans_nom} tronçons sans nom"));
+                        }
+                    }
+                    // Les surfaces d'eau d'OSM : leurs côtés sont les berges
+                    for (k, sf) in l.surfaces_eau.iter().enumerate() {
+                        if k == 0 {
+                            cx.section(&mut b, "Surfaces d'eau (berges)");
+                        }
+                        let peri: f32 = sf.anneaux.iter().map(|r| (0..r.len()).map(|i| (r[(i + 1) % r.len()][0] - r[i][0]).hypot(r[(i + 1) % r.len()][1] - r[i][1])).sum::<f32>()).sum();
+                        let points: usize = sf.anneaux.iter().map(|r| r.len()).sum();
+                        let iles = sf.anneaux.len().saturating_sub(1);
+                        cx.paragraph(&mut b, &format!("{} · {:.1} km de berges · {} points{}", sage_reel::cours_eau::NOMS_SURFACES[(sf.nature as usize).min(2)], peri / 1000.0, points, if iles > 0 { format!(" · {iles} anneaux intérieurs") } else { String::new() }).replace('.', ","));
+                    }
+                    if !l.surfaces_eau.is_empty() {
+                        let (q, n) = crate::berges::longueurs(&dn);
+                        cx.paragraph(&mut b, &format!("Berges : {:.1} km de quais, {:.1} km naturelles (sur la carte : quais gris, berges naturelles vertes)", q / 1000.0, n / 1000.0).replace('.', ","));
+                    }
+                    let t = &l.transports;
+                    if t.est_vide() {
+                        cx.paragraph(&mut b, "Pas de transports : un lieu généré avant Flow 0.68 ; le générer à nouveau les ajoute (le cache garde le reste).");
+                    } else {
+                        cx.paragraph(&mut b, &format!("{} tunnels, {} voies ferrées, {} arrêts, {} lignes", t.tunnels.len(), t.rails.len(), t.arrets.len(), t.lignes.len()));
+                        cx.section(&mut b, "Lignes");
+                        cx.paragraph(&mut b, "Touchez une ligne pour la voir sur la carte, avec ses arrêts.");
+                        for (i, (mode, numero, ks)) in Lieux::groupes_lignes(t).into_iter().enumerate() {
+                            let li = &t.lignes[ks[0]];
+                            let c = li.teinte().map(|v| (v * 255.0) as u8);
+                            let choisie = self.ligne.as_ref() == Some(&(mode, numero.clone()));
+                            if cx.row(&mut b, sub_id(base, 10_000 + i), &li.titre(), Some([c[0], c[1], c[2], 255]), choisie) {
+                                self.ligne = if choisie { None } else { Some((mode, numero.clone())) };
+                            }
+                            if choisie {
+                                // Le trajet le plus long, ses arrêts dans l'ordre
+                                if let Some(l) = ks.iter().map(|&k| &t.lignes[k]).max_by_key(|l| l.arrets.len()) {
+                                    if !l.nom.is_empty() {
+                                        cx.paragraph(&mut b, &l.nom);
+                                    }
+                                    let noms: Vec<String> = l.arrets.iter().map(|&k| &t.arrets[k as usize]).filter(|a| !a.nom.is_empty()).map(|a| if a.niveau < 0 { format!("{} (sous terre)", a.nom) } else { a.nom.clone() }).collect();
+                                    if !noms.is_empty() {
+                                        cx.paragraph(&mut b, &format!("{} arrêts : {}", noms.len(), noms.join(" · ")));
+                                    }
+                                    let long = |m: &sage_reel::transports::Morceau| m.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum::<f32>();
+                                    let tout: f32 = l.trace.iter().map(long).sum();
+                                    let sous: f32 = l.trace.iter().filter(|m| m.ou == sage_reel::transports::TUNNEL).map(long).sum();
+                                    if sous > 0.0 {
+                                        cx.paragraph(&mut b, &format!("Sous terre : {:.1} km sur {:.1} km (trait creux sur la carte)", sous / 1000.0, tout / 1000.0).replace('.', ","));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 // L'ordre de dessin, du dessus au dessous ; la 3D, drapée des mêmes
                 // tuiles, le suit
@@ -1358,8 +1623,9 @@ impl Lieux {
                     carte.tout_retoucher();
                 }
                 cx.section(&mut b, "Sources");
-                cx.paragraph(&mut b, "Relief © IGN · eau, routes, bâtiments, sol © les contributeurs OpenStreetMap (ODbL). Un lieu généré en est dérivé : ne le publiez pas.");
+                cx.paragraph(&mut b, "Relief © IGN · eau, routes, transports, bâtiments, sol © les contributeurs OpenStreetMap (ODbL). Un lieu généré en est dérivé : ne le publiez pas.");
             }
+            SELECTION => self.panneau_selection(cx, &mut b, base),
             BATI => self.panneau_bati(cx, &mut b, base),
             VOIES => self.panneau_voies(cx, &mut b, base),
             RELIEF => {
@@ -1407,6 +1673,74 @@ impl Lieux {
             }
         }
         cx.body_end(b, &mut c.scrolls);
+    }
+
+    /// La sélection de tuiles de la maquette : ne voir qu'elle, son résumé (surface,
+    /// éléments du lieu touchés, maillages), la liste de ses tuiles.
+    fn panneau_selection(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, base: Id) {
+        let en_maquette = self.trois_d.is_some() && self.maquette3d;
+        if !en_maquette {
+            cx.paragraph(b, "Les tuiles se sélectionnent dans la 3D, en rendu Maquette.");
+            if cx.button(b, sub_id(base, 700), "Passer en Maquette") {
+                self.maquette3d = true;
+                if self.trois_d.is_none() {
+                    self.basculer_3d();
+                }
+            }
+        } else {
+            cx.paragraph(b, "Touchez une tuile pour la sélectionner ; touchez-la encore pour la retirer.");
+        }
+        cx.toggle(b, sub_id(base, 701), "Ne voir que la sélection", &mut self.selection.seules);
+        if self.selection.est_vide() {
+            cx.paragraph(b, "Aucune tuile sélectionnée.");
+            return;
+        }
+        let Some(carte) = &self.carte else { return };
+        // Le résumé, refait quand la sélection ou la carte changent
+        let a_jour = self.resume.as_ref().is_some_and(|(c, n, _)| *c == self.selection.cles && *n == carte.compteur);
+        if !a_jour {
+            if let Ok(d) = carte.donnees.read() {
+                self.resume = Some((self.selection.cles.clone(), carte.compteur, crate::selection::resumer(&d, &self.selection.cles)));
+            }
+        }
+        let Some((_, _, r)) = &self.resume else { return };
+        cx.section(b, "En résumé");
+        cx.paragraph(b, &format!("{} · {}", pluriel(r.tuiles, "tuile", "tuiles"), surface(r.surface)));
+        let genres = ["maison", "immeuble", "bâtiment industriel", "édifice", "annexe"];
+        let pluriels = ["maisons", "immeubles", "bâtiments industriels", "édifices", "annexes"];
+        let detail: Vec<String> = (0..5).filter(|&g| r.batiments[g] > 0).map(|g| pluriel(r.batiments[g], genres[g], pluriels[g])).collect();
+        cx.paragraph(b, &if detail.is_empty() { "Aucun bâtiment".to_string() } else { format!("{} : {}", pluriel(r.batiments_total(), "bâtiment", "bâtiments"), detail.join(", ")) });
+        let mut voies = vec![pluriel(r.routes, "route", "routes")];
+        voies.extend([(r.ponts, "pont", "ponts"), (r.tunnels, "tunnel", "tunnels"), (r.rails, "voie ferrée", "voies ferrées"), (r.arrets, "arrêt", "arrêts")].into_iter().filter(|x| x.0 > 0).map(|(n, a, p)| pluriel(n, a, p)));
+        cx.paragraph(b, &voies.join(", "));
+        // Les maillages de la maquette : ceux des tuiles déjà faites
+        let mesures: Vec<crate::maquette::Mesure> = self.selection.cles.iter().filter_map(|&c| self.trois_d.as_ref().and_then(|t| t.mesure(c))).collect();
+        let (s, a, t, o) = mesures.iter().fold((0, 0, 0, 0), |m, x| (m.0 + x.sommets, m.1 + x.aretes, m.2 + x.triangles, m.3 + x.octets));
+        let manque = self.selection.cles.len() - mesures.len();
+        cx.paragraph(b, &format!("{} sommets · {} arêtes · {} triangles", milliers(s), milliers(a), milliers(t)));
+        let attente = if manque > 0 { format!(" ({} en cours)", pluriel(manque, "tuile", "tuiles")) } else { String::new() };
+        cx.paragraph(b, &format!("Mémoire : {}{attente}", octets(o)));
+        cx.section(b, "Tuiles");
+        cx.paragraph(b, "Niveau/colonne/rangée. Touchez une tuile pour y aller.");
+        let mut aller = None;
+        for (k, &c) in self.selection.cles.iter().enumerate() {
+            let cote = carte.donnees.read().map(|d| boite_tuile(&d, c)).ok();
+            let texte = match cote {
+                Some(bt) => format!("{} · {:.0} m", crate::selection::nom(c), bt[2] - bt[0]),
+                None => crate::selection::nom(c),
+            };
+            if cx.row(b, sub_id(base, 20_000 + k), &texte, None, false) {
+                aller = cote;
+            }
+        }
+        if let (Some(bt), Some(r3)) = (aller, &mut self.trois_d) {
+            r3.camera.cible[0] = (bt[0] + bt[2]) / 2.0;
+            r3.camera.cible[2] = (bt[1] + bt[3]) / 2.0;
+            r3.camera.distance = r3.camera.distance.min((bt[2] - bt[0]) * 3.0).max(50.0);
+        }
+        if cx.button(b, sub_id(base, 702), "Tout retirer") {
+            self.selection.cles.clear();
+        }
     }
 
     /// Le tracé : terminer (s'il y a assez de points) ou abandonner.
@@ -1886,8 +2220,20 @@ impl Contexte for Lieux {
         if self.plan.is_some() {
             e.mettre("plan", "oui");
         }
-        if self.blanc3d {
-            e.mettre("rendu3d", "blanc");
+        match (self.maquette3d, self.blanc3d) {
+            (true, true) => e.mettre("rendu3d", "maquette blanc"),
+            (true, false) => e.mettre("rendu3d", "maquette"),
+            (false, true) => e.mettre("rendu3d", "blanc"),
+            _ => {}
+        }
+        if !self.selection.est_vide() {
+            e.mettre("selection", self.selection.ecrire());
+        }
+        if self.selection.seules {
+            e.mettre("selection_seules", "oui");
+        }
+        if let Some((m, n)) = &self.ligne {
+            e.mettre("ligne", format!("{m} {n}"));
         }
         if self.ordre != crate::carte::ordre_par_defaut() {
             e.mettre("ordre", self.ordre.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
@@ -1951,7 +2297,7 @@ impl Contexte for Lieux {
             };
             self.zone = zone;
             // Un outil d'édition : la carte
-            if self.trois_d.is_some() && self.outil != VOIR {
+            if self.trois_d.is_some() && self.outil != VOIR && self.outil != SELECTION {
                 self.basculer_3d();
             }
             if self.trois_d.is_some() || self.camera3d.is_some() {
@@ -1995,6 +2341,33 @@ mod tests {
         let lieu = Lieu::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 0.0, &vec![10.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), Vec::new());
         l.ouvrir_lieu(lieu, None, false);
         l
+    }
+
+    #[test]
+    fn les_arrets_et_les_lignes_se_decrivent() {
+        use sage_reel::transports::*;
+        let pas = 64.0;
+        let n = cote(pas);
+        let mut lieu = Lieu::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 0.0, &vec![10.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), Vec::new());
+        let ligne = |numero: &str, arrets: Vec<u32>| Ligne { mode: BUS, numero: numero.into(), nom: String::new(), couleur: None, arrets, trace: vec![Morceau { ou: SOL, points: vec![[0.0, 0.0], [100.0, 0.0]] }] };
+        lieu.transports = Transports {
+            tunnels: vec![Route { genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
+            rails: vec![Rail { mode: METRO, ou: TUNNEL, niveau: -2, points: vec![[0.0, 400.0, 2.0], [100.0, 400.0, 2.0]] }],
+            arrets: vec![Arret { modes: 1 << BUS, x: 50.0, z: 0.0, nom: "Mairie".into(), abri: true, niveau: 0 }, Arret { modes: 1 << METRO, x: 50.0, z: 410.0, nom: "Théâtre".into(), abri: false, niveau: -1 }],
+            lignes: vec![ligne("10", vec![0]), ligne("2", vec![0]), ligne("2", vec![0]), Ligne { mode: METRO, ..ligne("M", vec![]) }],
+        };
+        let d = Donnees::new(lieu);
+        let v = Lieux::decrire(&d, 55.0, 3.0);
+        assert!(v.iter().any(|l| l == "arrêt Mairie · Bus · abri"), "{v:?}");
+        assert!(v.iter().any(|l| l == "lignes : Bus 10, Bus 2"), "{v:?}");
+        let v = Lieux::decrire(&d, 50.0, 201.0);
+        assert!(v.iter().any(|l| l.starts_with("tunnel · ") && l.ends_with("6,0 m sous le sol")), "{v:?}");
+        let v = Lieux::decrire(&d, 50.0, 401.0);
+        assert!(v.iter().any(|l| l == "voie ferrée · Métro (tunnel) · niveau -2"), "{v:?}");
+        assert!(v.iter().any(|l| l == "arrêt Théâtre · Métro · sous terre (niveau -1)"), "{v:?}");
+        // Une ligne par numéro, l'aller et le retour ensemble, dans l'ordre naturel
+        let g = Lieux::groupes_lignes(&d.lieu.transports);
+        assert_eq!(g.iter().map(|e| (e.0, e.1.as_str(), e.2.len())).collect::<Vec<_>>(), vec![(BUS, "2", 2), (BUS, "10", 1), (METRO, "M", 1)]);
     }
 
     fn lieu(l: &Lieux) -> Lieu {
@@ -2077,5 +2450,43 @@ mod tests {
         l.defaire(false);
         let li = lieu(&l);
         assert_eq!((li.routes.len(), li.ponts.len()), (1, 0));
+    }
+}
+
+/// « 1 tuile », « 3 tuiles ».
+fn pluriel(n: usize, un: &str, plusieurs: &str) -> String {
+    format!("{} {}", milliers(n), if n > 1 { plusieurs } else { un })
+}
+
+/// « 12 345 » (espace fine insécable entre les milliers).
+fn milliers(n: usize) -> String {
+    let t = n.to_string();
+    let mut r = String::new();
+    for (i, c) in t.chars().enumerate() {
+        if i > 0 && (t.len() - i) % 3 == 0 {
+            r.push('\u{202f}');
+        }
+        r.push(c);
+    }
+    r
+}
+
+/// Une surface en m², ha ou km².
+fn surface(m2: f64) -> String {
+    if m2 < 10_000.0 {
+        format!("{} m²", milliers(m2.round() as usize))
+    } else if m2 < 1_000_000.0 {
+        format!("{:.1} ha", m2 / 10_000.0).replace('.', ",")
+    } else {
+        format!("{:.2} km²", m2 / 1_000_000.0).replace('.', ",")
+    }
+}
+
+/// Une taille en octets : Ko, Mo.
+fn octets(n: usize) -> String {
+    if n < 1024 * 1024 {
+        format!("{:.0} Ko", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} Mo", n as f64 / (1024.0 * 1024.0)).replace('.', ",")
     }
 }
