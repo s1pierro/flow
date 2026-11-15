@@ -25,6 +25,7 @@ pub mod clavier;
 pub mod contexte;
 pub mod contextes;
 pub mod disque;
+pub mod dissolution;
 pub mod draw;
 pub mod egaliseur;
 pub mod espace;

@@ -667,8 +667,8 @@ pub fn aretes(v: &[f32], ind: &[u32]) -> Vec<u32> {
 /// Fabrique la tuile `cle` : son solide, habillé, et sa texture.
 pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     let b = boite_tuile(d, cle);
-    // Le solide uni au remblai
-    let f = remblayer(d, cle, solide(d, cle));
+    // Le solide uni au remblai, ses plans hachés par l'union redevenus simples
+    let f = crate::dissolution::dissoudre(&remblayer(d, cle, solide(d, cle)));
     let (v, ind) = habiller(d, &f, b);
     (v, ind, texture(d, b))
 }
@@ -709,13 +709,16 @@ pub fn remblai(d: &Donnees, cle: Cle) -> (Forme, usize) {
         if m < 2 || g.terre.len() != m {
             continue;
         }
-        // Les suites de côtés de même normale, à partir d'un changement de normale
-        let debut = (0..m).find(|&k| g.terre[k] != g.terre[(k + m - 1) % m]).unwrap_or(0);
+        // Les suites de côtés de même normale (à moins de 0,8° : deux morceaux presque
+        // alignés auraient des murs presque confondus, que l'union réussit mal), à
+        // partir d'un changement de normale
+        let pareil = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1] > 0.9999;
+        let debut = (0..m).find(|&k| !pareil(g.terre[k], g.terre[(k + m - 1) % m])).unwrap_or(0);
         let mut k = 0;
         while k < m {
             let a = (debut + k) % m;
             let mut fin = k + 1;
-            while fin < m && g.terre[(debut + fin) % m] == g.terre[a] {
+            while fin < m && pareil(g.terre[(debut + fin) % m], g.terre[a]) {
                 fin += 1;
             }
             let stations: Vec<usize> = (k..=fin).map(|j| (debut + j) % m).collect();
