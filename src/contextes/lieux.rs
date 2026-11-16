@@ -1469,7 +1469,7 @@ impl Lieux {
 
     // ----- Le panneau
 
-    fn puces(cx: &mut Cx, b: &mut crate::widgets::Body, base: Id, labels: &[&str], choisi: usize) -> Option<usize> {
+    pub(crate) fn puces(cx: &mut Cx, b: &mut crate::widgets::Body, base: Id, labels: &[&str], choisi: usize) -> Option<usize> {
         let (d, col) = (cx.dp, cx.couleurs());
         let h = cx.commande() * 0.8;
         let ecart = (cx.theme.marge * 0.6 * d).round();
