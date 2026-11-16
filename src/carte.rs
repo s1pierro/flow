@@ -59,6 +59,8 @@ pub struct Donnees {
     traces: HashMap<(i32, i32), Vec<u32>>,
     /// Le type des berges (quai ou naturelle), calculé au premier besoin.
     berges: std::sync::OnceLock<Arc<crate::berges::Types>>,
+    /// Les contours à plat des remblais des quais, calculés au premier besoin.
+    remblais: std::sync::OnceLock<Arc<Vec<crate::remblais::Contour>>>,
 }
 
 /// La boîte (x0, z0, x1, z1) d'une suite de points.
@@ -101,7 +103,7 @@ fn dans(index: &HashMap<(i32, i32), Vec<u32>>, b: [f32; 4], tous: usize) -> Vec<
 
 impl Donnees {
     pub fn new(lieu: Lieu) -> Donnees {
-        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new(), tunnels: HashMap::new(), rails: HashMap::new(), arrets: HashMap::new(), cours: HashMap::new(), morceaux: Vec::new(), traces: HashMap::new(), berges: std::sync::OnceLock::new() };
+        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new(), tunnels: HashMap::new(), rails: HashMap::new(), arrets: HashMap::new(), cours: HashMap::new(), morceaux: Vec::new(), traces: HashMap::new(), berges: std::sync::OnceLock::new(), remblais: std::sync::OnceLock::new() };
         d.reindexer();
         d
     }
@@ -109,6 +111,7 @@ impl Donnees {
     /// Refait les index (après un changement des bâtiments, des routes ou des ponts).
     pub fn reindexer(&mut self) {
         self.berges = std::sync::OnceLock::new();
+        self.remblais = std::sync::OnceLock::new();
         let mut bati: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (k, b) in self.lieu.batiments.iter().enumerate() {
             for c in cellules(boite_bati(b)) {
@@ -220,6 +223,12 @@ impl Donnees {
         self.berges.get_or_init(|| Arc::new(crate::berges::calculer(self))).clone()
     }
 
+    /// Les contours à plat des remblais des quais (`remblais::calculer`), au premier
+    /// besoin.
+    pub fn remblais(&self) -> Arc<Vec<crate::remblais::Contour>> {
+        self.remblais.get_or_init(|| Arc::new(crate::remblais::calculer(self))).clone()
+    }
+
     pub fn batiments_dans(&self, b: [f32; 4]) -> Vec<u32> {
         dans(&self.bati, b, self.lieu.batiments.len())
     }
@@ -271,6 +280,8 @@ pub const EAU: [f32; 3] = [0.62, 0.78, 0.92];
 pub const COURS_EAU: [f32; 3] = [0.20, 0.45, 0.80];
 /// Un quai (le côté d'une surface d'eau d'OSM le long de la ville).
 pub const BERGE: [f32; 3] = [0.16, 0.16, 0.19];
+/// Le contour du remblai d'un quai : un brun.
+pub const REMBLAI: [f32; 3] = [0.62, 0.36, 0.12];
 /// Une berge naturelle : un vert vif, qui tranche sur les prés de la rive.
 pub const BERGE_NATURELLE: [f32; 3] = [0.15, 0.88, 0.20];
 /// La largeur du trait des berges sur la carte (m), au moins `BERGE_PX` pixels.
@@ -726,6 +737,20 @@ fn peindre_cours_eau(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
             let v = (g.quai[i] + g.quai[j]) / 2.0;
             let c = if v >= 0.5 { BERGE } else { BERGE_NATURELLE };
             peindre_trait(px, &mut cov, &[p, q], b, m, (BERGE_LARGEUR / m / 2.0).max(BERGE_PX / 2.0), c, 1.0, None);
+        }
+    }
+    // Le contour à plat du remblai des quais, d'un trait fin brun
+    for r in d.remblais().iter() {
+        let bt = r.boite;
+        if bt[2] < large[0] || bt[0] > large[2] || bt[3] < large[1] || bt[1] > large[3] {
+            continue;
+        }
+        for a in &r.anneaux {
+            let mut f = a.clone();
+            if let Some(&p) = a.first() {
+                f.push(p);
+            }
+            peindre_trait(px, &mut cov, &f, b, m, (0.4 / m / 2.0).max(0.8), REMBLAI, 1.0, None);
         }
     }
 }

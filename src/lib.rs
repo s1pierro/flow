@@ -17,6 +17,7 @@ pub mod carte;
 pub mod maquette;
 pub mod selection;
 pub mod berges;
+pub mod remblais;
 pub mod relief3d;
 pub mod booleens;
 pub mod modifieurs;

@@ -235,6 +235,36 @@ pub fn operation(a: &Forme, b: &Forme, op: Op) -> Result<Forme, String> {
     std::panic::catch_unwind(|| calculer(a, b, op)).unwrap_or_else(|_| Err("calcul impossible sur cette forme".into()))
 }
 
+/// Des opérations à la suite, sans repasser par les formes entre deux (les arrondis et
+/// les faces regroupées finissent par rendre une forme invalide) : `base`, puis chaque
+/// étape (`op`, forme) ; une étape qui échoue est sautée. Rend le résultat et le
+/// nombre d'étapes sautées.
+pub fn enchainer(base: &Forme, etapes: &[(Op, &Forme)]) -> Result<(Forme, usize), String> {
+    let mut faces = 0;
+    let mut r = vers_manifold(base, &mut faces)?;
+    let mut sautees = 0;
+    for (op, f) in etapes {
+        if f.vide() {
+            continue;
+        }
+        let Ok(y) = vers_manifold(f, &mut faces) else {
+            sautees += 1;
+            continue;
+        };
+        let t = match op {
+            Op::Union => OpType::Add,
+            Op::Difference => OpType::Subtract,
+            Op::Intersection => OpType::Intersect,
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute_boolean(&r, &y, t))) {
+            Ok(Ok(m)) => r = m,
+            Ok(Err(e)) if e.contains("empty") => return Ok((Forme::default(), sautees)),
+            _ => sautees += 1,
+        }
+    }
+    Ok((vers_forme(&r), sautees))
+}
+
 /// `operation`, un côté vide toléré (le résultat vide d'un modifieur peut suivre).
 pub fn operer(a: &Forme, b: &Forme, op: Op) -> Result<Forme, String> {
     match (a.vide(), b.vide(), op) {
