@@ -133,6 +133,18 @@ pub struct Terrain3d {
     /// même couleur franche, dessinées après l'eau.
     pub defonces: Vec<Maillage3d>,
     pub defonces_aretes: Vec<Maillage3d>,
+    /// Les textures des matières de la maquette (hors du rendu blanc), s'il y en a.
+    pub placage: Option<Placage3d>,
+}
+
+/// Les textures des matières de la maquette (`placage.rs`) : `couches` images carrées
+/// empilées de haut en bas dans `image`, la couche k pour la matière k + 1, répétée
+/// tous les `cotes[k]` mètres.
+#[derive(Clone, Debug)]
+pub struct Placage3d {
+    pub image: Image,
+    pub couches: u32,
+    pub cotes: [f32; 8],
 }
 
 /// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la

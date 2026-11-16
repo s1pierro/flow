@@ -112,6 +112,8 @@ pub struct Relief3d {
     /// faut montrer qu'elles.
     pub selection: std::collections::BTreeSet<Cle>,
     pub seules: bool,
+    /// Les textures des matières de la maquette.
+    pub placage: Option<crate::draw::Placage3d>,
     pub accent: [f32; 3],
     /// Les tuiles de la maquette montrées à la dernière image (pour le toucher).
     montrees: Vec<Cle>,
@@ -136,7 +138,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -418,7 +420,7 @@ impl Relief3d {
         self.dessinees = morceaux.len();
         self.bati_dessinees = 0;
         let dist = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: Vec::new(), blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: Vec::new(), blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes, placage: self.placage.clone() });
         if self.tuiles_maquette.len() > GARDES {
             let sel = &self.selection;
             let mut v: Vec<(u64, Cle)> = self.tuiles_maquette.iter().filter(|(k, _)| k.0 > 0 && !sel.contains(k)).map(|(k, m)| (m.morceau.vu, *k)).collect();
@@ -567,7 +569,7 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new() });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new(), placage: None });
         // Les maillages qui n'ont pas servi depuis longtemps
         if self.batis.len() > GARDES / 2 {
             let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();

@@ -60,6 +60,9 @@ api!(GlApi {
     glGetUniformLocation: fn(u32, *const c_char) -> i32;
     glUniform1i: fn(i32, i32);
     glUniform1f: fn(i32, f32);
+    glUniform1fv: fn(i32, i32, *const f32);
+    glTexImage3D: fn(u32, i32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+    glGenerateMipmap: fn(u32);
     glUniform2f: fn(i32, f32, f32);
     glUniform3f: fn(i32, f32, f32, f32);
     glUniform4f: fn(i32, f32, f32, f32, f32);

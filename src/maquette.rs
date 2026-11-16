@@ -803,9 +803,14 @@ pub fn habiller(d: &Donnees, f: &Forme, b: [f32; 4]) -> (Vec<f32>, Vec<u32>) {
         let no = no.map(|c| c / l);
         let m = f.matiere(kf);
         let coins: Vec<u32> = if m != matiere::SOL {
-            // Une face laissée par un volume : sa matière, à la normale de la face
+            // Une face laissée par un volume : sa matière, à la normale de la face, ses
+            // coordonnées de texture en mètres (vue d'en haut à plat ; debout, le long
+            // du mur et en hauteur)
+            let l = (no[0] * no[0] + no[2] * no[2]).sqrt();
+            let debout = no[1].abs() < 0.6 && l > 1e-6;
             q.iter().map(|s| {
-                v.extend_from_slice(&[s[0], s[1], s[2], no[0], no[1], no[2], 0.0, 0.0, matiere::sommet(m)]);
+                let (u, w) = if debout { ((s[0] * no[2] - s[2] * no[0]) / l, -s[1]) } else { (s[0], s[2]) };
+                v.extend_from_slice(&[s[0], s[1], s[2], no[0], no[1], no[2], u, w, matiere::sommet(m)]);
                 (v.len() / SOMMET - 1) as u32
             }).collect()
         } else if no[1] > 0.05 {

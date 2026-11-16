@@ -81,9 +81,11 @@ out vec3 v_n;
 out vec2 v_uv;
 out float v_d;
 out float v_mat;
+out vec2 v_m;
 void main() {
   v_n = a_normal;
   v_uv = u_uv.xy + a_uv.xy * u_uv.zw;
+  v_m = a_uv.xy;
   v_mat = a_uv.z;
   v_d = distance(a_pos, u_oeil);
   gl_Position = u_mvp * vec4(a_pos, 1.0);
@@ -132,8 +134,12 @@ in vec3 v_n;
 in vec2 v_uv;
 in float v_d;
 in float v_mat;
+in vec2 v_m;
 uniform sampler2D u_image;
 uniform int u_avec_image;
+uniform highp sampler2DArray u_matieres;
+uniform int u_avec_matieres;
+uniform float u_cotes[8];
 uniform vec3 u_couleur;
 uniform vec3 u_ciel;
 uniform vec2 u_brume;
@@ -162,6 +168,11 @@ void main() {
     else if (k == 4) c = vec3(0.56, 0.57, 0.62);
     else if (k == 5) c = vec3(0.62, 0.38, 0.78);
     else c = vec3(0.95, 0.15, 0.15);
+    // Le placage : la couche de la matière, répétée tous les `cote` mètres
+    if (u_avec_matieres == 1 && k >= 1 && k <= 5) {
+      vec4 t = texture(u_matieres, vec3(v_m / u_cotes[k - 1], float(k - 1)));
+      c = t.rgb;
+    }
   }
   if (u_avec_image == 1 && !volume) {
     vec4 t = texture(u_image, v_uv);
@@ -284,6 +295,10 @@ pub struct Renderer {
     /// Les images sur la carte graphique : id, révision, texture, taille, et l'image
     /// où elles ont servi (celles qui ne servent plus sont libérées).
     textures: RefCell<Vec<(u64, u64, u32, (u32, u32), u64)>>,
+    /// Le tableau des textures des matières : révision, texture ; u_avec_matieres,
+    /// u_cotes.
+    matieres: RefCell<(u64, u32)>,
+    u_matieres: [i32; 2],
     images_vues: std::cell::Cell<u64>,
 }
 
@@ -370,12 +385,14 @@ impl Renderer {
             let u_terrain = ["u_mvp", "u_uv", "u_oeil", "u_avec_image", "u_couleur", "u_ciel", "u_brume", "u_blanc", "u_alpha"].map(|n| loc(terrain_program, n));
             (gl.glUseProgram)(terrain_program);
             (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
+            (gl.glUniform1i)(loc(terrain_program, "u_matieres"), 2);
+            let u_matieres = [loc(terrain_program, "u_avec_matieres"), loc(terrain_program, "u_cotes")];
             let bati_program = program(&gl, BATI_VS, BATI_FS)?;
             let u_bati = ["u_mvp", "u_oeil", "u_ciel", "u_brume", "u_blanc"].map(|n| loc(bati_program, n));
             let ligne_program = program(&gl, LIGNE_VS, LIGNE_FS)?;
             let u_ligne = ["u_mvp", "u_oeil", "u_couleur", "u_ciel", "u_brume", "u_biais"].map(|n| loc(ligne_program, n));
 
-            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, bati_program, u_bati, ligne_program, u_ligne, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0) })
+            Ok(Renderer { gl, ui_program, u_size, ui_vao, ui_vbo, atlas, maillage_program, u_mvp, u_vue, u_couleur, terrain_program, u_terrain, bati_program, u_bati, ligne_program, u_ligne, tampons: RefCell::new(Vec::new()), textures: RefCell::new(Vec::new()), images_vues: std::cell::Cell::new(0), matieres: RefCell::new((u64::MAX, 0)), u_matieres })
         }
     }
 
@@ -475,6 +492,31 @@ impl Renderer {
         (gl.glActiveTexture)(0x84C0);
     }
 
+    /// Lie le tableau des textures des matières à l'unité 2 (envoyé s'il a changé),
+    /// avec ses mip-maps et en répétition.
+    unsafe fn lier_matieres(&self, p: &crate::draw::Placage3d) {
+        const TABLEAU: u32 = 0x8C1A;
+        let gl = &self.gl;
+        let mut m = self.matieres.borrow_mut();
+        (gl.glActiveTexture)(0x84C2);
+        if m.1 == 0 {
+            (gl.glGenTextures)(1, &mut m.1);
+        }
+        (gl.glBindTexture)(TABLEAU, m.1);
+        let (l, n) = (p.image.largeur, p.couches.max(1));
+        if m.0 != p.image.revision && p.image.pixels.len() >= (l * l * n * 4) as usize {
+            (gl.glPixelStorei)(0x0CF5, 4);
+            (gl.glTexImage3D)(TABLEAU, 0, 0x8058, l as i32, l as i32, n as i32, 0, 0x1908, UBYTE, p.image.pixels.as_ptr() as *const c_void);
+            (gl.glPixelStorei)(0x0CF5, 1);
+            (gl.glGenerateMipmap)(TABLEAU);
+            for (k, v) in [(0x2801, 0x2703), (0x2800, 0x2601), (0x2802, 0x2901), (0x2803, 0x2901)] {
+                (gl.glTexParameteri)(TABLEAU, k, v);
+            }
+            m.0 = p.image.revision;
+        }
+        (gl.glActiveTexture)(0x84C0);
+    }
+
     /// Une vue 3D, dans son rectangle et la zone de découpe ; l'état de l'interface
     /// est rétabli ensuite.
     unsafe fn dessiner_vue(&self, w: f32, h: f32, v: &Vue3d, clip: Option<Rect>) {
@@ -545,6 +587,14 @@ impl Renderer {
         (gl.glUniform2f)(u[6], t.brume[0], t.brume[1]);
         (gl.glUniform1f)(u[7], if t.blanc { 1.0 } else { 0.0 });
         (gl.glUniform1f)(u[8], 1.0);
+        match &t.placage {
+            Some(p) if !t.blanc => {
+                self.lier_matieres(p);
+                (gl.glUniform1i)(self.u_matieres[0], 1);
+                (gl.glUniform1fv)(self.u_matieres[1], 8, p.cotes.as_ptr());
+            }
+            _ => (gl.glUniform1i)(self.u_matieres[0], 0),
+        }
         // En blanc ou sous une sélection, les faces reculent un peu : les arêtes passent
         // devant
         if t.blanc || !t.choix.is_empty() {

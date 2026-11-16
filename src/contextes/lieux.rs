@@ -1233,7 +1233,7 @@ impl Lieux {
     }
 
     /// La vue 3D : un doigt tourne autour, deux doigts rapprochent et déplacent.
-    fn dessiner_3d(&mut self, cx: &mut Cx, zone: Rect, base: Id) {
+    fn dessiner_3d(&mut self, cx: &mut Cx, zone: Rect, base: Id, placage: Option<crate::draw::Placage3d>) {
         if self.trois_d.is_none() {
             let Some(carte) = &self.carte else { return };
             let Ok(d) = carte.donnees.read() else { return };
@@ -1293,6 +1293,7 @@ impl Lieux {
             r.selection = self.selection.cles.clone();
         }
         r.seules = self.selection.seules;
+        r.placage = placage;
         let a = cx.couleurs().accent;
         r.accent = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
         let Some(carte) = &mut self.carte else { return };
@@ -2341,7 +2342,7 @@ impl Contexte for Lieux {
     }
 
     fn anime(&self, _c: &Commun) -> bool {
-        self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
+        (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
@@ -2401,7 +2402,8 @@ impl Contexte for Lieux {
                 self.basculer_3d();
             }
             if self.trois_d.is_some() || self.camera3d.is_some() {
-                self.dessiner_3d(cx, zone, base);
+                let placage = if self.maquette3d { crate::contextes::matieres::dossier(c).and_then(|d| crate::placage::textures(&d)) } else { None };
+                self.dessiner_3d(cx, zone, base, placage);
             } else {
                 self.dessiner_carte(cx, zone, base);
             }
