@@ -903,13 +903,20 @@ pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec
     // Le solide uni au remblai de ses berges, puis creusé de ses lits (la défonce
     // coupe aussi ce que le remblai avance dans l'eau), ses plans hachés par les
     // opérations redevenus simples
-    let rem = {
+    // Les quais (remblais, épaulements) seulement sur les tuiles assez fines pour qu'ils
+    // s'y voient (`quais_pour`) : la vue d'ensemble n'a que le solide creusé de ses lits
+    let quais = quais_pour(d, cle);
+    let rem = if quais {
         let _t = crate::suivi::tache("remblai");
         remblai_morceaux(d, cle)
+    } else {
+        Vec::new()
     };
-    let epa = {
+    let epa = if quais {
         let _t = crate::suivi::tache("épaulement");
         epaulement_morceaux(d, cle)
+    } else {
+        Vec::new()
     };
     let mut etapes: Vec<(crate::booleens::Op, &Forme)> = rem.iter().map(|m| (crate::booleens::Op::Union, m)).collect();
     etapes.extend(epa.iter().map(|m| (crate::booleens::Op::Difference, m)));
@@ -936,6 +943,19 @@ pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec
         texture(d, b)
     };
     (v, ind, px, def)
+}
+
+/// Le plus grand côté de tuile (m) qui reçoit les quais (remblais et épaulements ;
+/// FLOW_QUAIS_COTE pour essayer) : au-delà, un pas de la grille fait des dizaines de
+/// mètres, les quais ne s'y verraient pas et coûteraient des dizaines de secondes (ceux
+/// de toute la ville, à la racine).
+pub const QUAIS_COTE_MAX: f32 = 1500.0;
+
+/// La tuile `cle` reçoit-elle les quais ?
+pub fn quais_pour(d: &Donnees, cle: Cle) -> bool {
+    let max = std::env::var("FLOW_QUAIS_COTE").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(QUAIS_COTE_MAX);
+    let b = boite_tuile(d, cle);
+    (b[2] - b[0]).max(b[3] - b[1]) <= max
 }
 
 /// `f`, puis les `etapes` à la suite (`booleens::enchainer`, sans repasser par les
