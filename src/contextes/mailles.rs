@@ -1847,7 +1847,7 @@ mod tests {
         let lu = glb::lire_objets(&a.octets(true)).unwrap();
         assert_eq!(lu.objets.len(), 1, "la cible n'est pas enregistrée");
         let o = &lu.objets[0];
-        let f = Forme { sommets: o.positions.clone(), faces: o.triangles.iter().map(|t| t.to_vec()).collect() };
+        let f = Forme { sommets: o.positions.clone(), faces: o.triangles.iter().map(|t| t.to_vec()).collect(), matieres: Vec::new() };
         assert!((f.volume() - 0.5).abs() < 1e-5);
         // Le brouillon : les deux formes de base, et la pile à côté
         assert_eq!(glb::lire_objets(&a.octets(false)).unwrap().objets.len(), 2);

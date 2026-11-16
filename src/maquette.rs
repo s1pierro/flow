@@ -563,15 +563,42 @@ pub fn defonce(d: &Donnees, cle: Cle) -> Forme {
             cotes.insert((q[k], q[(k + 1) % q.len()]));
         }
         r.faces.push(q.iter().rev().copied().collect());
+        r.matieres.push(matiere::LIT);
         r.faces.push(q.iter().map(|&i| i + n).collect());
+        r.matieres.push(matiere::HAUT);
     }
     // Les murs : sur chaque côté du pourtour (sans son côté retourné)
     for &(a, b) in &cotes {
         if !cotes.contains(&(b, a)) {
             r.faces.push(vec![a, b, b + n, a + n]);
+            r.matieres.push(matiere::BERGE);
         }
     }
     r
+}
+
+/// Les matières des faces de la maquette (`Forme::matieres`), que les opérations
+/// transportent : chaque volume marque les faces qu'il laisse dans la tuile.
+pub mod matiere {
+    /// Le solide de la tuile (le relief, ses murs et son dessous).
+    pub const SOL: u16 = 0;
+    /// Le fond de la défonce : le lit.
+    pub const LIT: u16 = 1;
+    /// Les murs de la défonce : la berge (le mur du quai).
+    pub const BERGE: u16 = 2;
+    /// Le remblai des quais.
+    pub const REMBLAI: u16 = 3;
+    /// Le fond de l'épaulement : le dessus du quai.
+    pub const QUAI: u16 = 4;
+    /// Les murs de l'épaulement.
+    pub const QUAI_MUR: u16 = 5;
+    /// Le dessus d'un volume ôté : ne devrait jamais rester visible.
+    pub const HAUT: u16 = 6;
+    /// Le flottant « matière » d'un sommet qui montre la matière `m` (le shader la
+    /// teinte : 5,1 le lit, 5,2 la berge…).
+    pub fn sommet(m: u16) -> f32 {
+        5.0 + m as f32 * 0.1
+    }
 }
 
 /// La matière des volumes de défonce (dessinés à part, semi-transparents).
@@ -721,7 +748,10 @@ pub fn aplatir(f: &Forme, socle: f32) -> Forme {
         nouveau[k] = r.sommets.len() as u32;
         r.sommets.push(*p);
     }
-    r.faces = f.faces.iter().filter(|p| p.iter().all(|&i| garde[i as usize])).map(|p| p.iter().map(|&i| nouveau[i as usize]).collect()).collect();
+    for (k, p) in f.faces.iter().enumerate().filter(|(_, p)| p.iter().all(|&i| garde[i as usize])) {
+        r.faces.push(p.iter().map(|&i| nouveau[i as usize]).collect());
+        r.matieres.push(f.matiere(k));
+    }
     r
 }
 
@@ -756,7 +786,7 @@ pub fn habiller(d: &Donnees, f: &Forme, b: [f32; 4]) -> (Vec<f32>, Vec<u32>) {
     let mut ind: Vec<u32> = Vec::with_capacity(f.faces.len() * 4);
     // Les sommets du dessus, partagés entre ses faces
     let mut dessus: HashMap<u32, u32> = HashMap::new();
-    for p in &f.faces {
+    for (kf, p) in f.faces.iter().enumerate() {
         let q: Vec<[f32; 3]> = p.iter().map(|&i| f.sommets[i as usize]).collect();
         // La normale de la face (Newell)
         let mut no = [0f32; 3];
@@ -771,7 +801,14 @@ pub fn habiller(d: &Donnees, f: &Forme, b: [f32; 4]) -> (Vec<f32>, Vec<u32>) {
             continue;
         }
         let no = no.map(|c| c / l);
-        let coins: Vec<u32> = if no[1] > 0.05 {
+        let m = f.matiere(kf);
+        let coins: Vec<u32> = if m != matiere::SOL {
+            // Une face laissée par un volume : sa matière, à la normale de la face
+            q.iter().map(|s| {
+                v.extend_from_slice(&[s[0], s[1], s[2], no[0], no[1], no[2], 0.0, 0.0, matiere::sommet(m)]);
+                (v.len() / SOMMET - 1) as u32
+            }).collect()
+        } else if no[1] > 0.05 {
             p.iter().map(|&i| {
                 let s = f.sommets[i as usize];
                 // Sur le relief ou le lit : la normale douce, sommet partagé ; ailleurs (le
@@ -883,7 +920,7 @@ pub fn remblai_morceaux(d: &Donnees, cle: Cle) -> Vec<Forme> {
         }
         let haut = vol.sommets.iter().map(|p| p[1]).fold(bas, f32::max) + 10.0;
         let e = 0.001;
-        let boite = pave([bt[0] + e, bas - 2.0, bt[1] + e], [bt[2] - e, haut, bt[3] - e]);
+        let boite = pave([bt[0] + e, bas - 2.0, bt[1] + e], [bt[2] - e, haut, bt[3] - e]).en(matiere::REMBLAI);
         if let Ok(m) = operation(&vol, &boite, Op::Intersection) {
             if !m.vide() {
                 v.push(m);
@@ -922,7 +959,7 @@ pub fn epaulement_morceaux(d: &Donnees, cle: Cle) -> Vec<Forme> {
         if vol.vide() {
             continue;
         }
-        let boite = pave([b[0] - 1.0, d.lieu.niveau - PROFONDEUR - 10.0, b[1] - 1.0], [b[2] + 1.0, haut + 1.0, b[3] + 1.0]);
+        let boite = pave([b[0] - 1.0, d.lieu.niveau - PROFONDEUR - 10.0, b[1] - 1.0], [b[2] + 1.0, haut + 1.0, b[3] + 1.0]).en(matiere::QUAI_MUR);
         if let Ok(m) = operation(&vol, &boite, Op::Intersection) {
             if !m.vide() {
                 v.push(m);
@@ -947,7 +984,7 @@ pub fn remblai(d: &Donnees, cle: Cle) -> (Forme, usize) {
 /// Un pavé fermé, faces dehors.
 fn pave(a: [f32; 3], b: [f32; 3]) -> Forme {
     let p = |i: usize| [if i & 1 == 0 { a[0] } else { b[0] }, if i & 2 == 0 { a[1] } else { b[1] }, if i & 4 == 0 { a[2] } else { b[2] }];
-    let mut f = Forme { sommets: (0..8).map(p).collect(), faces: vec![vec![0, 4, 6, 2], vec![1, 3, 7, 5], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 2, 3, 1], vec![4, 5, 7, 6]] };
+    let mut f = Forme { sommets: (0..8).map(p).collect(), faces: vec![vec![0, 4, 6, 2], vec![1, 3, 7, 5], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 2, 3, 1], vec![4, 5, 7, 6]], matieres: Vec::new() };
     if f.volume() < 0.0 {
         f.faces.iter_mut().for_each(|p| p.reverse());
     }
@@ -1183,7 +1220,7 @@ mod tests {
     /// Une boîte (x0, y0, z0) – (x1, y1, z1), faces tournées dehors.
     fn boite(a: [f32; 3], b: [f32; 3]) -> Forme {
         let s = |i: usize| [if i & 1 == 0 { a[0] } else { b[0] }, if i & 2 == 0 { a[1] } else { b[1] }, if i & 4 == 0 { a[2] } else { b[2] }];
-        Forme { sommets: (0..8).map(s).collect(), faces: vec![vec![2, 3, 1, 0], vec![5, 7, 6, 4], vec![1, 5, 4, 0], vec![6, 7, 3, 2], vec![4, 6, 2, 0], vec![3, 7, 5, 1]] }
+        Forme { sommets: (0..8).map(s).collect(), faces: vec![vec![2, 3, 1, 0], vec![5, 7, 6, 4], vec![1, 5, 4, 0], vec![6, 7, 3, 2], vec![4, 6, 2, 0], vec![3, 7, 5, 1]], matieres: Vec::new() }
     }
 
     #[test]
@@ -1248,7 +1285,12 @@ mod tests {
         // niveau, de sa matière
         let (v, _, _) = fabriquer(&d, (2, 0, 1));
         let niveau = d.lieu.niveau;
-        assert!(v.chunks(SOMMET).all(|s| s[8] == MAQUETTE));
+        // Le sol de la tuile, et ce que la défonce laisse : le lit et la berge, de leurs
+        // matières (rien du dessus ôté)
+        let mats: Vec<f32> = v.chunks(SOMMET).map(|s| s[8]).collect();
+        assert!(mats.iter().all(|&m| m == MAQUETTE || m == matiere::sommet(matiere::LIT) || m == matiere::sommet(matiere::BERGE)), "{:?}", mats.iter().filter(|&&m| m != MAQUETTE).take(5).collect::<Vec<_>>());
+        assert!(mats.contains(&matiere::sommet(matiere::LIT)));
+        assert!(!mats.contains(&matiere::sommet(matiere::HAUT)));
         assert!(v.chunks(SOMMET).any(|s| s[1] <= niveau - RIVE_NATURELLE + 0.01 && s[1] >= niveau - PROFONDEUR - 0.01));
         let (e, ie) = surface_eau(&d, (2, 0, 1));
         assert!(!ie.is_empty() && e.chunks(SOMMET).all(|s| s[8] == MAQUETTE_EAU && s[1] == niveau));

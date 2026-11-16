@@ -73,7 +73,7 @@ pub struct Resultat {
 pub type Resultats = HashMap<u64, Resultat>;
 
 pub fn forme(o: &Objet) -> Forme {
-    Forme { sommets: o.sommets.clone(), faces: o.faces.clone() }
+    Forme { sommets: o.sommets.clone(), faces: o.faces.clone(), matieres: Vec::new() }
 }
 
 fn indice(objets: &[Objet], id: u64) -> Option<usize> {
@@ -221,7 +221,7 @@ pub fn miroir(f: &Forme, mat: &[f32; 16], axe: usize, souder: bool) -> Forme {
     let gardees: Vec<&Vec<u32>> = f.faces.iter().filter(|p| !p.iter().all(|&i| plan(i as usize))).collect();
     let mut faces: Vec<Vec<u32>> = gardees.iter().map(|p| (*p).clone()).collect();
     faces.extend(gardees.iter().map(|p| p.iter().rev().map(|&i| reflet[i as usize]).collect()));
-    Forme { sommets, faces }
+    Forme { sommets, faces, matieres: Vec::new() }
 }
 
 /// La forme de base de l'objet `k` avec son seul modifieur `i` (même éteint) : ce que

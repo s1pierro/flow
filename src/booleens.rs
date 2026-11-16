@@ -29,14 +29,30 @@ impl Op {
     }
 }
 
-/// Une forme : des sommets et des faces (polygones dans le sens direct vu de dehors).
+/// Une forme : des sommets et des faces (polygones dans le sens direct vu de dehors),
+/// et la matière de chaque face (`matieres`, vide : toutes de matière 0). Les
+/// opérations transportent les matières : une face du résultat garde celle de la face
+/// d'origine dont elle est un morceau (celle de l'outil, pour ce qu'une différence
+/// creuse).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Forme {
     pub sommets: Vec<V3>,
     pub faces: Vec<Vec<u32>>,
+    pub matieres: Vec<u16>,
 }
 
 impl Forme {
+    /// La matière de la face `k` (0 sans matières).
+    pub fn matiere(&self, k: usize) -> u16 {
+        self.matieres.get(k).copied().unwrap_or(0)
+    }
+
+    /// Toutes les faces de la matière `m`.
+    pub fn en(mut self, m: u16) -> Forme {
+        self.matieres = vec![m; self.faces.len()];
+        self
+    }
+
     pub fn vide(&self) -> bool {
         self.faces.is_empty()
     }
@@ -47,7 +63,11 @@ impl Forme {
         for f in formes {
             let d = r.sommets.len() as u32;
             r.sommets.extend_from_slice(&f.sommets);
+            r.matieres.extend((0..f.faces.len()).map(|k| f.matiere(k)));
             r.faces.extend(f.faces.iter().map(|p| p.iter().map(|i| i + d).collect()));
+        }
+        if r.matieres.iter().all(|&m| m == 0) {
+            r.matieres.clear();
         }
         r
     }
@@ -76,19 +96,21 @@ impl Forme {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Coin {
     face: f64,
+    /// La matière de la face d'origine : constante sur elle, l'interpolation la garde.
+    matiere: f64,
 }
 
 impl Add for Coin {
     type Output = Coin;
     fn add(self, o: Coin) -> Coin {
-        Coin { face: self.face + o.face }
+        Coin { face: self.face + o.face, matiere: self.matiere + o.matiere }
     }
 }
 
 impl Mul<f64> for Coin {
     type Output = Coin;
     fn mul(self, k: f64) -> Coin {
-        Coin { face: self.face * k }
+        Coin { face: self.face * k, matiere: self.matiere * k }
     }
 }
 
@@ -102,12 +124,13 @@ fn vers_manifold(m: &Forme, faces: &mut usize) -> Result<Manifold<Coin>, String>
     let mut coins = Vec::with_capacity(m.faces.len() * 6);
     let mut pos = Vec::with_capacity(m.sommets.len() * 3);
     let mut local: HashMap<u32, usize> = HashMap::with_capacity(m.sommets.len());
-    for p in &m.faces {
+    for (f, p) in m.faces.iter().enumerate() {
         let id = *faces as f64;
+        let matiere = m.matiere(f) as f64;
         *faces += 1;
         for k in 1..p.len().saturating_sub(1) {
             for i in [p[0], p[k], p[k + 1]] {
-                coins.push(Coin { face: id });
+                coins.push(Coin { face: id, matiere });
                 idx.push(*local.entry(i).or_insert_with(|| {
                     let s = m.sommets[i as usize];
                     pos.extend_from_slice(&[s[0] as f64, s[1] as f64, s[2] as f64]);
@@ -122,7 +145,7 @@ fn vers_manifold(m: &Forme, faces: &mut usize) -> Result<Manifold<Coin>, String>
 fn vers_forme(r: &Manifold<Coin>) -> Forme {
     let sommets: Vec<[f64; 3]> = r.ps.iter().map(|p| [p.x, p.y, p.z]).collect();
     // Les triangles de chaque face d'origine, dans l'ordre d'apparition
-    let mut ordre: Vec<usize> = Vec::new();
+    let mut ordre: Vec<(usize, u16)> = Vec::new();
     let mut groupes: HashMap<usize, Vec<[usize; 3]>> = HashMap::new();
     for t in 0..r.hs.len() / 3 {
         let h = &r.hs[3 * t..3 * t + 3];
@@ -130,23 +153,34 @@ fn vers_forme(r: &Manifold<Coin>) -> Forme {
             continue;
         }
         let id = (r.vals[3 * t].face + 0.5).floor().max(0.0) as usize;
+        let matiere = (r.vals[3 * t].matiere + 0.5).floor().clamp(0.0, u16::MAX as f64) as u16;
         groupes
             .entry(id)
             .or_insert_with(|| {
-                ordre.push(id);
+                ordre.push((id, matiere));
                 Vec::new()
             })
             .push([h[0].tail, h[1].tail, h[2].tail]);
     }
     let mut faces = Vec::new();
-    for id in ordre {
+    let mut matieres = Vec::new();
+    for (id, m) in ordre {
         let tris = &groupes[&id];
         match (tris.len() > 1).then(|| contour(&sommets, tris)).flatten() {
-            Some(s) => faces.push(s.into_iter().map(|i| i as u32).collect()),
-            None => faces.extend(tris.iter().map(|t| t.iter().map(|&i| i as u32).collect())),
+            Some(s) => {
+                faces.push(s.into_iter().map(|i| i as u32).collect());
+                matieres.push(m);
+            }
+            None => {
+                faces.extend(tris.iter().map(|t| t.iter().map(|&i| i as u32).collect()));
+                matieres.extend(std::iter::repeat_n(m, tris.len()));
+            }
         }
     }
-    Forme { sommets: sommets.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect(), faces }
+    if matieres.iter().all(|&m| m == 0) {
+        matieres.clear();
+    }
+    Forme { sommets: sommets.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect(), faces, matieres }
 }
 
 /// Le contour d'un groupe de triangles coplanaires : une boucle unique et convexe, sinon
@@ -282,7 +316,7 @@ pub mod tests {
     /// Un cube de côté 1, décalé de `d` en x.
     pub fn cube(d: f32) -> Forme {
         let s: Vec<V3> = (0..8).map(|i| [d + if i & 1 == 0 { -0.5 } else { 0.5 }, if i & 2 == 0 { -0.5 } else { 0.5 }, if i & 4 == 0 { -0.5 } else { 0.5 }]).collect();
-        Forme { sommets: s, faces: vec![vec![0, 2, 3, 1], vec![4, 5, 7, 6], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 4, 6, 2], vec![1, 3, 7, 5]] }
+        Forme { sommets: s, faces: vec![vec![0, 2, 3, 1], vec![4, 5, 7, 6], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 4, 6, 2], vec![1, 3, 7, 5]], matieres: Vec::new() }
     }
 
     #[test]

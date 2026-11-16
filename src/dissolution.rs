@@ -29,20 +29,23 @@ fn scal(a: P, b: P) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// Les triangles du volume (ses faces en éventails).
-fn triangles(f: &Forme) -> Vec<[u32; 3]> {
+/// Les triangles du volume (ses faces en éventails), et la matière de chacun.
+fn triangles(f: &Forme) -> (Vec<[u32; 3]>, Vec<u16>) {
     let mut t = Vec::with_capacity(f.faces.len() * 2);
-    for p in &f.faces {
+    let mut m = Vec::with_capacity(f.faces.len() * 2);
+    for (k0, p) in f.faces.iter().enumerate() {
         for k in 1..p.len().saturating_sub(1) {
             t.push([p[0], p[k], p[k + 1]]);
+            m.push(f.matiere(k0));
         }
     }
-    t
+    (t, m)
 }
 
 pub fn dissoudre(f: &Forme) -> Forme {
     let pos: Vec<P> = f.sommets.iter().map(|p| p.map(|x| x as f64)).collect();
-    let tri = triangles(f);
+    // Une région ne réunit que des triangles d'une même matière
+    let (tri, mat) = triangles(f);
     let n = tri.len();
     // La normale de chaque triangle (nulle s'il est dégénéré)
     let normales: Vec<P> = tri.iter().map(|t| {
@@ -75,7 +78,7 @@ pub fn dissoudre(f: &Forme) -> Forme {
             k += 1;
             for j in 0..3 {
                 let Some(&v) = par_arete.get(&(t[(j + 1) % 3], t[j])) else { continue };
-                if region[v] != usize::MAX || scal(normales[v], ns) < COS_PLAN {
+                if region[v] != usize::MAX || mat[v] != mat[s] || scal(normales[v], ns) < COS_PLAN {
                     continue;
                 }
                 if tri[v].iter().all(|&i| scal(sous(pos[i as usize], o), ns).abs() < ECART_PLAN) {
@@ -184,14 +187,20 @@ pub fn dissoudre(f: &Forme) -> Forme {
         }
         let f = t.map(|i| num(i, &mut r));
         r.faces.push(f.to_vec());
+        r.matieres.push(mat[k]);
     }
     let mut cles: Vec<&usize> = refaites.keys().collect();
     cles.sort();
     for c in cles {
+        let m = mat[regions[*c][0]];
         for t in &refaites[c] {
             let f = t.map(|i| num(i, &mut r));
             r.faces.push(f.to_vec());
+            r.matieres.push(m);
         }
+    }
+    if r.matieres.iter().all(|&m| m == 0) {
+        r.matieres.clear();
     }
     // Par sûreté : un résultat qui ne serait plus fermé, on n'en veut pas
     if ferme(f) && !ferme(&r) {

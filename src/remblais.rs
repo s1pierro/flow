@@ -125,14 +125,28 @@ impl Remblais {
     /// du quai (point par point), le dessous à `bas`, des murs sur les côtés de bord. Une
     /// variété fermée, faces dehors ; vide si la triangulation échoue.
     pub fn volume(&self, c: &Contour, bas: f32) -> Forme {
-        extruder(c, |q| self.hauteur(q).unwrap_or(bas + 1.0).max(bas + 0.5), |_| bas)
+        extruder(c, |q| self.hauteur(q).unwrap_or(bas + 1.0).max(bas + 0.5), |_| bas).en(crate::maquette::matiere::REMBLAI)
     }
 
     /// Le volume de l'épaulement de contour `c` : le dessous à la hauteur du quai
     /// (point par point), le dessus à `haut`. Ôté au solide, il arase la terre et le
     /// remblai à la hauteur du quai.
     pub fn volume_epaulement(&self, c: &Contour, haut: f32) -> Forme {
-        extruder(c, |_| haut, |q| self.quai(q).unwrap_or(haut - 1.0).min(haut - 0.5))
+        use crate::maquette::matiere;
+        let f = extruder(c, |_| haut, |q| self.quai(q).unwrap_or(haut - 1.0).min(haut - 0.5));
+        // Le dessus (en haut), le fond (le quai), les murs : selon la pente des faces
+        let mut m = Vec::with_capacity(f.faces.len());
+        for p in &f.faces {
+            let ys: Vec<f32> = p.iter().map(|&i| f.sommets[i as usize][1]).collect();
+            m.push(if ys.iter().all(|&y| y >= haut - 1e-3) {
+                matiere::HAUT
+            } else if p.len() == 3 {
+                matiere::QUAI
+            } else {
+                matiere::QUAI_MUR
+            });
+        }
+        Forme { matieres: m, ..f }
     }
 }
 

@@ -151,7 +151,19 @@ void main() {
     else if (v_mat > 1.5) c = vec3(0.80, 0.80, 0.83);
     else if (v_mat > 0.5) c = vec3(0.76, 0.86, 0.95);
   }
-  if (u_avec_image == 1) {
+  // Les faces laissées par un volume de la maquette (5,1 le lit, 5,2 la berge…) : la
+  // couleur de leur matière, à la place de l'image
+  bool volume = v_mat > 4.95;
+  if (volume) {
+    int k = int(floor((v_mat - 5.0) * 10.0 + 0.5));
+    if (k == 1) c = vec3(0.47, 0.39, 0.27);
+    else if (k == 2) c = vec3(0.80, 0.76, 0.64);
+    else if (k == 3) c = vec3(0.88, 0.56, 0.22);
+    else if (k == 4) c = vec3(0.56, 0.57, 0.62);
+    else if (k == 5) c = vec3(0.62, 0.38, 0.78);
+    else c = vec3(0.95, 0.15, 0.15);
+  }
+  if (u_avec_image == 1 && !volume) {
     vec4 t = texture(u_image, v_uv);
     if (t.a < 0.5) discard;
     c = t.rgb / t.a;
