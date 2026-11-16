@@ -270,6 +270,9 @@ impl Matieres {
             Sorte::Bois => ("Longueur des lames", "Largeur des lames"),
             Sorte::Brique => ("Longueur des briques", "Hauteur des briques"),
             Sorte::Pierre => ("Taille des pierres", "Hauteur des assises"),
+            Sorte::Vase => ("Taille des taches", "Pas des rides"),
+            Sorte::Paves => ("Longueur des pavés", "Largeur des pavés"),
+            Sorte::Taille => ("Longueur des blocs", "Hauteur des assises"),
         };
         let s = format!("{} cm", nombre_court(r.longueur));
         cx.slider(b, sub_id(base, 420), lo, &s, &mut r.longueur, 2.0, 400.0);
@@ -282,7 +285,7 @@ impl Matieres {
         let s = pc(r.irregularite);
         cx.slider(b, sub_id(base, 440), "Irrégularité", &s, &mut r.irregularite, 0.0, 1.0);
         let s = format!("{} mm", nombre_court(r.joint));
-        cx.slider(b, sub_id(base, 441), "Joints", &s, &mut r.joint, 0.0, 60.0);
+        cx.slider(b, sub_id(base, 441), if r.genre == Sorte::Vase { "Fentes" } else { "Joints" }, &s, &mut r.joint, 0.0, 60.0);
         let s = pc(r.relief);
         cx.slider(b, sub_id(base, 442), "Relief", &s, &mut r.relief, 0.0, 1.0);
         if r.genre == Sorte::Bois {
@@ -290,6 +293,10 @@ impl Matieres {
             cx.slider(b, sub_id(base, 443), "Cernes par lame", &s, &mut r.cernes, 1.0, 40.0);
             let s = format!("{} / m²", nombre_court(r.noeuds));
             cx.slider(b, sub_id(base, 444), "Nœuds", &s, &mut r.noeuds, 0.0, 20.0);
+        }
+        if r.genre == Sorte::Vase {
+            let s = format!("{:.0} / m²", r.noeuds);
+            cx.slider(b, sub_id(base, 445), "Gravillons", &s, &mut r.noeuds, 0.0, 200.0);
         }
         cx.section(b, "Surface");
         let s = pc(r.variation);
