@@ -1,12 +1,11 @@
-//! Étape 5 : la chaussée en volume dans la maquette, posée sur le réseau nivelé
-//! (`reseau::niveler`). Chaque arête au sol devient un ruban : le dessus à la hauteur
+//! La chaussée en volume dans la maquette, posée sur le réseau nivelé du lieu
+//! (`sage_reel::reseau`, `Donnees::reseau`). Chaque arête au sol devient un ruban : le dessus à la hauteur
 //! du profil, épais de `EPAISSEUR` ; au-dessus, le terrain est dégagé (la voie ne
 //! s'enfouit pas). Les ponts et les tunnels viendront ensuite.
 
-use crate::reseau::{Passage, Reseau};
-use flow::booleens::{Forme, Op};
-use flow::carte::Donnees;
-use flow::maquette as mq;
+use crate::booleens::{Forme, Op};
+use crate::maquette as mq;
+use sage_reel::reseau::{Arete, Passage, Reseau};
 
 /// L'épaisseur de la chaussée (m).
 pub const EPAISSEUR: f32 = 0.5;
@@ -67,7 +66,7 @@ pub fn ruban(p: &[[f32; 3]], w: f32, bas: f32, haut: f32) -> Forme {
 
 /// Les morceaux des arêtes au sol qui touchent la boîte `b` (élargie de `marge`) : les
 /// suites de points dont un segment l'approche.
-fn morceaux<'a>(r: &'a Reseau, b: [f32; 4], marge: f32) -> Vec<(&'a crate::reseau::Arete, Vec<[f32; 3]>)> {
+fn morceaux<'a>(r: &'a Reseau, b: [f32; 4], marge: f32) -> Vec<(&'a Arete, Vec<[f32; 3]>)> {
     let mut v = Vec::new();
     for a in r.aretes.iter().filter(|a| a.passage == Passage::Sol) {
         let mut cur: Vec<[f32; 3]> = Vec::new();
@@ -104,9 +103,11 @@ pub static DERNIERE: std::sync::Mutex<(usize, usize, f32)> = std::sync::Mutex::n
 
 /// La tuile de Flow, puis la chaussée : le dégagement ôté, les rubans unis, le tout
 /// coupé à la tuile.
-pub fn tuile(d: &Donnees, r: &Reseau, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
+pub fn tuile(d: &crate::carte::Donnees, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u32>, Vec<u8>, Forme) {
     let t0 = std::time::Instant::now();
-    let b = flow::carte::boite_tuile(d, cle);
+    let r = d.reseau();
+    let r: &Reseau = &r;
+    let b = crate::carte::boite_tuile(d, cle);
     let def = mq::defonce(d, cle);
     let rem = mq::remblai_morceaux(d, cle);
     let epa = mq::epaulement_morceaux(d, cle);
@@ -125,9 +126,9 @@ pub fn tuile(d: &Donnees, r: &Reseau, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u32
     etapes.extend(formes_deg.iter().map(|m| (Op::Difference, m)));
     etapes.extend(formes_ch.iter().map(|m| (Op::Union, m)));
     etapes.push((Op::Intersection, &boite));
-    let (f, sautees) = flow::booleens::enchainer(&mq::solide(d, cle), &etapes).unwrap_or((mq::solide(d, cle), etapes.len()));
-    let f = flow::dissolution::dissoudre(&f);
+    let (f, sautees) = crate::booleens::enchainer(&mq::solide(d, cle), &etapes).unwrap_or((mq::solide(d, cle), etapes.len()));
+    let f = crate::dissolution::dissoudre(&f);
     let (v, ind) = mq::habiller(d, &f, b);
     *DERNIERE.lock().unwrap() = (formes_ch.len(), sautees, t0.elapsed().as_secs_f32());
-    (v, ind, mq::texture(d, b))
+    (v, ind, mq::texture(d, b), def)
 }

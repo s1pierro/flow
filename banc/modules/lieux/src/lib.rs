@@ -12,17 +12,16 @@ use flow_banc::{lieux, module, Module, ModuleLieux, Scene, TuileFaite};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-mod chaussee;
-mod reseau;
+mod scene;
+use sage_reel::reseau;
 
-/// Le réseau nivelé, pour la variante `chaussee`.
-static RESEAU: Mutex<Option<Arc<reseau::Reseau>>> = Mutex::new(None);
+
 
 /// Le dernier lieu reçu, pour les commandes (le diagnostic du réseau).
 static LIEU: Mutex<Option<Arc<Donnees>>> = Mutex::new(None);
 
 /// Les variantes de la fabrication des tuiles ; la première est celle de Flow.
-const VARIANTES: &[&str] = &["flow", "nu", "chaussee"];
+const VARIANTES: &[&str] = &["flow", "nu"];
 static VARIANTE: AtomicUsize = AtomicUsize::new(0);
 
 struct Commandes {
@@ -37,8 +36,8 @@ struct Commandes {
 impl Commandes {
     fn montrer(&mut self) {
         if let Some(r) = &self.reseau {
-            self.scene = r.scene(self.zone.0, self.zone.1, self.zone.2);
-            reseau::scene_contraintes(r, &self.contraintes, self.zone.0, self.zone.1, self.zone.2, &mut self.scene);
+            self.scene = scene::scene(r, self.zone.0, self.zone.1, self.zone.2);
+            scene::scene_contraintes(r, &self.contraintes, self.zone.0, self.zone.1, self.zone.2, &mut self.scene);
             self.revision += 1;
         }
     }
@@ -53,7 +52,7 @@ impl Module for Commandes {
         match m[0] {
             "etat" => {}
             "derniere" => {
-                let (n, s, t) = *chaussee::DERNIERE.lock().unwrap();
+                let (n, s, t) = *flow::chaussee::DERNIERE.lock().unwrap();
                 return Ok(format!("dernière tuile : {n} rubans, {s} étapes sautées, {t:.2} s"));
             }
             "diagnostic" => {
@@ -79,7 +78,6 @@ impl Module for Commandes {
                 let avant = reseau::bilan_profil(r, &self.contraintes, &d.lieu);
                 let b = reseau::niveler(r, &self.contraintes, n);
                 let apres = reseau::bilan_profil(r, &self.contraintes, &d.lieu);
-                *RESEAU.lock().unwrap() = Some(Arc::new(r.clone()));
                 self.montrer();
                 return Ok(format!("avant :\n{avant}\naprès {} tours ({:.2} s), {} contraintes impossibles écartées :\n{apres}", b.iterations, b.duree, b.impossibles));
             }
@@ -135,10 +133,7 @@ impl ModuleLieux for Fabrique {
         let d = self.donnees.as_ref().ok_or("pas de lieu")?;
         let (sommets, indices, pixels) = match VARIANTE.load(Ordering::Relaxed) {
             1 => nu(d, cle),
-            2 => {
-                let r = RESEAU.lock().unwrap().clone().ok_or("pas de réseau nivelé : banc reseau puis banc niveler")?;
-                chaussee::tuile(d, &r, cle)
-            }
+
             _ => {
                 let (s, i, p, _) = flow::maquette::fabriquer_avec_defonce(d, cle);
                 (s, i, p)

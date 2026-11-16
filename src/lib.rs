@@ -14,6 +14,7 @@ pub mod applet;
 pub mod android;
 pub mod audio;
 pub mod carte;
+pub mod chaussee;
 pub mod maquette;
 pub mod selection;
 pub mod berges;

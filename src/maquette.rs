@@ -874,6 +874,10 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
 
 /// `fabriquer`, et le volume de défonce des lits de la tuile.
 pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>, Forme) {
+    // La chaussée en volume sur le réseau nivelé (FLOW_SANS_CHAUSSEE=1 : sans)
+    if !std::env::var("FLOW_SANS_CHAUSSEE").is_ok_and(|v| v == "1") {
+        return crate::chaussee::tuile(d, cle);
+    }
     let b = boite_tuile(d, cle);
     let def = defonce(d, cle);
     // Le solide uni au remblai de ses berges, puis creusé de ses lits (la défonce

@@ -61,6 +61,8 @@ pub struct Donnees {
     berges: std::sync::OnceLock<Arc<crate::berges::Types>>,
     /// Les contours à plat des remblais des quais, calculés au premier besoin.
     remblais: std::sync::OnceLock<Arc<crate::remblais::Remblais>>,
+    /// Le réseau des voies nivelé (`sage_reel::reseau`), calculé au premier besoin.
+    reseau: std::sync::OnceLock<Arc<sage_reel::reseau::Reseau>>,
 }
 
 /// La boîte (x0, z0, x1, z1) d'une suite de points.
@@ -103,7 +105,7 @@ fn dans(index: &HashMap<(i32, i32), Vec<u32>>, b: [f32; 4], tous: usize) -> Vec<
 
 impl Donnees {
     pub fn new(lieu: Lieu) -> Donnees {
-        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new(), tunnels: HashMap::new(), rails: HashMap::new(), arrets: HashMap::new(), cours: HashMap::new(), morceaux: Vec::new(), traces: HashMap::new(), berges: std::sync::OnceLock::new(), remblais: std::sync::OnceLock::new() };
+        let mut d = Donnees { lieu, ordre: ordre_par_defaut(), tabliers: Vec::new(), voirie: Default::default(), voirie_demandee: 0, voirie_prete: Default::default(), bati: HashMap::new(), routes: HashMap::new(), ponts: HashMap::new(), tunnels: HashMap::new(), rails: HashMap::new(), arrets: HashMap::new(), cours: HashMap::new(), morceaux: Vec::new(), traces: HashMap::new(), berges: std::sync::OnceLock::new(), remblais: std::sync::OnceLock::new(), reseau: std::sync::OnceLock::new() };
         d.reindexer();
         d
     }
@@ -112,6 +114,7 @@ impl Donnees {
     pub fn reindexer(&mut self) {
         self.berges = std::sync::OnceLock::new();
         self.remblais = std::sync::OnceLock::new();
+        self.reseau = std::sync::OnceLock::new();
         let mut bati: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
         for (k, b) in self.lieu.batiments.iter().enumerate() {
             for c in cellules(boite_bati(b)) {
@@ -225,6 +228,11 @@ impl Donnees {
 
     /// Les contours à plat des remblais des quais (`remblais::calculer`), au premier
     /// besoin.
+    /// Le réseau des voies nivelé (quelques secondes pour une ville, la première fois).
+    pub fn reseau(&self) -> Arc<sage_reel::reseau::Reseau> {
+        self.reseau.get_or_init(|| Arc::new(sage_reel::reseau::nivele(&self.lieu))).clone()
+    }
+
     pub fn remblais(&self) -> Arc<crate::remblais::Remblais> {
         self.remblais.get_or_init(|| Arc::new(crate::remblais::calculer(self))).clone()
     }
