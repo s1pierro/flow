@@ -220,3 +220,127 @@ pub type FnCommande = unsafe extern "C" fn(*const u8, usize, *mut Tampon) -> i32
 pub type FnPas = unsafe extern "C" fn(f32);
 pub type FnScene = unsafe extern "C" fn(u64, *mut Tampon, *mut Tampon) -> u64;
 pub type FnLiberer = unsafe extern "C" fn(Tampon);
+
+// --- Lieux sur le banc --------------------------------------------------------------
+
+/// Une tuile de la maquette des Lieux faite par un module : sommets de 9 flottants
+/// (ceux de `relief3d::SOMMET` : position, normale, u, v, matière), triangles, et sa
+/// texture (les octets RGBA de `maquette::texture`).
+#[derive(Clone, Debug, Default)]
+pub struct TuileFaite {
+    pub sommets: Vec<f32>,
+    pub indices: Vec<u32>,
+    pub pixels: Vec<u8>,
+}
+
+/// La sortie de `banc_lieux_tuile` : ses trois tampons, ou l'erreur (texte).
+#[repr(C)]
+pub struct SortieTuile {
+    pub sommets: Tampon,
+    pub indices: Tampon,
+    pub pixels: Tampon,
+    pub erreur: Tampon,
+}
+
+/// Un module qui fabrique les tuiles de la maquette des Lieux (déclaré par
+/// `lieux!(Type)`, en plus de `module!`). Flow lui donne le lieu (ses octets, au format
+/// `.reel`) quand il change, puis lui demande des tuiles, dans le fil de la fabrique :
+/// son état est à part de celui de `Module` (une tuile longue ne bloque pas les
+/// commandes).
+pub trait ModuleLieux: Send + 'static {
+    fn nouveau() -> Self
+    where
+        Self: Sized;
+    /// Le lieu, en octets `.reel`.
+    fn lieu(&mut self, octets: &[u8]) -> Result<(), String>;
+    /// La tuile `(z, i, j)` du dernier lieu reçu.
+    fn tuile(&mut self, cle: (u8, i32, i32)) -> Result<TuileFaite, String>;
+}
+
+pub struct EtatLieux<M> {
+    pub module: Mutex<Option<M>>,
+}
+
+fn panique(e: Box<dyn std::any::Any + Send>) -> String {
+    let t = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+    format!("le module a paniqué : {t}")
+}
+
+fn octets_f32(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+impl<M: ModuleLieux> EtatLieux<M> {
+    pub const fn new() -> EtatLieux<M> {
+        EtatLieux { module: Mutex::new(None) }
+    }
+
+    /// # Safety
+    /// `octets` valide sur `n` octets, `erreur` valide.
+    pub unsafe fn lieu(&self, octets: *const u8, n: usize, erreur: *mut Tampon) -> i32 {
+        let o = if octets.is_null() { &[][..] } else { std::slice::from_raw_parts(octets, n) };
+        let mut g = self.module.lock().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(M::nouveau);
+        match catch_unwind(AssertUnwindSafe(|| m.lieu(o))).map_err(panique).and_then(|r| r) {
+            Ok(()) => 0,
+            Err(e) => {
+                if !erreur.is_null() {
+                    *erreur = Tampon::de(e.into_bytes());
+                }
+                1
+            }
+        }
+    }
+
+    /// # Safety
+    /// `sortie` valide.
+    pub unsafe fn tuile(&self, z: u8, i: i32, j: i32, sortie: *mut SortieTuile) -> i32 {
+        let mut g = self.module.lock().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(M::nouveau);
+        let r = catch_unwind(AssertUnwindSafe(|| m.tuile((z, i, j)))).map_err(panique).and_then(|r| r);
+        let s = &mut *sortie;
+        match r {
+            Ok(t) => {
+                s.sommets = Tampon::de(octets_f32(&t.sommets));
+                s.indices = Tampon::de(t.indices.iter().flat_map(|x| x.to_le_bytes()).collect());
+                s.pixels = Tampon::de(t.pixels);
+                0
+            }
+            Err(e) => {
+                s.erreur = Tampon::de(e.into_bytes());
+                1
+            }
+        }
+    }
+}
+
+impl<M: ModuleLieux> Default for EtatLieux<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Déclare le fabricant de tuiles `$t` (qui implémente `ModuleLieux`).
+#[macro_export]
+macro_rules! lieux {
+    ($t:ty) => {
+        static BANC_LIEUX: $crate::EtatLieux<$t> = $crate::EtatLieux::new();
+
+        /// # Safety
+        /// Appelée par Flow.
+        #[no_mangle]
+        pub unsafe extern "C" fn banc_lieux_lieu(octets: *const u8, n: usize, erreur: *mut $crate::Tampon) -> i32 {
+            BANC_LIEUX.lieu(octets, n, erreur)
+        }
+
+        /// # Safety
+        /// Appelée par Flow.
+        #[no_mangle]
+        pub unsafe extern "C" fn banc_lieux_tuile(z: u8, i: i32, j: i32, sortie: *mut $crate::SortieTuile) -> i32 {
+            BANC_LIEUX.tuile(z, i, j, sortie)
+        }
+    };
+}
+
+pub type FnLieuxLieu = unsafe extern "C" fn(*const u8, usize, *mut Tampon) -> i32;
+pub type FnLieuxTuile = unsafe extern "C" fn(u8, i32, i32, *mut SortieTuile) -> i32;

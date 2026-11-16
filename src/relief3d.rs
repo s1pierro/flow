@@ -114,6 +114,9 @@ pub struct Relief3d {
     pub seules: bool,
     /// Les textures des matières de la maquette.
     pub placage: Option<crate::draw::Placage3d>,
+    /// La version du banc (`banc::version_lieux`) des tuiles faites : quand elle change
+    /// (un module rechargé, Lieux mis sur le banc ou retiré), elles sont refaites.
+    banc: u64,
     pub accent: [f32; 3],
     /// Les tuiles de la maquette montrées à la dernière image (pour le toucher).
     montrees: Vec<Cle>,
@@ -138,7 +141,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -310,6 +313,11 @@ impl Relief3d {
         let synchrone = cfg!(test) || std::env::var_os("FLOW_MAQUETTE_SYNC").is_some();
         if self.fabrique.is_none() && !synchrone {
             self.fabrique = Some(crate::maquette::Fabrique::new(donnees.clone()));
+        }
+        let v = crate::banc::version_lieux();
+        if v != self.banc {
+            self.banc = v;
+            self.tuiles_maquette.clear();
         }
         let Ok(d) = donnees.read() else { return };
         self.poser(&d);

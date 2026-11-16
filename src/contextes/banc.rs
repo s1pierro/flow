@@ -162,6 +162,14 @@ impl Banc {
         if ouvert.is_some() && cx.button(&mut b, sub_id(base, 90), "Cadrer") {
             self.cadrer();
         }
+        let (fabrique, sur) = { let x = banc(); (x.module.as_ref().is_some_and(|m| m.fabrique_lieux()), x.lieux) };
+        if fabrique {
+            cx.section(&mut b, "Lieux");
+            let t = if sur { "Lieux sur le banc (retirer)" } else { "Mettre Lieux sur le banc" };
+            if cx.button(&mut b, sub_id(base, 91), t) {
+                let _ = banc::piloter(c.dossier.as_deref(), &["banc".into(), "lieux".into(), if sur { "non" } else { "oui" }.into()]);
+            }
+        }
         cx.section(&mut b, "Journal");
         let journal: Vec<String> = banc().journal.iter().rev().take(30).cloned().collect();
         if journal.is_empty() {
@@ -246,38 +254,19 @@ impl Contexte for Banc {
         }
     }
 
-    fn piloter(&mut self, m: &[String], c: &mut Commun) -> Option<Result<String, String>> {
+    fn piloter(&mut self, m: &[String], _c: &mut Commun) -> Option<Result<String, String>> {
+        // Les autres commandes du banc sont globales (`banc::piloter`)
         if m[0] != "banc" {
             return None;
         }
-        Some(match m.get(1).map(|s| s.as_str()) {
-            None | Some("etat") => {
-                let b = banc();
-                Ok(match &b.module {
-                    Some(x) => format!("module {} n° {} · {} triangles · révision {}", x.nom, x.numero, x.indices.len() / 3, x.revision),
-                    None => "aucun module".into(),
-                })
-            }
-            Some("modules") => Ok(c.dossier.as_deref().map(banc::disponibles).unwrap_or_default().join("\n")),
-            Some("charger") => match m.get(2) {
-                Some(n) => self.charger(c, n),
-                None => Err("banc charger <nom>".into()),
-            },
-            Some("recharger") => {
-                // Le verrou relâché avant de recharger (il n'est pas réentrant)
-                let nom = banc().module.as_ref().map(|x| x.nom.clone());
-                match nom {
-                    Some(n) => self.charger(c, &n),
-                    None => Err("aucun module chargé".into()),
-                }
-            }
+        match m.get(1).map(|s| s.as_str()) {
             Some("cadrer") => {
                 self.cadrer();
-                Ok("cadré".into())
+                Some(Ok("cadré".into()))
             }
             Some("vue") => {
                 let n: Vec<f32> = m[2..].iter().filter_map(|x| x.parse().ok()).collect();
-                match n[..] {
+                Some(match n[..] {
                     [l, t, d, x, y, z] => {
                         self.camera = Camera { lacet: l, tangage: t.clamp(-1.45, 1.45), distance: d.max(0.05), cible: [x, y, z] };
                         Ok("vue réglée".into())
@@ -286,9 +275,9 @@ impl Contexte for Banc {
                         let k = &self.camera;
                         Ok(format!("vue {} {} {} {} {} {}", k.lacet, k.tangage, k.distance, k.cible[0], k.cible[1], k.cible[2]))
                     }
-                }
+                })
             }
-            Some(_) => banc().commande(&m[1..].join(" ")),
-        })
+            _ => None,
+        }
     }
 }

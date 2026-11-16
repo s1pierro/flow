@@ -107,7 +107,12 @@ pub fn contour(v: &[f32], ind: &[u32]) -> Vec<u32> {
 
 /// Une tuile finie, avec ses arêtes, son contour et sa mesure.
 pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
-    let (sommets, indices, pixels, def) = fabriquer_avec_defonce(d, cle);
+    // Lieux sur le banc : la tuile faite par le module (le volume de défonce, montré à
+    // part, reste celui de Flow) ; s'il échoue, celle de Flow
+    let (sommets, indices, pixels, def) = match crate::banc::tuile_lieux(d, faite, cle) {
+        Some(Ok((s, i, p))) => (s, i, p, defonce(d, cle)),
+        _ => fabriquer_avec_defonce(d, cle),
+    };
     let (defonce_sommets, defonce_indices, defonce_aretes) = maillage_defonce(&def);
     let aretes = aretes(&sommets, &indices);
     let contour = contour(&sommets, &indices);
@@ -887,7 +892,7 @@ pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec
 /// `f`, puis les `etapes` à la suite (`booleens::enchainer`, sans repasser par les
 /// formes) ; tel quel si rien ne marche. Avec FLOW_TRACE_DEFONCE, le volume avant et
 /// après, et les étapes sautées.
-fn composer(f: Forme, etapes: &[(crate::booleens::Op, &Forme)]) -> Forme {
+pub fn composer(f: Forme, etapes: &[(crate::booleens::Op, &Forme)]) -> Forme {
     let trace = std::env::var_os("FLOW_TRACE_DEFONCE").is_some();
     match crate::booleens::enchainer(&f, etapes) {
         Ok((c, sautees)) => {

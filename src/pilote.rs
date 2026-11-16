@@ -240,7 +240,7 @@ fn executer(app: &mut App, m: &[String], w: f32, h: f32, dp: f32, tx: &Sender<St
             d.push_back((Event::Up { id: DOIGT + 1 }, t + Duration::from_secs_f32(duree + 0.02)));
             Ok(Some(format!("glisser {x1} {y1} -> {x2} {y2}")))
         }
-        autre => match crate::pilote_audio::executer(&mut app.commun, m).or_else(|| app.piloter_fenetres(m)) {
+        autre => match crate::banc::piloter(app.commun.dossier.clone().as_deref(), m).or_else(|| crate::pilote_audio::executer(&mut app.commun, m)).or_else(|| app.piloter_fenetres(m)) {
             Some(r) => r.map(Some),
             None => Err(format!("commande inconnue : {autre} (ping, etat, contexte, capture, toucher, glisser, radio, enregistrer, mixeur, ou une commande d'un contexte ouvert)")),
         },

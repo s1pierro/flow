@@ -1,0 +1,20 @@
+[package]
+name = "banc-lieux"
+version = "0.1.0"
+edition = "2021"
+description = "Lieux sur le banc : la maquette fabriquée par une copie de Flow, pour y essayer du code neuf avant de l'entériner dans Flow"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+flow = { path = "../../.." }
+flow-banc = { path = "../../abi" }
+sage-reel = { path = "../../../../sage/modules/sage-reel" }
+
+# Flow (la dépendance) est compilé une fois ; seul ce module se recompile ensuite
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
