@@ -2228,6 +2228,81 @@ impl Contexte for Lieux {
         self.chemin.as_deref()
     }
 
+    fn piloter(&mut self, m: &[String], _c: &mut Commun) -> Option<Result<String, String>> {
+        let nombres = || m[1..].iter().map(|s| s.parse::<f32>().map_err(|_| format!("« {s} » n'est pas un nombre"))).collect::<Result<Vec<f32>, String>>();
+        let decrire = |c: &Camera| format!("{} {} {} {} {} {}", c.lacet, c.tangage, c.distance, c.cible[0], c.cible[1], c.cible[2]);
+        Some(match m[0].as_str() {
+            // La caméra 3D : la lire, ou la poser (et passer en 3D)
+            "vue3d" => {
+                if m.len() == 1 {
+                    return Some(self.trois_d.as_ref().map(|r| decrire(&r.camera)).or(self.camera3d.as_ref().map(decrire)).ok_or("pas de vue 3D".to_string()));
+                }
+                let v = match nombres() {
+                    Ok(v) if v.len() == 6 => v,
+                    Ok(_) => return Some(Err("vue3d lacet tangage distance x y z".into())),
+                    Err(e) => return Some(Err(e)),
+                };
+                if self.carte.is_none() {
+                    return Some(Err("aucun lieu chargé".into()));
+                }
+                let c = Camera { lacet: v[0], tangage: v[1], distance: v[2], cible: [v[3], v[4], v[5]] };
+                if self.trois_d.is_none() {
+                    self.basculer_3d();
+                }
+                match &mut self.trois_d {
+                    Some(r) => r.camera = c,
+                    None => self.camera3d = Some(c),
+                }
+                Ok(format!("vue3d {}", decrire(&c)))
+            }
+            // La carte 2D : en revenir, ou poser sa vue
+            "carte" | "vue2d" => {
+                if self.trois_d.is_some() {
+                    self.basculer_3d();
+                }
+                if m[0] == "vue2d" {
+                    match nombres() {
+                        Ok(v) if v.len() == 3 && v[2] > 0.0 => self.vue = Some(Vue { cx: v[0] as f64, cz: v[1] as f64, echelle: v[2] }),
+                        Ok(_) => return Some(Err("vue2d x z échelle".into())),
+                        Err(e) => return Some(Err(e)),
+                    }
+                }
+                Ok(self.vue.map(|v| format!("vue2d {} {} {}", v.cx, v.cz, v.echelle)).unwrap_or_default())
+            }
+            // Le rendu de la 3D : les mots donnés sont mis, les autres ôtés
+            "rendu" => {
+                let a = |n: &str| m[1..].iter().any(|w| w == n);
+                self.maquette3d = a("maquette");
+                self.blanc3d = a("blanc");
+                self.defonce3d = a("defonce");
+                Ok(format!("rendu maquette={} blanc={} defonce={}", self.maquette3d, self.blanc3d, self.defonce3d))
+            }
+            "selection" => {
+                if m.len() > 1 {
+                    self.selection = crate::selection::Selection::lire(&m[1..].join(" "), self.selection.seules);
+                }
+                Ok(format!("selection {}", self.selection.ecrire()))
+            }
+            "seules" => {
+                self.selection.seules = matches!(m.get(1).map(|s| s.as_str()), Some("oui" | "1" | "vrai"));
+                Ok(format!("seules {}", self.selection.seules))
+            }
+            "outil" => match m.get(1).and_then(|s| s.parse::<usize>().ok()) {
+                Some(o) if o < OUTILS.len() => {
+                    self.outil = o;
+                    Ok(format!("outil {o}"))
+                }
+                _ => Err(format!("outil 0..{}", OUTILS.len() - 1)),
+            },
+            // La génération de la maquette : « faites total », ou « finie »
+            "generation" => Ok(match self.trois_d.as_ref().and_then(|r| r.generation) {
+                Some((f, t)) => format!("generation {f} {t}"),
+                None => "generation finie".into(),
+            }),
+            _ => return None,
+        })
+    }
+
     fn ecrire(&self, e: &mut Etat) {
         if self.carte.is_some() || self.chargement.is_some() {
             if let Some(p) = &self.chemin {

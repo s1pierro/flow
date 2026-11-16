@@ -18,7 +18,11 @@
 //! - `contexte <clé> [document]` : ouvre un contexte dans la plus grande fenêtre ;
 //! - `capture [nom]` : l'écran en PNG dans `Flow/banc/captures/` ; rend son chemin ;
 //! - `toucher <x> <y> [durée ms]` : un doigt posé puis levé ;
-//! - `glisser <x1> <y1> <x2> <y2> [durée ms]` : un doigt qui glisse.
+//! - `glisser <x1> <y1> <x2> <y2> [durée ms]` : un doigt qui glisse ;
+//! - toute autre commande est proposée aux contextes ouverts (`Contexte::piloter`) ;
+//!   Lieux : `vue3d [lacet tangage distance x y z]`, `vue2d x z échelle`, `carte`,
+//!   `rendu [maquette] [blanc] [defonce]`, `selection [n/i/j …]`, `seules oui|non`,
+//!   `outil n`, `generation`.
 //!
 //! Le récepteur appelle `commande` sur un thread à part ; ce qui touche à l'interface
 //! s'exécute sur le thread de rendu (`traiter`, `apres_dessin`), qui répond par un
@@ -235,7 +239,10 @@ fn executer(app: &mut App, m: &[String], w: f32, h: f32, dp: f32, tx: &Sender<St
             d.push_back((Event::Up { id: DOIGT + 1 }, t + Duration::from_secs_f32(duree + 0.02)));
             Ok(Some(format!("glisser {x1} {y1} -> {x2} {y2}")))
         }
-        autre => Err(format!("commande inconnue : {autre} (ping, etat, contexte, capture, toucher, glisser)")),
+        autre => match app.piloter_fenetres(m) {
+            Some(r) => r.map(Some),
+            None => Err(format!("commande inconnue : {autre} (ping, etat, contexte, capture, toucher, glisser, ou une commande d'un contexte ouvert)")),
+        },
     }
 }
 

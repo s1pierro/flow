@@ -284,6 +284,21 @@ impl App {
         r
     }
 
+    /// Pour le pilote : une commande qu'il ne connaît pas, proposée aux fenêtres (de la
+    /// plus grande à la plus petite) ; la première qui la connaît répond.
+    pub fn piloter_fenetres(&mut self, m: &[String]) -> Option<Result<String, String>> {
+        let mut ids: Vec<(FenetreId, f32)> = self.surface.placees().iter().map(|p| (p.id, p.cadre.w * p.cadre.h)).collect();
+        ids.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (id, _) in ids {
+            if let Some(i) = self.fenetres.get_mut(&id) {
+                if let Some(r) = i.piloter(m, &mut self.commun) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
     /// Pour le pilote : ouvre le contexte `cle` (avec ce document) dans la plus grande
     /// fenêtre.
     pub fn piloter_contexte(&mut self, cle: &str, document: Option<&str>) -> Result<(), String> {

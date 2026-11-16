@@ -62,6 +62,12 @@ pub trait Contexte {
     /// Écrit dans `e` ce qu'il faut pour rouvrir l'instance au prochain lancement.
     fn ecrire(&self, _e: &mut Etat) {}
 
+    /// Une commande du pilote (`pilote.rs`) qui n'est pas des siennes, en mots : rien si
+    /// le contexte ne la connaît pas, sinon sa réponse ou son erreur.
+    fn piloter(&mut self, _m: &[String], _c: &mut Commun) -> Option<Result<String, String>> {
+        None
+    }
+
     /// Avance le temps, avant le dessin (animations).
     fn avancer(&mut self, _dt: f32, _c: &Commun) {}
 
