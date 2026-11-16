@@ -205,6 +205,8 @@ pub struct Lieux {
     defonce3d: bool,
     /// Le rendu Maquette de la 3D (`maquette`).
     maquette3d: bool,
+    /// En maquette : le suivi des tâches (`suivi`) par-dessus la vue.
+    suivi3d: bool,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
     /// la carte changent).
     selection: crate::selection::Selection,
@@ -279,6 +281,7 @@ impl Default for Lieux {
             camera3d: None,
             blanc3d: false,
             defonce3d: false,
+            suivi3d: false,
             maquette3d: false,
             selection: Default::default(),
             resume: None,
@@ -318,6 +321,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     l.blanc3d = rendu.split_whitespace().any(|m| m == "blanc");
     l.maquette3d = rendu.split_whitespace().any(|m| m == "maquette");
     l.defonce3d = rendu.split_whitespace().any(|m| m == "defonce");
+    l.suivi3d = rendu.split_whitespace().any(|m| m == "suivi");
     // Les tuiles sélectionnées : « selection = niveau/i/j … »
     l.selection = crate::selection::Selection::lire(e.texte("selection").unwrap_or(""), e.texte("selection_seules") == Some("oui"));
     if let Some(o) = e.texte("ordre") {
@@ -485,14 +489,23 @@ impl Lieux {
 
     fn charger(&mut self, chemin: PathBuf) {
         let f = chemin.clone();
-        self.chargement = Some((chemin, std::thread::spawn(move || Lieu::lire(&f))));
+        let fil = std::thread::Builder::new().name("chargement".into()).spawn(move || {
+            let mut t = crate::suivi::tache("lecture du lieu");
+            t.detail(f.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()));
+            Lieu::lire(&f)
+        });
+        let Ok(fil) = fil else { return };
+        self.chargement = Some((chemin, fil));
         self.message = None;
     }
 
     /// Ouvre un lieu tout prêt (lu, généré, vierge).
     fn ouvrir_lieu(&mut self, lieu: Lieu, chemin: Option<PathBuf>, modifie: bool) {
         // Un autre ordre de dessin : les tuiles déjà parties se refont
-        let mut carte = Carte::new(lieu);
+        let mut carte = {
+            let _t = crate::suivi::tache("ouverture du lieu (index)");
+            Carte::new(lieu)
+        };
         if self.ordre != crate::carte::ordre_par_defaut() {
             if let Ok(mut d) = carte.donnees.write() {
                 d.ordre = self.ordre.clone();
@@ -1304,20 +1317,22 @@ impl Lieux {
         let mut x = zone.x + m;
         // Carte ou Maquette ; Blanc, en plus, sur l'un comme sur l'autre ; en maquette,
         // la défonce des lits
-        let n = if self.maquette3d { 4 } else { 3 };
-        for (i, nom) in ["Carte", "Maquette", "Blanc", "Défonce"].into_iter().enumerate().take(n) {
+        let n = if self.maquette3d { 5 } else { 3 };
+        for (i, nom) in ["Carte", "Maquette", "Blanc", "Défonce", "Suivi"].into_iter().enumerate().take(n) {
             let choisi = match i {
                 0 => !self.maquette3d,
                 1 => self.maquette3d,
                 2 => self.blanc3d,
-                _ => self.defonce3d,
+                3 => self.defonce3d,
+                _ => self.suivi3d,
             };
             if cx.pill(sub_id(base, 30 + i), x, zone.y + m, nom, choisi) {
                 match i {
                     0 => self.maquette3d = false,
                     1 => self.maquette3d = true,
                     2 => self.blanc3d = !self.blanc3d,
-                    _ => self.defonce3d = !self.defonce3d,
+                    3 => self.defonce3d = !self.defonce3d,
+                    _ => self.suivi3d = !self.suivi3d,
                 }
             }
             // Un peu plus d'écart avant l'interrupteur Blanc
@@ -1340,6 +1355,11 @@ impl Lieux {
             cx.dl.rrect(Rect::new(bx, by, bw, bh), bh / 2.0, c.puce);
             let f = faites as f32 / total.max(1) as f32;
             cx.dl.rrect(Rect::new(bx, by, (bw * f).max(bh), bh), bh / 2.0, c.accent);
+        }
+        if self.maquette3d && self.suivi3d {
+            let haut = zone.y + m + cx.commande() + m;
+            let bas = zone.y + zone.h - m - if r.generation.is_some() { cx.commande() + m } else { 0.0 };
+            dessiner_suivi(cx, Rect::new(zone.x + m, haut, zone.w - 2.0 * m, (bas - haut).max(0.0)), zone);
         }
         cx.clip(None);
     }
@@ -2276,7 +2296,8 @@ impl Contexte for Lieux {
                 self.maquette3d = a("maquette");
                 self.blanc3d = a("blanc");
                 self.defonce3d = a("defonce");
-                Ok(format!("rendu maquette={} blanc={} defonce={}", self.maquette3d, self.blanc3d, self.defonce3d))
+                self.suivi3d = a("suivi");
+                Ok(format!("rendu maquette={} blanc={} defonce={} suivi={}", self.maquette3d, self.blanc3d, self.defonce3d, self.suivi3d))
             }
             "selection" => {
                 if m.len() > 1 {
@@ -2323,7 +2344,7 @@ impl Contexte for Lieux {
         if self.plan.is_some() {
             e.mettre("plan", "oui");
         }
-        let rendu: Vec<&str> = [(self.maquette3d, "maquette"), (self.blanc3d, "blanc"), (self.defonce3d, "defonce")].into_iter().filter(|r| r.0).map(|r| r.1).collect();
+        let rendu: Vec<&str> = [(self.maquette3d, "maquette"), (self.blanc3d, "blanc"), (self.defonce3d, "defonce"), (self.suivi3d, "suivi")].into_iter().filter(|r| r.0).map(|r| r.1).collect();
         if !rendu.is_empty() {
             e.mettre("rendu3d", rendu.join(" "));
         }
@@ -2342,7 +2363,7 @@ impl Contexte for Lieux {
     }
 
     fn anime(&self, _c: &Commun) -> bool {
-        (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
+        (self.maquette3d && self.suivi3d && self.trois_d.is_some() && crate::suivi::occupe()) || (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
@@ -2591,4 +2612,69 @@ fn octets(n: usize) -> String {
     } else {
         format!("{:.1} Mo", n as f64 / (1024.0 * 1024.0)).replace('.', ",")
     }
+}
+
+/// Le suivi des tâches (`suivi`) dans `p`, par-dessus la vue 3D (`zone`, la découpe à
+/// rendre) : le repère, les étapes en cours avec leur durée qui court, les plus
+/// coûteuses (cumuls) et les dernières finies, imbriquées.
+fn dessiner_suivi(cx: &mut Cx, p: Rect, zone: Rect) {
+    use crate::suivi;
+    let d = cx.dp;
+    let (taille, pas) = (11.0, 15.0 * d);
+    let w = p.w.min(460.0 * d);
+    if p.h < 4.0 * pas || w < 120.0 * d {
+        return;
+    }
+    let p = Rect::new(p.x + p.w - w, p.y, w, p.h);
+    let c = cx.couleurs();
+    let rayon = 8.0 * d;
+    cx.ombre(p, rayon, 6.0);
+    cx.dl.rrect(p, rayon, [c.surface[0], c.surface[1], c.surface[2], 235]);
+    let interieur = Rect::new(p.x + 8.0 * d, p.y + 6.0 * d, p.w - 16.0 * d, p.h - 12.0 * d);
+    cx.clip(Some(interieur));
+    let mut y = interieur.y + pas * 0.5;
+    let x = interieur.x;
+    let max_y = interieur.y + interieur.h - pas * 0.5;
+    let ligne = |cx: &mut Cx, y: &mut f32, t: &str, couleur: crate::draw::Color| -> bool {
+        if *y > max_y + 0.5 {
+            return false;
+        }
+        cx.mono_at(x, *y, t, taille, couleur);
+        *y += pas;
+        true
+    };
+    let (nom, depuis) = suivi::depuis_repere();
+    ligne(cx, &mut y, &format!("Suivi · « {nom} » il y a {}", suivi::duree(depuis as f32)), c.accent);
+    let en_cours = suivi::en_cours();
+    if en_cours.is_empty() {
+        ligne(cx, &mut y, "en cours : rien", c.pale);
+    }
+    for (e, t) in en_cours.iter().take(8) {
+        let det = if e.detail.is_empty() { String::new() } else { format!(" ({})", e.detail) };
+        ligne(cx, &mut y, &format!("▶ {} {}… [{}]{det}", e.chemin, suivi::duree(*t), e.fil), c.texte);
+    }
+    // Les plus coûteuses, depuis le repère
+    let cumuls = suivi::cumuls();
+    if !cumuls.is_empty() {
+        ligne(cx, &mut y, "cumuls : total · n · max · 1re", c.accent);
+        for (k, s) in cumuls.iter().take(6) {
+            ligne(cx, &mut y, &format!("{} · {}× · {} · {}  {k}", suivi::duree(s.total as f32), s.n, suivi::duree(s.max), suivi::duree(s.premiere)), c.texte);
+        }
+    }
+    // Les dernières finies, autant que la place en laisse
+    let reste = ((max_y + 0.5 - y) / pas).floor().max(0.0) as usize;
+    if reste > 1 {
+        ligne(cx, &mut y, "finies :", c.accent);
+        for f in suivi::dernieres(reste - 1) {
+            let nom = f.chemin.rsplit(" › ").next().unwrap_or(&f.chemin);
+            let det = if f.detail.is_empty() { String::new() } else { format!(" ({})", f.detail) };
+            let fil = if f.profondeur == 0 { format!(" [{}]", f.fil) } else { String::new() };
+            let t = format!("{:+8.2} {:>9} {}{nom}{det}{fil}", f.debut, suivi::duree(f.duree), "  ".repeat(f.profondeur));
+            let couleur = if f.duree >= 1.0 { c.accent } else if f.profondeur == 0 { c.texte } else { c.pale };
+            if !ligne(cx, &mut y, &t, couleur) {
+                break;
+            }
+        }
+    }
+    cx.clip(Some(zone));
 }

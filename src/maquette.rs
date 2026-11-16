@@ -107,20 +107,35 @@ pub fn contour(v: &[f32], ind: &[u32]) -> Vec<u32> {
 
 /// Une tuile finie, avec ses arêtes, son contour et sa mesure.
 pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
+    let mut suivi = crate::suivi::tache("tuile");
+    suivi.detail(format!("{}/{}/{}", cle.0, cle.1, cle.2));
     // Lieux sur le banc : la tuile faite par le module (le volume de défonce, montré à
     // part, reste celui de Flow) ; s'il échoue, celle de Flow
-    let (sommets, indices, pixels, def) = match crate::banc::tuile_lieux(d, faite, cle) {
-        Some(Ok((s, i, p))) => (s, i, p, defonce(d, cle)),
+    let banc = {
+        let _t = crate::suivi::tache("banc");
+        crate::banc::tuile_lieux(d, faite, cle)
+    };
+    let (sommets, indices, pixels, def) = match banc {
+        Some(Ok((s, i, p))) => {
+            let _t = crate::suivi::tache("défonce");
+            (s, i, p, defonce(d, cle))
+        }
         _ => fabriquer_avec_defonce(d, cle),
     };
+    let t = crate::suivi::tache("finitions");
     let (defonce_sommets, defonce_indices, defonce_aretes) = maillage_defonce(&def);
     let aretes = aretes(&sommets, &indices);
     let contour = contour(&sommets, &indices);
-    let (eau_sommets, eau_indices) = surface_eau(d, cle);
+    let (eau_sommets, eau_indices) = {
+        let _t = crate::suivi::tache("eau");
+        surface_eau(d, cle)
+    };
+    drop(t);
     let mut mesure = mesurer(&sommets, &indices, pixels.len(), aretes.len() + contour.len());
     mesure.sommets += eau_sommets.len() / SOMMET;
     mesure.triangles += eau_indices.len() / 3;
     mesure.octets += (eau_sommets.len() + eau_indices.len()) * 4;
+    suivi.detail(format!("{}/{}/{} · {} triangles", cle.0, cle.1, cle.2, mesure.triangles));
     Tuile { cle, faite, sommets, indices, pixels, aretes, contour, eau_sommets, eau_indices, defonce_sommets, defonce_indices, defonce_aretes, mesure }
 }
 
@@ -879,18 +894,46 @@ pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec
         return crate::chaussee::tuile(d, cle);
     }
     let b = boite_tuile(d, cle);
-    let def = defonce(d, cle);
+    let def = {
+        let _t = crate::suivi::tache("défonce");
+        defonce(d, cle)
+    };
     // Le solide uni au remblai de ses berges, puis creusé de ses lits (la défonce
     // coupe aussi ce que le remblai avance dans l'eau), ses plans hachés par les
     // opérations redevenus simples
-    let rem = remblai_morceaux(d, cle);
-    let epa = epaulement_morceaux(d, cle);
+    let rem = {
+        let _t = crate::suivi::tache("remblai");
+        remblai_morceaux(d, cle)
+    };
+    let epa = {
+        let _t = crate::suivi::tache("épaulement");
+        epaulement_morceaux(d, cle)
+    };
     let mut etapes: Vec<(crate::booleens::Op, &Forme)> = rem.iter().map(|m| (crate::booleens::Op::Union, m)).collect();
     etapes.extend(epa.iter().map(|m| (crate::booleens::Op::Difference, m)));
     etapes.push((crate::booleens::Op::Difference, &def));
-    let f = crate::dissolution::dissoudre(&composer(solide(d, cle), &etapes));
-    let (v, ind) = habiller(d, &f, b);
-    (v, ind, texture(d, b), def)
+    let s = {
+        let _t = crate::suivi::tache("solide");
+        solide(d, cle)
+    };
+    let c = {
+        let mut t = crate::suivi::tache("booléens");
+        t.detail(format!("{} étapes", etapes.len()));
+        composer(s, &etapes)
+    };
+    let f = {
+        let _t = crate::suivi::tache("dissolution");
+        crate::dissolution::dissoudre(&c)
+    };
+    let (v, ind) = {
+        let _t = crate::suivi::tache("habillage");
+        habiller(d, &f, b)
+    };
+    let px = {
+        let _t = crate::suivi::tache("texture");
+        texture(d, b)
+    };
+    (v, ind, px, def)
 }
 
 /// `f`, puis les `etapes` à la suite (`booleens::enchainer`, sans repasser par les
@@ -1136,7 +1179,10 @@ impl Fabrique {
                         g.en_cours = Some(t.0);
                         t
                     };
-                    let fait = donnees.read().ok().map(|d| tuile(&d, cle, faite));
+                    let attente = crate::suivi::tache_min("attente des données", 5.0);
+                    let lu = donnees.read();
+                    drop(attente);
+                    let fait = lu.ok().map(|d| tuile(&d, cle, faite));
                     let (m, _) = &*e;
                     let Ok(mut g) = m.lock() else { return };
                     g.en_cours = None;

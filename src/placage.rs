@@ -102,8 +102,10 @@ pub fn textures(dossier: &Path) -> Option<Placage3d> {
             e.dates = dt;
             e.en_cours = true;
             let d = dossier.to_path_buf();
-            std::thread::spawn(move || {
+            let _ = std::thread::Builder::new().name("placage".into()).spawn(move || {
+                let t = crate::suivi::tache("placage (textures)");
                 let (pixels, cotes) = fabriquer(&d);
+                drop(t);
                 let mut e = etat().lock().unwrap();
                 e.en_cours = false;
                 e.revision += 1;

@@ -157,6 +157,7 @@ impl Donnees {
         self.voirie_demandee += 1;
         let (n, routes, ponts, tabliers, prete) = (self.voirie_demandee, self.lieu.routes.clone(), self.lieu.ponts.clone(), self.tabliers.clone(), self.voirie_prete.clone());
         let faire = move || {
+            let _t = crate::suivi::tache("voirie 3d");
             let v = Arc::new(crate::voirie3d::Voirie::depuis(&routes, &ponts, &tabliers));
             if let Ok(mut p) = prete.lock() {
                 if p.as_ref().is_none_or(|x| x.0 < n) {
@@ -169,7 +170,7 @@ impl Donnees {
             faire();
             self.prendre_voirie();
         } else {
-            std::thread::spawn(faire);
+            let _ = std::thread::Builder::new().name("voirie".into()).spawn(faire);
         }
     }
 
@@ -223,18 +224,44 @@ impl Donnees {
 
     /// Le type des berges des surfaces d'eau (`berges::calculer`), au premier besoin.
     pub fn berges(&self) -> Arc<crate::berges::Types> {
-        self.berges.get_or_init(|| Arc::new(crate::berges::calculer(self))).clone()
+        self.berges.get_or_init(|| {
+            let _t = crate::suivi::tache("berges (calcul)");
+            Arc::new(crate::berges::calculer(self))
+        }).clone()
     }
 
     /// Les contours à plat des remblais des quais (`remblais::calculer`), au premier
     /// besoin.
     /// Le réseau des voies nivelé (quelques secondes pour une ville, la première fois).
     pub fn reseau(&self) -> Arc<sage_reel::reseau::Reseau> {
-        self.reseau.get_or_init(|| Arc::new(sage_reel::reseau::nivele(&self.lieu))).clone()
+        self.reseau.get_or_init(|| {
+            let mut t = crate::suivi::tache("réseau nivelé (calcul)");
+            // `sage_reel::reseau::nivele`, étape par étape (pour le suivi)
+            use sage_reel::reseau as rs;
+            let mut r = {
+                let _t = crate::suivi::tache("graphe");
+                rs::reseau(&self.lieu)
+            };
+            let c = {
+                let mut t = crate::suivi::tache("contraintes");
+                let c = rs::contraintes(&r, &self.lieu);
+                t.detail(format!("{} contraintes", c.len()));
+                c
+            };
+            {
+                let _t = crate::suivi::tache("nivellement");
+                rs::niveler(&mut r, &c, 50);
+            }
+            t.detail(format!("{} nœuds, {} arêtes", r.noeuds.len(), r.aretes.len()));
+            Arc::new(r)
+        }).clone()
     }
 
     pub fn remblais(&self) -> Arc<crate::remblais::Remblais> {
-        self.remblais.get_or_init(|| Arc::new(crate::remblais::calculer(self))).clone()
+        self.remblais.get_or_init(|| {
+            let _t = crate::suivi::tache("remblais (calcul)");
+            Arc::new(crate::remblais::calculer(self))
+        }).clone()
     }
 
     pub fn batiments_dans(&self, b: [f32; 4]) -> Vec<u32> {

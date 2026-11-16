@@ -105,19 +105,34 @@ pub static DERNIERE: std::sync::Mutex<(usize, usize, f32)> = std::sync::Mutex::n
 /// coupé à la tuile.
 pub fn tuile(d: &crate::carte::Donnees, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u32>, Vec<u8>, Forme) {
     let t0 = std::time::Instant::now();
-    let r = d.reseau();
+    let r = {
+        let _t = crate::suivi::tache("réseau");
+        d.reseau()
+    };
     let r: &Reseau = &r;
     let b = crate::carte::boite_tuile(d, cle);
-    let def = mq::defonce(d, cle);
-    let rem = mq::remblai_morceaux(d, cle);
-    let epa = mq::epaulement_morceaux(d, cle);
+    let def = {
+        let _t = crate::suivi::tache("défonce");
+        mq::defonce(d, cle)
+    };
+    let rem = {
+        let _t = crate::suivi::tache("remblai");
+        mq::remblai_morceaux(d, cle)
+    };
+    let epa = {
+        let _t = crate::suivi::tache("épaulement");
+        mq::epaulement_morceaux(d, cle)
+    };
     let mut formes_deg = Vec::new();
     let mut formes_ch = Vec::new();
+    let mut t_rubans = crate::suivi::tache("rubans");
     for (a, pts) in morceaux(r, b, 10.0) {
         let w = (a.largeur * 0.5).max(1.0);
         formes_deg.push(ruban(&pts, w, -0.01, DEGAGE).en(mq::matiere::REMBLAI));
         formes_ch.push(ruban(&pts, w, -EPAISSEUR, 0.0).en(mq::matiere::SOL));
     }
+    t_rubans.detail(format!("{} rubans", formes_ch.len()));
+    drop(t_rubans);
     let socle = mq::socle(d);
     let boite = pave([b[0], socle - 50.0, b[1]], [b[2], 2000.0, b[3]]);
     let mut etapes: Vec<(Op, &Forme)> = rem.iter().map(|m| (Op::Union, m)).collect();
@@ -126,9 +141,29 @@ pub fn tuile(d: &crate::carte::Donnees, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u
     etapes.extend(formes_deg.iter().map(|m| (Op::Difference, m)));
     etapes.extend(formes_ch.iter().map(|m| (Op::Union, m)));
     etapes.push((Op::Intersection, &boite));
-    let (f, sautees) = crate::booleens::enchainer(&mq::solide(d, cle), &etapes).unwrap_or((mq::solide(d, cle), etapes.len()));
-    let f = crate::dissolution::dissoudre(&f);
-    let (v, ind) = mq::habiller(d, &f, b);
+    let solide = {
+        let _t = crate::suivi::tache("solide");
+        mq::solide(d, cle)
+    };
+    let mut t = crate::suivi::tache("booléens");
+    let (f, sautees) = match crate::booleens::enchainer(&solide, &etapes) {
+        Ok(x) => x,
+        Err(_) => (solide, etapes.len()),
+    };
+    t.detail(format!("{} étapes, {sautees} sautées", etapes.len()));
+    drop(t);
+    let f = {
+        let _t = crate::suivi::tache("dissolution");
+        crate::dissolution::dissoudre(&f)
+    };
+    let (v, ind) = {
+        let _t = crate::suivi::tache("habillage");
+        mq::habiller(d, &f, b)
+    };
+    let px = {
+        let _t = crate::suivi::tache("texture");
+        mq::texture(d, b)
+    };
     *DERNIERE.lock().unwrap() = (formes_ch.len(), sautees, t0.elapsed().as_secs_f32());
-    (v, ind, mq::texture(d, b), def)
+    (v, ind, px, def)
 }

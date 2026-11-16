@@ -307,11 +307,13 @@ impl Relief3d {
     /// fabrique (les plus grossières d'abord, et les ancêtres absents), quelques-unes
     /// prises par image ; en attendant, l'ancêtre le plus proche déjà fait.
     fn dessiner_maquette(&mut self, cx: &mut Cx, zone: Rect, carte: &mut Carte) {
+        let _suivi = crate::suivi::tache_min("image maquette", 25.0);
         let ciel = CIEL.map(|c| (c * 255.0) as u8);
         cx.dl.rrect(zone, 0.0, [ciel[0], ciel[1], ciel[2], 255]);
         let donnees = carte.donnees.clone();
         let synchrone = cfg!(test) || std::env::var_os("FLOW_MAQUETTE_SYNC").is_some();
         if self.fabrique.is_none() && !synchrone {
+            crate::suivi::repere("maquette", false);
             self.fabrique = Some(crate::maquette::Fabrique::new(donnees.clone()));
         }
         let v = crate::banc::version_lieux();
@@ -319,7 +321,9 @@ impl Relief3d {
             self.banc = v;
             self.tuiles_maquette.clear();
         }
+        let attente = crate::suivi::tache_min("attente des données (image)", 5.0);
         let Ok(d) = donnees.read() else { return };
+        drop(attente);
         self.poser(&d);
         let mvp = self.mvp(zone.w / zone.h.max(1.0));
         // Les seules tuiles sélectionnées, à leur niveau ; sinon, celles de la vue

@@ -448,6 +448,8 @@ impl Renderer {
         let t = &mut tampons[i];
         t.vu = self.images_vues.get();
         if t.revision != m.revision {
+            let mut suivi = crate::suivi::tache_min("envoi tampon (GPU)", 2.0);
+            suivi.detail(format!("{} Ko", (m.sommets.len() + m.indices.len()) * 4 / 1024));
             (gl.glBindVertexArray)(t.vao);
             (gl.glBindBuffer)(ARRAY_BUFFER, t.vbo);
             (gl.glBufferData)(ARRAY_BUFFER, (m.sommets.len() * 4) as isize, m.sommets.as_ptr() as *const c_void, 0x88E8);
@@ -484,6 +486,8 @@ impl Renderer {
         (gl.glBindTexture)(TEXTURE_2D, e.2);
         let (w, h) = (img.largeur, img.hauteur);
         if e.1 != img.revision && img.pixels.len() >= (w * h * 4) as usize && w > 0 && h > 0 {
+            let mut suivi = crate::suivi::tache_min("envoi image (GPU)", 2.0);
+            suivi.detail(format!("{w}×{h}"));
             (gl.glPixelStorei)(0x0CF5, 4);
             if e.3 != (w, h) {
                 (gl.glTexImage2D)(TEXTURE_2D, 0, 0x8058, w as i32, h as i32, 0, 0x1908, UBYTE, img.pixels.as_ptr() as *const c_void);
@@ -510,6 +514,8 @@ impl Renderer {
         (gl.glBindTexture)(TABLEAU, m.1);
         let (l, n) = (p.image.largeur, p.couches.max(1));
         if m.0 != p.image.revision && p.image.pixels.len() >= (l * l * n * 4) as usize {
+            let mut suivi = crate::suivi::tache("envoi matières (GPU)");
+            suivi.detail(format!("{n} couches de {l}²"));
             (gl.glPixelStorei)(0x0CF5, 4);
             (gl.glTexImage3D)(TABLEAU, 0, 0x8058, l as i32, l as i32, n as i32, 0, 0x1908, UBYTE, p.image.pixels.as_ptr() as *const c_void);
             (gl.glPixelStorei)(0x0CF5, 1);
@@ -571,6 +577,7 @@ impl Renderer {
     /// Un terrain, dans son rectangle et la zone de découpe ; l'état de l'interface est
     /// rétabli ensuite.
     unsafe fn dessiner_terrain(&self, w: f32, h: f32, t: &Terrain3d, clip: Option<Rect>) {
+        let _suivi = crate::suivi::tache_min("rendu 3d", 30.0);
         let gl = &self.gl;
         let r = clip.map_or(t.rect, |c| t.rect.intersect(&c));
         if r.w < 1.0 || r.h < 1.0 || (t.morceaux.is_empty() && t.bati.is_empty()) {
