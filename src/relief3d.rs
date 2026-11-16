@@ -120,6 +120,20 @@ pub struct Relief3d {
     pub accent: [f32; 3],
     /// Les tuiles de la maquette montrées à la dernière image (pour le toucher).
     montrees: Vec<Cle>,
+    /// Le réseau des voies en surimpression, par tuile (`traces_reseau`), pour le réseau
+    /// d'adresse donnée ; et si son calcul a été lancé.
+    traces: HashMap<Cle, Vec<(Maillage3d, [f32; 3], f32)>>,
+    traces_de: usize,
+    reseau_lance: bool,
+    /// Les réglages des tracés (commande pilote `traces`) : la distance de la caméra à
+    /// sa cible en deçà de laquelle ils paraissent, et le nombre de tuiles sélectionnées
+    /// au plus ; et ce que la dernière image a tracé (tuiles, segments, d'où).
+    pub traces_tuiles: usize,
+    pub traces_bilan: String,
+    /// Les réglages de la surimpression (tracés et remblais), donnés par Lieux.
+    pub sur: Surimpression,
+    /// Les faces en surimpression du module du banc, par tuile (vide : rien).
+    faces: HashMap<Cle, Option<Maillage3d>>,
 }
 
 /// Une tuile de la maquette reçue de la fabrique.
@@ -141,7 +155,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new() }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default() }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -304,7 +318,7 @@ impl Relief3d {
     }
 
     /// Dessine le lieu de `carte` dans `zone` en Maquette : les tuiles demandées à la
-    /// fabrique (les plus grossières d'abord, et les ancêtres absents), quelques-unes
+    /// fabrique (la plus proche de la cible d'abord, chacune après ses ancêtres absents), quelques-unes
     /// prises par image ; en attendant, l'ancêtre le plus proche déjà fait.
     fn dessiner_maquette(&mut self, cx: &mut Cx, zone: Rect, carte: &mut Carte) {
         let _suivi = crate::suivi::tache_min("image maquette", 25.0);
@@ -320,6 +334,8 @@ impl Relief3d {
         if v != self.banc {
             self.banc = v;
             self.tuiles_maquette.clear();
+            self.traces.clear();
+            self.faces.clear();
         }
         let attente = crate::suivi::tache_min("attente des données (image)", 5.0);
         let Ok(d) = donnees.read() else { return };
@@ -333,31 +349,41 @@ impl Relief3d {
             v.sort();
             v
         } else {
-            self.choisir(&d, &mvp)
+            // De la plus proche du point visé (la cible, au sol) à la plus lointaine
+            let c = self.camera.cible;
+            let mut v: Vec<(f32, Cle)> = self.choisir(&d, &mvp).into_iter().map(|cle| {
+                let b = boite_tuile(&d, cle);
+                let dx = (b[0] - c[0]).max(0.0).max(c[0] - b[2]);
+                let dz = (b[1] - c[2]).max(0.0).max(c[2] - b[3]);
+                (dx * dx + dz * dz, cle)
+            }).collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            v.into_iter().map(|x| x.1).collect()
         };
         let perime = |t: &HashMap<Cle, Faite>, cle: Cle| t.get(&cle).is_none_or(|m| !carte.a_jour(m.morceau.faite, boite_tuile(&d, cle)));
-        let mut a_faire: Vec<(u8, usize, Cle)> = Vec::new();
-        for (rang, &cle) in voulues.iter().enumerate() {
+        // Dans l'ordre des voulues : chacune précédée de ses ancêtres absents, du plus
+        // grossier au plus fin (0/0/0, le fond, vient donc en premier)
+        let mut a_faire: Vec<Cle> = Vec::new();
+        for &cle in &voulues {
             if perime(&self.tuiles_maquette, cle) {
-                a_faire.push((cle.0, rang, cle));
                 let (z, i, j) = cle;
-                for k in (1..=z).filter(|_| !seules) {
+                for k in (1..=z).rev().filter(|_| !seules) {
                     let a = (z - k, i >> k, j >> k);
                     if !self.tuiles_maquette.contains_key(&a) {
-                        a_faire.push((a.0, rang, a));
+                        a_faire.push(a);
                     }
                 }
+                a_faire.push(cle);
             }
         }
-        a_faire.sort();
         // Les sélectionnées hors de la vue, après (pour leur contour et leur mesure)
         for &cle in &self.selection {
             if perime(&self.tuiles_maquette, cle) {
-                a_faire.push((cle.0, usize::MAX, cle));
+                a_faire.push(cle);
             }
         }
         let mut vues = HashSet::new();
-        let a_faire: Vec<(Cle, u64)> = a_faire.into_iter().filter(|x| vues.insert(x.2)).map(|x| (x.2, carte.compteur)).collect();
+        let a_faire: Vec<(Cle, u64)> = a_faire.into_iter().filter(|&x| vues.insert(x)).map(|x| (x, carte.compteur)).collect();
         // Les tuiles finies : quelques-unes par image (l'interface d'abord)
         let finies = match &self.fabrique {
             Some(f) => {
@@ -428,11 +454,36 @@ impl Relief3d {
                 choix.push(f.contour.clone());
             }
         }
+        // Les tuiles des tracés et celles des faces du banc : sur la sélection seule
+        // (`traces_tuiles` au plus) ; sinon, la caméra à moins de sa distance réglée de
+        // la cible, les tuiles voulues à moins de `rayon` × la distance de la caméra
+        let (pres_traces, pres_faces) = {
+            let c = self.camera.cible;
+            let r = self.camera.distance;
+            let Ok(d) = donnees.read() else { return };
+            let choisir = |distance: f32, rayon: f32| -> Vec<Cle> {
+                if seules {
+                    if voulues.len() <= self.traces_tuiles { voulues.clone() } else { Vec::new() }
+                } else if r <= distance {
+                    voulues.iter().copied().filter(|&cle| {
+                        let b = boite_tuile(&d, cle);
+                        let dx = (b[0] - c[0]).max(0.0).max(c[0] - b[2]);
+                        let dz = (b[1] - c[2]).max(0.0).max(c[2] - b[3]);
+                        dx.hypot(dz) <= r * rayon
+                    }).collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            (if self.sur.traces { choisir(self.sur.traces_distance, self.sur.traces_rayon) } else { Vec::new() }, if self.sur.remblai { choisir(self.sur.remblai_distance, self.sur.remblai_rayon) } else { Vec::new() })
+        };
+        let faces = self.faces_montrees(&pres_faces, carte.compteur);
+        let traces = self.traces_montrees(&donnees, &pres_traces, carte.compteur);
         self.montrees = montrees;
         self.dessinees = morceaux.len();
         self.bati_dessinees = 0;
         let dist = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: Vec::new(), blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes, placage: self.placage.clone() });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: faces, blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes, placage: self.placage.clone(), traces });
         if self.tuiles_maquette.len() > GARDES {
             let sel = &self.selection;
             let mut v: Vec<(u64, Cle)> = self.tuiles_maquette.iter().filter(|(k, _)| k.0 > 0 && !sel.contains(k)).map(|(k, m)| (m.morceau.vu, *k)).collect();
@@ -581,7 +632,7 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new(), placage: None });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new(), placage: None, traces: Vec::new() });
         // Les maillages qui n'ont pas servi depuis longtemps
         if self.batis.len() > GARDES / 2 {
             let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();
@@ -939,6 +990,257 @@ impl Decoupe {
         }
         (dehors, dedans)
     }
+}
+
+/// Le réseau des voies est tracé sur la maquette quand la caméra est à moins de
+/// `TRACES_DISTANCE` (m) de sa cible ; ou sur la sélection seule, d'au plus
+/// `TRACES_TUILES` tuiles.
+pub const TRACES_DISTANCE: f32 = 300.0;
+pub const TRACES_TUILES: usize = 4;
+/// Les réglages de la surimpression sur la maquette : les tracés du réseau et les
+/// faces du banc (les remblais), chacun montré ou non, avec la distance de la caméra
+/// à sa cible en deçà de laquelle il paraît (m) et son rayon autour de la cible (en
+/// fois cette distance).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Surimpression {
+    pub traces: bool,
+    pub traces_distance: f32,
+    pub traces_rayon: f32,
+    pub remblai: bool,
+    pub remblai_distance: f32,
+    pub remblai_rayon: f32,
+}
+
+impl Default for Surimpression {
+    fn default() -> Self {
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0 }
+    }
+}
+
+impl Surimpression {
+    /// « 1 300 1 1 600 2 » : tracés (0/1), distance, rayon ; remblais, de même.
+    pub fn lire(v: &[f32]) -> Option<Surimpression> {
+        let [t, td, tr, r, rd, rr] = v[..] else { return None };
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr })
+    }
+
+    pub fn ecrire(&self) -> String {
+        format!("{} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon)
+    }
+}
+
+/// Les tracés passent d'autant au-dessus de la chaussée (m).
+const TRACES_DESSUS: f32 = 1.0;
+/// La demi-largeur des croix des nœuds (m).
+const TRACES_BRAS: f32 = 1.5;
+
+impl Relief3d {
+    /// Le réseau nivelé en surimpression sur les tuiles voulues (pas sur les ancêtres
+    /// montrés à leur place en attendant), s'il y en a au plus
+    /// `TRACES_TUILES` : ses arêtes coupées à chaque tuile et ses nœuds, à
+    /// `TRACES_DESSUS` au-dessus de la chaussée. Rien n'entre dans les tuiles faites.
+    /// Le réseau est calculé à part la première fois (dans un fil) : en attendant, rien.
+    /// Oublie les tracés faits : ils seront redemandés.
+    pub fn refaire_traces(&mut self) {
+        self.traces.clear();
+        self.faces.clear();
+    }
+
+    /// Les faces en surimpression du module du banc sur les tuiles `pres` (les mêmes
+    /// que les tracés), s'il en fait.
+    fn faces_montrees(&mut self, pres: &[Cle], faite: u64) -> Vec<Maillage3d> {
+        if !crate::banc::faces_actives() {
+            return Vec::new();
+        }
+        let mut v = Vec::new();
+        for &cle in pres {
+            if !self.faces.contains_key(&cle) {
+                match crate::banc::faces_lieux(faite, cle).unwrap_or(Ok(None)) {
+                    Ok(Some((s, i))) => {
+                        self.revision += 1;
+                        let id = 0x6661_0000_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
+                        let m = (!i.is_empty()).then(|| Maillage3d { id, revision: self.revision, sommets: Arc::new(s), indices: Arc::new(i) });
+                        self.faces.insert(cle, m);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        self.faces.insert(cle, None);
+                    }
+                }
+            }
+            if let Some(Some(m)) = self.faces.get(&cle) {
+                v.push(m.clone());
+            }
+        }
+        if self.faces.len() > 256 {
+            self.faces.retain(|k, _| pres.contains(k));
+        }
+        v
+    }
+
+    fn traces_montrees(&mut self, donnees: &Arc<std::sync::RwLock<Donnees>>, montrees: &[Cle], faite: u64) -> Vec<(Maillage3d, [f32; 3], f32)> {
+        if montrees.is_empty() {
+            self.traces_bilan = "aucune tuile".into();
+            return Vec::new();
+        }
+        // Sur le banc, les tracés du module (s'il en fait)
+        if crate::banc::traces_actives() {
+            let mut v = Vec::new();
+            let (mut faites, mut attendues, mut segments) = (0, 0, 0);
+            for &cle in montrees {
+                if !self.traces.contains_key(&cle) {
+                    let r = crate::banc::traces_lieux(faite, cle).unwrap_or(Ok(None));
+                    match r {
+                        Ok(Some(traits)) => {
+                            self.revision += 1;
+                            let t = maillages_traits(&traits, cle, self.num, self.revision);
+                            self.traces.insert(cle, t);
+                        }
+                        Ok(None) => attendues += 1,
+                        Err(_) => {
+                            self.traces.insert(cle, Vec::new());
+                        }
+                    }
+                }
+                if let Some(t) = self.traces.get(&cle) {
+                    faites += 1;
+                    segments += t.iter().map(|m| m.0.indices.len() / 2).sum::<usize>();
+                    v.extend(t.iter().cloned());
+                }
+            }
+            self.traces_bilan = format!("banc : {faites} tuiles, {segments} segments, {attendues} en attente");
+            return v;
+        }
+        let Ok(d) = donnees.read() else { return Vec::new() };
+        let Some(r) = d.reseau_pret() else {
+            if !self.reseau_lance {
+                self.reseau_lance = true;
+                let donnees = donnees.clone();
+                let _ = std::thread::Builder::new().name("reseau".into()).spawn(move || {
+                    if let Ok(d) = donnees.read() {
+                        d.reseau();
+                    }
+                });
+            }
+            return Vec::new();
+        };
+        let adresse = Arc::as_ptr(&r) as usize;
+        if adresse != self.traces_de {
+            self.traces.clear();
+            self.traces_de = adresse;
+        }
+        let mut v = Vec::new();
+        for &cle in montrees {
+            if !self.traces.contains_key(&cle) {
+                self.revision += 1;
+                let t = traces_reseau(&r, boite_tuile(&d, cle), cle, self.num, self.revision);
+                self.traces.insert(cle, t);
+            }
+            v.extend(self.traces[&cle].iter().cloned());
+        }
+        if self.traces.len() > 256 {
+            self.traces.retain(|k, _| montrees.contains(k));
+        }
+        let segments: usize = v.iter().map(|m| m.0.indices.len() / 2).sum();
+        self.traces_bilan = format!("flow : {} tuiles, {segments} segments", montrees.len());
+        v
+    }
+}
+
+/// Les traits d'un module du banc en maillages (sommets de 9 flottants, normale vers le
+/// haut), un par groupe.
+fn maillages_traits(traits: &[flow_banc::Traits], cle: Cle, num: u64, revision: u64) -> Vec<(Maillage3d, [f32; 3], f32)> {
+    let base = 0x7462_0000_0000_0000u64 ^ (num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
+    traits
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.points.len() >= 2)
+        .map(|(k, t)| {
+            let n = t.points.len() / 2 * 2;
+            let s: Vec<f32> = t.points[..n].iter().flat_map(|p| [p[0], p[1], p[2], 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]).collect();
+            let i: Vec<u32> = (0..n as u32).collect();
+            (Maillage3d { id: base ^ ((k as u64 & 0xFF) << 48), revision, sommets: Arc::new(s), indices: Arc::new(i) }, t.couleur, t.epaisseur)
+        })
+        .collect()
+}
+
+/// Les couleurs des tracés : au sol, en pont, en tunnel ; et des nœuds.
+const TRACE_SOL: [f32; 3] = [1.0, 0.78, 0.05];
+const TRACE_PONT: [f32; 3] = [0.92, 0.2, 0.85];
+const TRACE_TUNNEL: [f32; 3] = [0.15, 0.75, 0.95];
+const TRACE_NOEUD: [f32; 3] = [0.9, 0.1, 0.1];
+
+/// Le segment p → q (x, z, h) coupé à la boîte b (Liang–Barsky), ou rien.
+fn couper(p: [f32; 3], q: [f32; 3], b: [f32; 4]) -> Option<([f32; 3], [f32; 3])> {
+    let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (pk, qk) in [(-dx, p[0] - b[0]), (dx, b[2] - p[0]), (-dz, p[1] - b[1]), (dz, b[3] - p[1])] {
+        if pk == 0.0 {
+            if qk < 0.0 {
+                return None;
+            }
+        } else {
+            let t = qk / pk;
+            if pk < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    if t0 > t1 {
+        return None;
+    }
+    let at = |t: f32| [p[0] + t * dx, p[1] + t * dz, p[2] + t * (q[2] - p[2])];
+    Some((at(t0), at(t1)))
+}
+
+/// Les tracés du réseau `r` dans la boîte `b` : un maillage de traits par passage, et
+/// les nœuds en croix.
+fn traces_reseau(r: &sage_reel::reseau::Reseau, b: [f32; 4], cle: Cle, num: u64, revision: u64) -> Vec<(Maillage3d, [f32; 3], f32)> {
+    use sage_reel::reseau::Passage;
+    // Un sommet de 9 flottants : position (x, h, z), normale vers le haut, le reste nul
+    let poser = |s: &mut Vec<f32>, i: &mut Vec<u32>, a: [f32; 3], c: [f32; 3]| {
+        let n = (s.len() / 9) as u32;
+        for p in [a, c] {
+            s.extend_from_slice(&[p[0], p[2] + TRACES_DESSUS, p[1], 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        i.extend_from_slice(&[n, n + 1]);
+    };
+    let mut listes: [(Vec<f32>, Vec<u32>); 4] = Default::default();
+    for a in &r.aretes {
+        let k = match a.passage {
+            Passage::Sol => 0,
+            Passage::Pont => 1,
+            Passage::Tunnel => 2,
+        };
+        for w in a.points.windows(2) {
+            if let Some((p, q)) = couper(w[0], w[1], b) {
+                let (s, i) = &mut listes[k];
+                poser(s, i, p, q);
+            }
+        }
+    }
+    // Les nœuds : une croix couchée
+    let bras = TRACES_BRAS;
+    for n in &r.noeuds {
+        let p = n.p;
+        if p[0] < b[0] || p[0] > b[2] || p[1] < b[1] || p[1] > b[3] {
+            continue;
+        }
+        let (s, i) = &mut listes[3];
+        poser(s, i, [p[0] - bras, p[1], p[2]], [p[0] + bras, p[1], p[2]]);
+        poser(s, i, [p[0], p[1] - bras, p[2]], [p[0], p[1] + bras, p[2]]);
+    }
+    let base = 0x7472_0000_0000_0000u64 ^ (num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
+    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0)];
+    listes
+        .into_iter()
+        .zip(reglages)
+        .enumerate()
+        .filter(|(_, ((_, i), _))| !i.is_empty())
+        .map(|(k, ((s, i), (c, e)))| (Maillage3d { id: base ^ ((k as u64 + 1) << 56), revision, sommets: Arc::new(s), indices: Arc::new(i) }, c, e))
+        .collect()
 }
 
 #[cfg(test)]

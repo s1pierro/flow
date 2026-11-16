@@ -6,7 +6,7 @@
 //! (une bibliothèque Rust ne se décharge pas sans risque) : leurs copies sont effacées
 //! au chargement suivant, leur mémoire reste jusqu'à la fin du processus.
 
-use flow_banc::{FnAbi, FnCommande, FnLiberer, FnLieuxLieu, FnLieuxTuile, FnPas, FnScene, SortieTuile, Tampon, ABI, SOMMET};
+use flow_banc::{FnAbi, FnCommande, FnLiberer, FnLieuxFaces, FnLieuxLieu, FnLieuxTraces, FnLieuxTuile, FnPas, FnScene, SortieTuile, Tampon, Traits, ABI, SOMMET};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -30,6 +30,10 @@ pub struct Charge {
     /// Ses fonctions de Lieux, s'il en a (`lieux!`) : il fabrique alors les tuiles de la
     /// maquette, quand Lieux est sur le banc.
     lieux: Option<(FnLieuxLieu, FnLieuxTuile)>,
+    /// Sa fonction des tracés en surimpression sur la maquette (`traces!`), s'il en a.
+    traces: Option<FnLieuxTraces>,
+    /// Sa fonction des faces en surimpression (`faces!`), s'il en a.
+    faces: Option<FnLieuxFaces>,
     /// La scène reçue : sommets (9 flottants), indices, et sa révision.
     pub sommets: std::sync::Arc<Vec<f32>>,
     pub indices: std::sync::Arc<Vec<u32>>,
@@ -48,6 +52,40 @@ pub struct Banc {
     pub version: u64,
     /// La version du lieu déjà donnée au module (chargement, `faite` de la carte).
     lieu_donne: Option<(u64, u64)>,
+    /// Le dossier de Flow du dernier chargement : l'état du banc y est retenu
+    /// (`banc/etat.txt`) pour être rétabli au prochain lancement.
+    flow: Option<PathBuf>,
+}
+
+/// Le fichier où l'état du banc est retenu, dans le dossier de Flow.
+fn fichier_etat(flow: &Path) -> PathBuf {
+    flow.join("banc").join("etat.txt")
+}
+
+impl Banc {
+    /// Retient le module chargé et si Lieux est sur le banc.
+    fn memoriser(&self) {
+        let (Some(f), Some(m)) = (&self.flow, &self.module) else { return };
+        let _ = std::fs::write(fichier_etat(f), format!("module = {}\nlieux = {}\n", m.nom, if self.lieux { "oui" } else { "non" }));
+    }
+}
+
+/// Au lancement (une fois) : recharge le module retenu et remet Lieux sur le banc s'il
+/// y était.
+pub fn retablir(flow: &Path) {
+    static FAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if FAIT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let Ok(t) = std::fs::read_to_string(fichier_etat(flow)) else { return };
+    let val = |k: &str| t.lines().filter_map(|l| l.split_once('=')).find(|(a, _)| a.trim() == k).map(|(_, v)| v.trim().to_string());
+    let Some(nom) = val("module").filter(|n| !n.is_empty()) else { return };
+    let mut b = banc();
+    if b.charger(flow, &nom).is_ok() && val("lieux").as_deref() == Some("oui") {
+        b.lieux = true;
+        b.version += 1;
+        b.noter("Lieux remis sur le banc (état du dernier lancement)");
+    }
 }
 
 pub fn banc() -> MutexGuard<'static, Banc> {
@@ -135,6 +173,8 @@ impl Banc {
                         scene: symbole(h, "banc_scene")?,
                         liberer: symbole(h, "banc_liberer")?,
                         lieux: symbole::<FnLieuxLieu>(h, "banc_lieux_lieu").ok().zip(symbole::<FnLieuxTuile>(h, "banc_lieux_tuile").ok()),
+                        traces: symbole::<FnLieuxTraces>(h, "banc_lieux_traces").ok(),
+                        faces: symbole::<FnLieuxFaces>(h, "banc_lieux_faces").ok(),
                         sommets: Default::default(),
                         indices: Default::default(),
                         revision: 0,
@@ -145,11 +185,19 @@ impl Banc {
         match r {
             Ok(mut m) => {
                 m.lire_scene();
-                let l = if m.lieux.is_some() { ", fabrique les tuiles des Lieux" } else { "" };
+                let mut l = String::new();
+                for (oui, quoi) in [(m.lieux.is_some(), "tuiles"), (m.traces.is_some(), "tracés"), (m.faces.is_some(), "faces")] {
+                    if oui {
+                        l += if l.is_empty() { ", Lieux : " } else { ", " };
+                        l += quoi;
+                    }
+                }
                 let t = format!("chargé {nom} (n° {}, {} triangles{l})", m.numero, m.indices.len() / 3);
                 self.module = Some(m);
                 self.version += 1;
                 self.lieu_donne = None;
+                self.flow = Some(flow.to_path_buf());
+                self.memoriser();
                 self.noter(&t);
                 Ok(t)
             }
@@ -225,6 +273,88 @@ pub fn tuile_lieux(d: &crate::carte::Donnees, faite: u64, cle: (u8, i32, i32)) -
     Some(r)
 }
 
+/// Lieux est-il sur le banc, avec un module qui fait les tracés ?
+pub fn traces_actives() -> bool {
+    let b = banc();
+    b.lieux && b.module.as_ref().is_some_and(|m| m.traces.is_some())
+}
+
+/// Lieux est-il sur le banc, avec un module qui fait des faces en surimpression ?
+pub fn faces_actives() -> bool {
+    let b = banc();
+    b.lieux && b.module.as_ref().is_some_and(|m| m.faces.is_some())
+}
+
+/// Les faces du module sur la tuile `cle` (sommets de 9 flottants : position, normale,
+/// couleur ; triangles) : comme `traces_lieux`.
+pub fn faces_lieux(faite: u64, cle: (u8, i32, i32)) -> Option<Result<Option<(Vec<f32>, Vec<u32>)>, String>> {
+    let (f, liberer, pret) = {
+        let b = banc();
+        let m = b.module.as_ref().filter(|_| b.lieux)?;
+        let f = m.faces?;
+        (f, m.liberer, b.lieu_donne == Some((m.numero, faite)))
+    };
+    if !pret {
+        return Some(Ok(None));
+    }
+    let (mut s, mut i) = (Tampon::VIDE, Tampon::VIDE);
+    let code = unsafe { f(cle.0, cle.1, cle.2, &mut s, &mut i) };
+    let r = unsafe {
+        match code {
+            0 => {
+                let sommets: Vec<f32> = s.octets().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                let indices: Vec<u32> = i.octets().chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                let n = (sommets.len() / SOMMET) as u32;
+                if indices.iter().all(|&k| k < n) {
+                    Ok(Some((sommets, indices)))
+                } else {
+                    Err("indices hors des sommets".to_string())
+                }
+            }
+            2 => Ok(None),
+            _ => Err(String::from_utf8_lossy(s.octets()).into_owned()),
+        }
+    };
+    unsafe {
+        liberer(s);
+        liberer(i);
+    }
+    if let Err(e) = &r {
+        banc().noter(format!("faces {cle:?} : {e}"));
+    }
+    Some(r)
+}
+
+/// Les tracés du module sur la tuile `cle`, si Lieux est sur le banc et que le module
+/// en fait : `Some(Ok(Some(traits)))`, `Some(Ok(None))` s'ils ne sont pas prêts (le
+/// lieu pas encore donné par la fabrique, ou un calcul en cours : redemander), l'erreur
+/// sinon ; `None` hors du banc (Flow fait les siens).
+pub fn traces_lieux(faite: u64, cle: (u8, i32, i32)) -> Option<Result<Option<Vec<Traits>>, String>> {
+    let (f, liberer, pret) = {
+        let b = banc();
+        let m = b.module.as_ref().filter(|_| b.lieux)?;
+        let f = m.traces?;
+        (f, m.liberer, b.lieu_donne == Some((m.numero, faite)))
+    };
+    if !pret {
+        return Some(Ok(None));
+    }
+    let mut t = Tampon::VIDE;
+    let code = unsafe { f(cle.0, cle.1, cle.2, &mut t) };
+    let r = unsafe {
+        match code {
+            0 => Ok(Some(flow_banc::traits_depuis_octets(t.octets()))),
+            2 => Ok(None),
+            _ => Err(String::from_utf8_lossy(t.octets()).into_owned()),
+        }
+    };
+    unsafe { liberer(t) };
+    if let Err(e) = &r {
+        banc().noter(format!("tracés {cle:?} : {e}"));
+    }
+    Some(r)
+}
+
 /// La version du banc pour Lieux : elle change quand ses tuiles sont à refaire.
 pub fn version_lieux() -> u64 {
     banc().version
@@ -263,6 +393,7 @@ pub fn piloter(flow: Option<&Path>, m: &[String]) -> Option<Result<String, Strin
             if b.lieux != v {
                 b.lieux = v;
                 b.version += 1;
+                b.memoriser();
             }
             let fabrique = b.module.as_ref().is_some_and(|x| x.lieux.is_some());
             Ok(match (v, fabrique) {

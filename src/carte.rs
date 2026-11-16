@@ -257,6 +257,11 @@ impl Donnees {
         }).clone()
     }
 
+    /// Le réseau nivelé s'il est déjà calculé (sans attendre).
+    pub fn reseau_pret(&self) -> Option<Arc<sage_reel::reseau::Reseau>> {
+        self.reseau.get().cloned()
+    }
+
     pub fn remblais(&self) -> Arc<crate::remblais::Remblais> {
         self.remblais.get_or_init(|| {
             let _t = crate::suivi::tache("remblais (calcul)");

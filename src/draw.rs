@@ -135,6 +135,9 @@ pub struct Terrain3d {
     pub defonces_aretes: Vec<Maillage3d>,
     /// Les textures des matières de la maquette (hors du rendu blanc), s'il y en a.
     pub placage: Option<Placage3d>,
+    /// Des traits en surimpression (sommets de 9 flottants, indices deux par deux), de
+    /// leur couleur et de leur épaisseur en pixels : le réseau des voies sur la maquette.
+    pub traces: Vec<(Maillage3d, [f32; 3], f32)>,
 }
 
 /// Les textures des matières de la maquette (`placage.rs`) : `couches` images carrées

@@ -892,7 +892,9 @@ pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec
     // La chaussée en volume sur le réseau nivelé (FLOW_SANS_CHAUSSEE=1 : sans),
     // seulement sur les tuiles assez fines pour qu'elle s'y voie (`chaussee::pour`) :
     // au-dessus, pas de voies du tout (la texture de la maquette ne les peint pas)
-    if !std::env::var("FLOW_SANS_CHAUSSEE").is_ok_and(|v| v == "1") && crate::chaussee::pour(d, cle) {
+    // Mise de côté le 2026-11-16 (le réseau est tracé en surimpression à la place) :
+    // FLOW_CHAUSSEE=1 pour la remettre
+    if std::env::var("FLOW_CHAUSSEE").is_ok_and(|v| v == "1") && crate::chaussee::pour(d, cle) {
         return crate::chaussee::tuile(d, cle);
     }
     let b = boite_tuile(d, cle);

@@ -207,6 +207,8 @@ pub struct Lieux {
     maquette3d: bool,
     /// En maquette : le suivi des tâches (`suivi`) par-dessus la vue.
     suivi3d: bool,
+    /// En maquette : les tracés du réseau et les remblais du banc en surimpression.
+    sur: crate::relief3d::Surimpression,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
     /// la carte changent).
     selection: crate::selection::Selection,
@@ -282,6 +284,7 @@ impl Default for Lieux {
             blanc3d: false,
             defonce3d: false,
             suivi3d: false,
+            sur: Default::default(),
             maquette3d: false,
             selection: Default::default(),
             resume: None,
@@ -322,6 +325,9 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     l.maquette3d = rendu.split_whitespace().any(|m| m == "maquette");
     l.defonce3d = rendu.split_whitespace().any(|m| m == "defonce");
     l.suivi3d = rendu.split_whitespace().any(|m| m == "suivi");
+    if let Some(s) = crate::relief3d::Surimpression::lire(&e.nombres("surimpression")) {
+        l.sur = s;
+    }
     // Les tuiles sélectionnées : « selection = niveau/i/j … »
     l.selection = crate::selection::Selection::lire(e.texte("selection").unwrap_or(""), e.texte("selection_seules") == Some("oui"));
     if let Some(o) = e.texte("ordre") {
@@ -1306,6 +1312,7 @@ impl Lieux {
             r.selection = self.selection.cles.clone();
         }
         r.seules = self.selection.seules;
+        r.sur = self.sur;
         r.placage = placage;
         let a = cx.couleurs().accent;
         r.accent = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
@@ -1638,6 +1645,27 @@ impl Lieux {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                // La surimpression sur la maquette : tracés du réseau, remblais du banc
+                if self.trois_d.is_some() && self.maquette3d {
+                    cx.section(&mut b, "Surimpression");
+                    let s = &mut self.sur;
+                    cx.toggle(&mut b, sub_id(base, 660), "Tracés des voies", &mut s.traces);
+                    if s.traces {
+                        cx.slider(&mut b, sub_id(base, 661), "Distance", &format!("{:.0} m", s.traces_distance), &mut s.traces_distance, 50.0, 3000.0);
+                        cx.slider(&mut b, sub_id(base, 662), "Rayon", &format!("× {:.1}", s.traces_rayon).replace('.', ","), &mut s.traces_rayon, 0.5, 4.0);
+                    }
+                    cx.toggle(&mut b, sub_id(base, 663), "Remblais (module du banc)", &mut s.remblai);
+                    if s.remblai {
+                        cx.slider(&mut b, sub_id(base, 664), "Distance", &format!("{:.0} m", s.remblai_distance), &mut s.remblai_distance, 50.0, 3000.0);
+                        cx.slider(&mut b, sub_id(base, 665), "Rayon", &format!("× {:.1}", s.remblai_rayon).replace('.', ","), &mut s.remblai_rayon, 0.5, 4.0);
+                    }
+                    cx.paragraph(&mut b, "Ils paraissent quand la caméra est à moins de la distance de son point visé, sur les tuiles à moins du rayon × cette distance.");
+                    if cx.button(&mut b, sub_id(base, 666), "Refaire") {
+                        if let Some(r) = self.trois_d.as_mut() {
+                            r.refaire_traces();
                         }
                     }
                 }
@@ -2305,6 +2333,36 @@ impl Contexte for Lieux {
                 }
                 Ok(format!("selection {}", self.selection.ecrire()))
             }
+            // Les tracés du réseau en surimpression : « traces » (bilan), « traces
+            // distance <m> », « traces tuiles <n> », « traces refaire »
+            "traces" => {
+                let Some(r) = self.trois_d.as_mut() else { return Some(Err("pas de 3D".into())) };
+                let n = m.get(2).and_then(|s| s.parse::<f32>().ok());
+                match (m.get(1).map(|s| s.as_str()), n) {
+                    (Some("distance"), Some(x)) => self.sur.traces_distance = x,
+                    (Some("tuiles"), Some(x)) => r.traces_tuiles = x as usize,
+                    (Some("rayon"), Some(x)) => self.sur.traces_rayon = x,
+                    (Some("oui"), _) => self.sur.traces = true,
+                    (Some("non"), _) => self.sur.traces = false,
+                    (Some("refaire"), _) => r.refaire_traces(),
+                    (None, _) => {}
+                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire]".into())),
+                }
+                Ok(format!("traces distance {} rayon {} tuiles {} · remblai distance {} rayon {} · {}", self.sur.traces_distance, self.sur.traces_rayon, r.traces_tuiles, self.sur.remblai_distance, self.sur.remblai_rayon, r.traces_bilan))
+            }
+            // Les faces du banc (remblais) : « remblai distance <m> », « remblai rayon <k> »
+            "remblai" => {
+                let n = m.get(2).and_then(|s| s.parse::<f32>().ok());
+                match (m.get(1).map(|s| s.as_str()), n) {
+                    (Some("distance"), Some(x)) => self.sur.remblai_distance = x,
+                    (Some("rayon"), Some(x)) => self.sur.remblai_rayon = x,
+                    (Some("oui"), _) => self.sur.remblai = true,
+                    (Some("non"), _) => self.sur.remblai = false,
+                    (None, _) => {}
+                    _ => return Some(Err("remblai [oui | non | distance <m> | rayon <k>]".into())),
+                }
+                Ok(format!("remblai {} distance {} rayon {}", self.sur.remblai, self.sur.remblai_distance, self.sur.remblai_rayon))
+            }
             "seules" => {
                 self.selection.seules = matches!(m.get(1).map(|s| s.as_str()), Some("oui" | "1" | "vrai"));
                 Ok(format!("seules {}", self.selection.seules))
@@ -2353,6 +2411,9 @@ impl Contexte for Lieux {
         }
         if self.selection.seules {
             e.mettre("selection_seules", "oui");
+        }
+        if self.sur != crate::relief3d::Surimpression::default() {
+            e.mettre("surimpression", self.sur.ecrire());
         }
         if let Some((m, n)) = &self.ligne {
             e.mettre("ligne", format!("{m} {n}"));

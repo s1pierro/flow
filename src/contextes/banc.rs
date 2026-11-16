@@ -135,6 +135,7 @@ impl Banc {
             defonces: Vec::new(),
             defonces_aretes: Vec::new(),
             placage: None,
+            traces: Vec::new(),
         });
         cx.clip(None);
     }

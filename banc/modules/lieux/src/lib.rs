@@ -12,16 +12,18 @@ use flow_banc::{lieux, module, Module, ModuleLieux, Scene, TuileFaite};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod nappe;
+mod traces;
 mod scene;
 use sage_reel::reseau;
 
 
 
 /// Le dernier lieu reçu, pour les commandes (le diagnostic du réseau).
-static LIEU: Mutex<Option<Arc<Donnees>>> = Mutex::new(None);
+pub(crate) static LIEU: Mutex<Option<Arc<Donnees>>> = Mutex::new(None);
 
 /// Les variantes de la fabrication des tuiles ; la première est celle de Flow.
-const VARIANTES: &[&str] = &["flow", "nu"];
+const VARIANTES: &[&str] = &["flow", "nu", "nappe"];
 static VARIANTE: AtomicUsize = AtomicUsize::new(0);
 
 struct Commandes {
@@ -51,7 +53,13 @@ impl Module for Commandes {
     fn commande(&mut self, m: &[&str]) -> Result<String, String> {
         match m[0] {
             "etat" => {}
+            "traces" => return traces::commande(m),
             "derniere" => {
+                if VARIANTES[VARIANTE.load(Ordering::Relaxed)] == "nappe" {
+                    let g = nappe::DERNIERE.lock().unwrap();
+                    let etapes: Vec<String> = g.0.iter().map(|(n, t)| format!("  {n} : {t:.2} s")).collect();
+                    return Ok(format!("{}\n{}", g.1, etapes.join("\n")));
+                }
                 let (n, s, t) = *flow::chaussee::DERNIERE.lock().unwrap();
                 return Ok(format!("dernière tuile : {n} rubans, {s} étapes sautées, {t:.2} s"));
             }
@@ -133,6 +141,7 @@ impl ModuleLieux for Fabrique {
         let d = self.donnees.as_ref().ok_or("pas de lieu")?;
         let (sommets, indices, pixels) = match VARIANTE.load(Ordering::Relaxed) {
             1 => nu(d, cle),
+            2 => nappe::tuile(d, cle),
 
             _ => {
                 let (s, i, p, _) = flow::maquette::fabriquer_avec_defonce(d, cle);
@@ -156,3 +165,5 @@ fn nu(d: &Donnees, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
 
 module!(Commandes);
 lieux!(Fabrique);
+flow_banc::traces!(traces::traces);
+flow_banc::faces!(traces::faces);

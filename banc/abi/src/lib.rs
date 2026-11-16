@@ -344,3 +344,121 @@ macro_rules! lieux {
 
 pub type FnLieuxLieu = unsafe extern "C" fn(*const u8, usize, *mut Tampon) -> i32;
 pub type FnLieuxTuile = unsafe extern "C" fn(u8, i32, i32, *mut SortieTuile) -> i32;
+
+// --- Tracés en surimpression sur la maquette des Lieux ---------------------------------
+
+/// Un groupe de traits d'une même couleur et d'une même épaisseur (pixels) : des
+/// segments, les points (x, hauteur, z) deux par deux.
+#[derive(Clone, Debug, Default)]
+pub struct Traits {
+    pub couleur: [f32; 3],
+    pub epaisseur: f32,
+    pub points: Vec<[f32; 3]>,
+}
+
+/// Les groupes en flottants : pour chacun r, g, b, épaisseur, nombre de points, puis
+/// les points.
+pub fn traits_en_octets(v: &[Traits]) -> Vec<u8> {
+    let mut f: Vec<f32> = Vec::new();
+    for t in v {
+        f.extend_from_slice(&[t.couleur[0], t.couleur[1], t.couleur[2], t.epaisseur, t.points.len() as f32]);
+        for p in &t.points {
+            f.extend_from_slice(p);
+        }
+    }
+    octets_f32(&f)
+}
+
+/// L'inverse de `traits_en_octets` (rien de ce qui déborde).
+pub fn traits_depuis_octets(o: &[u8]) -> Vec<Traits> {
+    let f: Vec<f32> = o.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let mut v = Vec::new();
+    let mut k = 0;
+    while k + 5 <= f.len() {
+        let n = f[k + 4] as usize;
+        if k + 5 + 3 * n > f.len() {
+            break;
+        }
+        let points = f[k + 5..k + 5 + 3 * n].chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        v.push(Traits { couleur: [f[k], f[k + 1], f[k + 2]], epaisseur: f[k + 3], points });
+        k += 5 + 3 * n;
+    }
+    v
+}
+
+/// Ce que rend la fonction des tracés d'un module.
+pub enum Traces {
+    /// Les traits de la tuile.
+    Faits(Vec<Traits>),
+    /// Pas encore (un calcul en cours) : Flow redemande plus tard.
+    PasPret,
+}
+
+/// Déclare la fonction des tracés `$f: fn((u8, i32, i32)) -> Result<Traces, String>` :
+/// les traits en surimpression sur une tuile de la maquette, quand Lieux est sur le
+/// banc. Appelée dans le fil de l'interface : elle doit être rapide (ou rendre
+/// `PasPret` et calculer à part). Elle ne passe pas par l'état de `lieux!` (pris par
+/// la fabrique pendant qu'elle fait une tuile).
+#[macro_export]
+macro_rules! traces {
+    ($f:path) => {
+        /// # Safety
+        /// Appelée par Flow. 0 : faits ; 2 : pas prêt ; 1 : erreur (dans `sortie`).
+        #[no_mangle]
+        pub unsafe extern "C" fn banc_lieux_traces(z: u8, i: i32, j: i32, sortie: *mut $crate::Tampon) -> i32 {
+            let r = std::panic::catch_unwind(|| $f((z, i, j)));
+            let (code, o) = match r {
+                Ok(Ok($crate::Traces::Faits(v))) => (0, $crate::traits_en_octets(&v)),
+                Ok(Ok($crate::Traces::PasPret)) => (2, Vec::new()),
+                Ok(Err(e)) => (1, e.into_bytes()),
+                Err(_) => (1, b"le module a panique (traces)".to_vec()),
+            };
+            if !sortie.is_null() {
+                *sortie = $crate::Tampon::de(o);
+            }
+            code
+        }
+    };
+}
+
+pub type FnLieuxTraces = unsafe extern "C" fn(u8, i32, i32, *mut Tampon) -> i32;
+
+// --- Faces en surimpression sur la maquette des Lieux ---------------------------------
+
+/// Ce que rend la fonction des faces d'un module : des triangles aux sommets de
+/// `SOMMET` flottants (position, normale, couleur), comme la scène.
+pub enum Faces {
+    Faites(Scene),
+    PasPret,
+}
+
+/// Déclare la fonction des faces `$f: fn((u8, i32, i32)) -> Result<Faces, String>` :
+/// des volumes en surimpression sur une tuile de la maquette (jamais incorporés aux
+/// tuiles), quand Lieux est sur le banc. Comme `traces!` : dans le fil de
+/// l'interface, rapide ou `PasPret`.
+#[macro_export]
+macro_rules! faces {
+    ($f:path) => {
+        /// # Safety
+        /// Appelée par Flow. 0 : faites ; 2 : pas prêt ; 1 : erreur (dans `sommets`).
+        #[no_mangle]
+        pub unsafe extern "C" fn banc_lieux_faces(z: u8, i: i32, j: i32, sommets: *mut $crate::Tampon, indices: *mut $crate::Tampon) -> i32 {
+            let r = std::panic::catch_unwind(|| $f((z, i, j)));
+            let (code, s, ind) = match r {
+                Ok(Ok($crate::Faces::Faites(sc))) => (0, sc.sommets.iter().flat_map(|x| x.to_le_bytes()).collect(), sc.indices.iter().flat_map(|x| x.to_le_bytes()).collect()),
+                Ok(Ok($crate::Faces::PasPret)) => (2, Vec::new(), Vec::new()),
+                Ok(Err(e)) => (1, e.into_bytes(), Vec::new()),
+                Err(_) => (1, b"le module a panique (faces)".to_vec(), Vec::new()),
+            };
+            if !sommets.is_null() {
+                *sommets = $crate::Tampon::de(s);
+            }
+            if !indices.is_null() {
+                *indices = $crate::Tampon::de(ind);
+            }
+            code
+        }
+    };
+}
+
+pub type FnLieuxFaces = unsafe extern "C" fn(u8, i32, i32, *mut Tampon, *mut Tampon) -> i32;

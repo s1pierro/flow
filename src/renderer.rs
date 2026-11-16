@@ -700,6 +700,30 @@ impl Renderer {
             (gl.glDepthFunc)(LESS);
             (gl.glLineWidth)(1.0);
         }
+        // Les traits en surimpression (le réseau des voies), de leur couleur
+        if !t.traces.is_empty() {
+            (gl.glDisable)(POLYGON_OFFSET_FILL);
+            (gl.glUseProgram)(self.ligne_program);
+            let u = &self.u_ligne;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform3f)(u[1], t.oeil[0], t.oeil[1], t.oeil[2]);
+            (gl.glUniform3f)(u[3], t.ciel[0], t.ciel[1], t.ciel[2]);
+            (gl.glUniform2f)(u[4], t.brume[0], t.brume[1]);
+            (gl.glUniform1f)(u[5], 0.0);
+            (gl.glDepthFunc)(LEQUAL);
+            for (m, c, e) in &t.traces {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                (gl.glUniform3f)(u[2], c[0], c[1], c[2]);
+                (gl.glLineWidth)(*e);
+                let (vao, n) = self.tampon_de(m, 9);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(LINES, n, UINT, std::ptr::null());
+            }
+            (gl.glDepthFunc)(LESS);
+            (gl.glLineWidth)(1.0);
+        }
         // L'eau de la maquette, semi-transparente, par-dessus le lit
         if !t.eaux.is_empty() {
             (gl.glDisable)(POLYGON_OFFSET_FILL);

@@ -11,6 +11,8 @@ crate-type = ["cdylib"]
 flow = { path = "../../.." }
 flow-banc = { path = "../../abi" }
 sage-reel = { path = "../../../../sage/modules/sage-reel" }
+i_overlay = "9"
+i_triangle = "0.51"
 
 # Flow (la dépendance) est compilé une fois ; seul ce module se recompile ensuite
 [profile.release]

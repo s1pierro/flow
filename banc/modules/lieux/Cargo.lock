@@ -14,6 +14,8 @@ version = "0.1.0"
 dependencies = [
  "flow",
  "flow-banc",
+ "i_overlay",
+ "i_triangle",
  "sage-reel",
 ]
 
@@ -43,7 +45,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "flow"
-version = "0.92.0"
+version = "0.100.0"
 dependencies = [
  "boolmesh",
  "flow-banc",
