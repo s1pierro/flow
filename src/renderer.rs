@@ -704,6 +704,13 @@ impl Renderer {
     }
 
     /// Efface l'écran avec la couleur `fond`, puis dessine l'interface.
+    /// Les pixels RGBA de l'image dessinée (`w` × `h`, de bas en haut).
+    pub fn lire_pixels(&self, w: usize, h: usize) -> Vec<u8> {
+        let mut px = vec![0u8; w * h * 4];
+        unsafe { (self.gl.glReadPixels)(0, 0, w as i32, h as i32, 0x1908, 0x1401, px.as_mut_ptr() as *mut _) };
+        px
+    }
+
     pub fn draw(&self, w: f32, h: f32, fond: Color, dl: &DrawList, text: &mut Text) {
         let gl = &self.gl;
         unsafe {

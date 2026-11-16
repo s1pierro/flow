@@ -38,6 +38,7 @@ pub mod mixage;
 pub mod operations;
 pub mod orchestre;
 pub mod paquets;
+pub mod pilote;
 pub mod plan;
 pub mod parametres;
 pub mod magneto;

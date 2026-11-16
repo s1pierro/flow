@@ -332,17 +332,9 @@ pub fn profondeur_lit(d: &Donnees, rives: &Rives, x: f32, z: f32) -> f32 {
 /// La terre en (x, z) : le relief sans les points d'eau ; sous la crête et le bord du
 /// remblai d'une berge, abaissé sous son dessus (le remblai, uni au volume de la
 /// tuile, s'y montre seul).
-pub fn terre(d: &Donnees, rives: &Rives, x: f32, z: f32) -> f32 {
-    let r = relief_sec(d, x, z);
-    if !rives.vectorielles() {
-        return r;
-    }
-    let (dd, q, c) = rives.berge_crete(x, z);
-    let p = profil(d.lieu.niveau, q, c);
-    if dd >= p[3][0] {
-        return r;
-    }
-    r.min(hauteur_profil(&p, dd) - ENFOUI)
+pub fn terre(d: &Donnees, _rives: &Rives, x: f32, z: f32) -> f32 {
+    // Le remblai des quais (`remblais`), uni ensuite, se montre là où il dépasse
+    relief_sec(d, x, z)
 }
 
 /// La hauteur du dessus en (x, z) : le relief ; sous l'eau, le lit, creusé sous le
@@ -829,135 +821,133 @@ pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec
     // Le solide uni au remblai de ses berges, puis creusé de ses lits (la défonce
     // coupe aussi ce que le remblai avance dans l'eau), ses plans hachés par les
     // opérations redevenus simples
-    let f = crate::dissolution::dissoudre(&creuser(remblayer(d, cle, solide(d, cle)), &def));
+    let rem = remblai_morceaux(d, cle);
+    let epa = epaulement_morceaux(d, cle);
+    let mut etapes: Vec<(crate::booleens::Op, &Forme)> = rem.iter().map(|m| (crate::booleens::Op::Union, m)).collect();
+    etapes.extend(epa.iter().map(|m| (crate::booleens::Op::Difference, m)));
+    etapes.push((crate::booleens::Op::Difference, &def));
+    let f = crate::dissolution::dissoudre(&composer(solide(d, cle), &etapes));
     let (v, ind) = habiller(d, &f, b);
     (v, ind, texture(d, b), def)
 }
 
-/// Le solide de la tuile uni au remblai de ses berges ; tel quel si l'union échoue.
-pub fn remblayer(d: &Donnees, cle: Cle, f: Forme) -> Forme {
-    let (r, _) = remblai(d, cle);
-    if r.vide() {
-        return f;
+/// `f`, puis les `etapes` à la suite (`booleens::enchainer`, sans repasser par les
+/// formes) ; tel quel si rien ne marche. Avec FLOW_TRACE_DEFONCE, le volume avant et
+/// après, et les étapes sautées.
+fn composer(f: Forme, etapes: &[(crate::booleens::Op, &Forme)]) -> Forme {
+    let trace = std::env::var_os("FLOW_TRACE_DEFONCE").is_some();
+    match crate::booleens::enchainer(&f, etapes) {
+        Ok((c, sautees)) => {
+            if trace {
+                eprintln!("composer : volume {:.0} -> {:.0} m3, {} étapes, {sautees} sautées", f.volume(), c.volume(), etapes.len());
+            }
+            c
+        }
+        Err(e) => {
+            if trace {
+                eprintln!("composer : échec : {e}");
+            }
+            f
+        }
     }
-    crate::booleens::operation(&f, &r, crate::booleens::Op::Union).unwrap_or(f)
 }
 
-/// Le recul du mur du remblai dans l'eau (m) : pas de face confondue avec la berge du
-/// solide de la tuile.
-const AVANCE: f32 = 0.1;
-/// L'allongement de chaque morceau de remblai à ses bouts (m) : ils se chevauchent.
-const ALLONGE: f32 = 0.3;
+/// Le solide de la tuile uni au remblai de ses quais.
+pub fn remblayer(d: &Donnees, cle: Cle, f: Forme) -> Forme {
+    let rem = remblai_morceaux(d, cle);
+    let etapes: Vec<(crate::booleens::Op, &Forme)> = rem.iter().map(|m| (crate::booleens::Op::Union, m)).collect();
+    composer(f, &etapes)
+}
 
-/// Le remblai des berges qui touchent la tuile `cle` : le long de chaque berge, côté
-/// terre, un volume de la coupe `profil` (son type et sa crête, point par point). Une
-/// berge se découpe en morceaux droits (les côtés de l'anneau d'OSM, redécoupés en
-/// stations) : chacun est un volume simple, fermé ; ils sont unis, puis coupés à la
-/// tuile (un millimètre en deçà de son bord : pas de face confondue avec ses murs).
-/// Rend le remblai et le nombre d'unions qui ont échoué (leur morceau est laissé).
-pub fn remblai(d: &Donnees, cle: Cle) -> (Forme, usize) {
+/// Les remblais des quais qui touchent la tuile `cle` (`remblais` : un volume par
+/// contour, extrudé de sous le lit à la hauteur du quai), chacun coupé à la tuile (un
+/// millimètre en deçà de son bord : pas de face confondue avec ses murs).
+pub fn remblai_morceaux(d: &Donnees, cle: Cle) -> Vec<Forme> {
     use crate::booleens::{operation, Op};
     let (xs, zs) = grille(d, cle);
     if xs.len() < 2 || zs.len() < 2 {
-        return (Forme::default(), 0);
+        return Vec::new();
     }
     let bt = [xs[0], zs[0], xs[xs.len() - 1], zs[zs.len() - 1]];
-    let niveau = d.lieu.niveau;
-    let types = d.berges();
-    let mut morceaux: Vec<Forme> = Vec::new();
-    for g in types.iter().flatten() {
-        let m = g.points.len();
-        if m < 2 || g.terre.len() != m {
+    let bas = d.lieu.niveau - PROFONDEUR - 1.0;
+    let rem = d.remblais();
+    let mut v = Vec::new();
+    for c in &rem.contours {
+        let b = c.boite;
+        if b[2] < bt[0] || b[0] > bt[2] || b[3] < bt[1] || b[1] > bt[3] {
             continue;
         }
-        // Les suites de côtés de même normale (à moins de 0,8° : deux morceaux presque
-        // alignés auraient des murs presque confondus, que l'union réussit mal), à
-        // partir d'un changement de normale
-        let pareil = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1] > 0.9999;
-        let debut = (0..m).find(|&k| !pareil(g.terre[k], g.terre[(k + m - 1) % m])).unwrap_or(0);
-        let mut k = 0;
-        while k < m {
-            let a = (debut + k) % m;
-            let mut fin = k + 1;
-            while fin < m && pareil(g.terre[(debut + fin) % m], g.terre[a]) {
-                fin += 1;
-            }
-            let stations: Vec<usize> = (k..=fin).map(|j| (debut + j) % m).collect();
-            k = fin;
-            let pts: Vec<[f32; 2]> = stations.iter().map(|&i| g.points[i]).collect();
-            let large = TALUS + PLAT + (g.crete.iter().cloned().fold(niveau, f32::max) - niveau + PROFONDEUR + 1.0) / PENTE_REMBLAI + 2.0;
-            let b = pts.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]);
-            if b[2] + large < bt[0] || b[0] - large > bt[2] || b[3] + large < bt[1] || b[1] - large > bt[3] {
-                continue;
-            }
-            let morceau = troncon(&pts, &stations.iter().map(|&i| profil(niveau, g.quai[i], g.crete[i])).collect::<Vec<_>>(), g.terre[a]);
-            if !morceau.vide() {
-                morceaux.push(morceau);
+        let vol = rem.volume(c, bas);
+        if vol.vide() {
+            continue;
+        }
+        let haut = vol.sommets.iter().map(|p| p[1]).fold(bas, f32::max) + 10.0;
+        let e = 0.001;
+        let boite = pave([bt[0] + e, bas - 2.0, bt[1] + e], [bt[2] - e, haut, bt[3] - e]);
+        if let Ok(m) = operation(&vol, &boite, Op::Intersection) {
+            if !m.vide() {
+                v.push(m);
             }
         }
     }
-    if morceaux.is_empty() {
+    v
+}
+
+/// Les épaulements des quais qui touchent la tuile `cle` (`remblais` : un volume par
+/// contour, du quai jusqu'au-dessus du relief), chacun coupé à la tuile élargie d'un
+/// mètre (ôtés du solide, ils peuvent déborder).
+pub fn epaulement_morceaux(d: &Donnees, cle: Cle) -> Vec<Forme> {
+    use crate::booleens::{operation, Op};
+    // Pour les essais : FLOW_SANS_EPAULEMENT=1 le retire
+    if std::env::var("FLOW_SANS_EPAULEMENT").is_ok_and(|v| v == "1") {
+        return Vec::new();
+    }
+    let b = boite_tuile(d, cle);
+    let rem = d.remblais();
+    let mut v = Vec::new();
+    for c in &rem.epaulements {
+        let bc = c.boite;
+        if bc[2] < b[0] || bc[0] > b[2] || bc[3] < b[1] || bc[1] > b[3] {
+            continue;
+        }
+        // Le dessus : au-dessus de tout le relief de la tuile qu'il couvre
+        let mut haut = d.lieu.niveau;
+        for a in &c.anneaux {
+            for p in a {
+                haut = haut.max(relief_sec(d, p[0], p[1]));
+            }
+        }
+        let haut = haut + 20.0;
+        let vol = rem.volume_epaulement(c, haut);
+        if vol.vide() {
+            continue;
+        }
+        let boite = pave([b[0] - 1.0, d.lieu.niveau - PROFONDEUR - 10.0, b[1] - 1.0], [b[2] + 1.0, haut + 1.0, b[3] + 1.0]);
+        if let Ok(m) = operation(&vol, &boite, Op::Intersection) {
+            if !m.vide() {
+                v.push(m);
+            }
+        }
+    }
+    v
+}
+
+/// Le remblai de la tuile `cle` en une forme (ses morceaux unis) et le nombre d'unions
+/// sautées (pour les essais).
+pub fn remblai(d: &Donnees, cle: Cle) -> (Forme, usize) {
+    let mut m = remblai_morceaux(d, cle);
+    if m.is_empty() {
         return (Forme::default(), 0);
     }
-    let mut echecs = 0;
-    let mut r = morceaux.swap_remove(0);
-    for p in &morceaux {
-        match operation(&r, p, Op::Union) {
-            Ok(u) => r = u,
-            Err(_) => echecs += 1,
-        }
-    }
-    let haut = r.sommets.iter().map(|p| p[1]).fold(niveau, f32::max) + 10.0;
-    let e = 0.001;
-    let boite = pave([bt[0] + e, niveau - PROFONDEUR - 3.0, bt[1] + e], [bt[2] - e, haut, bt[3] - e]);
-    match operation(&r, &boite, Op::Intersection) {
-        Ok(c) => (c, echecs),
-        Err(_) => (Forme::default(), echecs + 1),
-    }
+    let premier = m.remove(0);
+    let etapes: Vec<(crate::booleens::Op, &Forme)> = m.iter().map(|x| (crate::booleens::Op::Union, x)).collect();
+    crate::booleens::enchainer(&premier, &etapes).unwrap_or((premier, m.len()))
 }
 
 /// Un pavé fermé, faces dehors.
 fn pave(a: [f32; 3], b: [f32; 3]) -> Forme {
     let p = |i: usize| [if i & 1 == 0 { a[0] } else { b[0] }, if i & 2 == 0 { a[1] } else { b[1] }, if i & 4 == 0 { a[2] } else { b[2] }];
     let mut f = Forme { sommets: (0..8).map(p).collect(), faces: vec![vec![0, 4, 6, 2], vec![1, 3, 7, 5], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 2, 3, 1], vec![4, 5, 7, 6]] };
-    if f.volume() < 0.0 {
-        f.faces.iter_mut().for_each(|p| p.reverse());
-    }
-    f
-}
-
-/// Le volume d'un morceau droit de remblai : les coupes `profils` posées aux stations
-/// `pts` (alignées), tournées vers la terre `n`, reliées de l'une à l'autre ; le
-/// morceau est allongé de `ALLONGE` à ses bouts, et son mur avance de `AVANCE` dans
-/// l'eau.
-fn troncon(pts: &[[f32; 2]], profils: &[[[f32; 2]; 5]], n: [f32; 2]) -> Forme {
-    let s = pts.len();
-    if s < 2 {
-        return Forme::default();
-    }
-    let (dx, dz) = (pts[s - 1][0] - pts[0][0], pts[s - 1][1] - pts[0][1]);
-    let l = (dx * dx + dz * dz).sqrt();
-    if l < 1e-3 {
-        return Forme::default();
-    }
-    let dir = [dx / l, dz / l];
-    let mut f = Forme::default();
-    for (k, (p, pr)) in pts.iter().zip(profils).enumerate() {
-        let e = if k == 0 { -ALLONGE } else if k == s - 1 { ALLONGE } else { 0.0 };
-        for (j, c) in pr.iter().enumerate() {
-            let o = if j < 2 { c[0] - AVANCE } else { c[0] };
-            f.sommets.push([p[0] + n[0] * o + dir[0] * e, c[1], p[1] + n[1] * o + dir[1] * e]);
-        }
-    }
-    let id = |k: usize, j: usize| (k * 5 + j % 5) as u32;
-    f.faces.push((0..5).map(|j| id(0, j)).collect());
-    f.faces.push((0..5).rev().map(|j| id(s - 1, j)).collect());
-    for k in 0..s - 1 {
-        for j in 0..5 {
-            f.faces.push(vec![id(k, j), id(k + 1, j), id(k + 1, j + 1)]);
-            f.faces.push(vec![id(k, j), id(k + 1, j + 1), id(k, j + 1)]);
-        }
-    }
     if f.volume() < 0.0 {
         f.faces.iter_mut().for_each(|p| p.reverse());
     }
@@ -1343,7 +1333,7 @@ mod tests {
         // Il reste dans la tuile, côté terre (son mur avance à peine dans l'eau)
         let b = boite_tuile(&d, cle);
         assert!(r.sommets.iter().all(|p| p[0] >= b[0] && p[0] <= b[2] && p[2] >= b[1] && p[2] <= b[3]));
-        let dedans = |p: &[f32; 3]| p[0].abs() < 100.0 - AVANCE - 1e-3 && p[2].abs() < 100.0 - AVANCE - 1e-3;
+        let dedans = |p: &[f32; 3]| p[0].abs() < 100.0 - crate::remblais::REMBLAI_EAU - 1.0 && p[2].abs() < 100.0 - crate::remblais::REMBLAI_EAU - 1.0;
         assert!(!r.sommets.iter().any(dedans), "{:?}", r.sommets.iter().find(|p| dedans(p)));
         let f = remblayer(&d, cle, solide(&d, cle));
         assert!(f.volume() > solide(&d, cle).volume() * 0.99);

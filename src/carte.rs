@@ -60,7 +60,7 @@ pub struct Donnees {
     /// Le type des berges (quai ou naturelle), calculé au premier besoin.
     berges: std::sync::OnceLock<Arc<crate::berges::Types>>,
     /// Les contours à plat des remblais des quais, calculés au premier besoin.
-    remblais: std::sync::OnceLock<Arc<Vec<crate::remblais::Contour>>>,
+    remblais: std::sync::OnceLock<Arc<crate::remblais::Remblais>>,
 }
 
 /// La boîte (x0, z0, x1, z1) d'une suite de points.
@@ -225,7 +225,7 @@ impl Donnees {
 
     /// Les contours à plat des remblais des quais (`remblais::calculer`), au premier
     /// besoin.
-    pub fn remblais(&self) -> Arc<Vec<crate::remblais::Contour>> {
+    pub fn remblais(&self) -> Arc<crate::remblais::Remblais> {
         self.remblais.get_or_init(|| Arc::new(crate::remblais::calculer(self))).clone()
     }
 
@@ -282,6 +282,8 @@ pub const COURS_EAU: [f32; 3] = [0.20, 0.45, 0.80];
 pub const BERGE: [f32; 3] = [0.16, 0.16, 0.19];
 /// Le contour du remblai d'un quai : un brun.
 pub const REMBLAI: [f32; 3] = [0.62, 0.36, 0.12];
+/// Le contour de l'épaulement des quais sur la carte.
+const EPAULEMENT: [f32; 3] = [0.55, 0.20, 0.70];
 /// Une berge naturelle : un vert vif, qui tranche sur les prés de la rive.
 pub const BERGE_NATURELLE: [f32; 3] = [0.15, 0.88, 0.20];
 /// La largeur du trait des berges sur la carte (m), au moins `BERGE_PX` pixels.
@@ -739,8 +741,10 @@ fn peindre_cours_eau(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
             peindre_trait(px, &mut cov, &[p, q], b, m, (BERGE_LARGEUR / m / 2.0).max(BERGE_PX / 2.0), c, 1.0, None);
         }
     }
-    // Le contour à plat du remblai des quais, d'un trait fin brun
-    for r in d.remblais().iter() {
+    // Le contour à plat du remblai des quais, d'un trait fin brun ; celui de leur
+    // épaulement, d'un trait fin violet
+    let rem = d.remblais();
+    for (r, couleur) in rem.contours.iter().map(|r| (r, REMBLAI)).chain(rem.epaulements.iter().map(|r| (r, EPAULEMENT))) {
         let bt = r.boite;
         if bt[2] < large[0] || bt[0] > large[2] || bt[3] < large[1] || bt[1] > large[3] {
             continue;
@@ -750,7 +754,7 @@ fn peindre_cours_eau(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32) {
             if let Some(&p) = a.first() {
                 f.push(p);
             }
-            peindre_trait(px, &mut cov, &f, b, m, (0.4 / m / 2.0).max(0.8), REMBLAI, 1.0, None);
+            peindre_trait(px, &mut cov, &f, b, m, (0.4 / m / 2.0).max(0.8), couleur, 1.0, None);
         }
     }
 }

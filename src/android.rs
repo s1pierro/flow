@@ -191,7 +191,7 @@ fn render_loop() -> Result<(), String> {
             let mut s = SHARED.lock().unwrap();
             loop {
                 let drawing = !egl.surface.is_null();
-                let busy = drawing && (again || app.as_ref().is_some_and(|(a, _)| a.animating()));
+                let busy = drawing && (again || crate::pilote::occupe() || app.as_ref().is_some_and(|(a, _)| a.animating()));
                 if s.window_changed || s.redraw || busy || (drawing && !s.events.is_empty()) || (drawing && minute != Some(heure().1)) {
                     break;
                 }
@@ -300,11 +300,19 @@ fn render_loop() -> Result<(), String> {
                 ui.event(e, t + d);
             }
         }
+        // Et ceux du pilote (commandes venues du bus d'Android)
+        {
+            let t = now();
+            for e in crate::pilote::evenements() {
+                ui.event(e, t);
+            }
+        }
         ui.horloge(now());
         let dt = last.elapsed().as_secs_f32().min(0.05);
         last = Instant::now();
 
         let (w, h) = egl.size();
+        crate::pilote::traiter(app, w, h, dp);
         dl.clear();
         let mut cx = Cx { ui, text: &mut text, dl: &mut dl, dp, theme: Default::default(), palette: None };
         let scene = app.frame(&mut cx, Rect::new(0.0, 0.0, w, h), dt);
@@ -327,6 +335,7 @@ fn render_loop() -> Result<(), String> {
             }
         }
         render.draw(w, h, scene.fond, &dl, &mut text);
+        crate::pilote::apres_dessin(w as usize, h as usize, || render.lire_pixels(w as usize, h as usize));
         egl.swap();
         // Après une rotation, la nouvelle taille n'est connue qu'ici ; et un appui change
         // l'état après le dessin du widget, qu'il faut redessiner à jour.

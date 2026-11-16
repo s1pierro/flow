@@ -37,6 +37,15 @@ fn interface(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
     cx.section(b, "ESPACE DE TRAVAIL");
     cx.paragraph(b, "Full flow : les fenêtres se partagent tout l'espace. Free flow : chaque fenêtre flotte à sa place, comme sur un bureau ; tirez sa barre pour la déplacer, sa poignée pour la redimensionner, touchez-la pour la passer devant.");
     cx.toggle(b, sub_id(scroll, 90), "Free flow : fenêtres libres", &mut c.libre);
+    cx.section(b, "PILOTAGE");
+    cx.paragraph(b, "Laisser une autre application (Debian, par Termux) piloter Flow par le bus d'Android : ouvrir des contextes, toucher l'écran, faire des captures. Chaque commande doit porter le jeton écrit dans Flow/banc/jeton, tiré au hasard à chaque armement. Désarmé à chaque lancement.");
+    let mut arme = crate::pilote::arme();
+    cx.toggle(b, sub_id(scroll, 91), "Piloter depuis Debian", &mut arme);
+    if arme != crate::pilote::arme() {
+        if let Err(e) = crate::pilote::armer(arme, c.dossier.as_deref()) {
+            crate::android::log(&format!("pilotage : {e}"));
+        }
+    }
     let t = &mut c.theme;
     cx.section(b, "COMMANDES");
     let shown = format!("{:.0} dp", t.commande);

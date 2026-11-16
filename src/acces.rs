@@ -257,6 +257,17 @@ pub unsafe fn demander(env: *mut c_void, activite: Obj, sdk: i32) -> bool {
 /// s'y attache pour les API qui l'exigent (ouvrir un flux réseau par `libmediandk`).
 static VM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Un texte Java (`jstring`) en texte Rust, avec l'`env` d'un appel natif.
+pub unsafe fn lire_jstring(env: *mut c_void, o: Obj) -> Option<String> {
+    Jni { env }.lire_texte(o)
+}
+
+/// Un texte Rust en texte Java (`jstring`), avec l'`env` d'un appel natif ; nul en cas
+/// d'échec.
+pub unsafe fn jstring(env: *mut c_void, s: &str) -> Obj {
+    Jni { env }.texte16(s).unwrap_or(std::ptr::null_mut())
+}
+
 pub fn noter_vm(vm: *mut c_void) {
     VM.store(vm as usize, std::sync::atomic::Ordering::Relaxed);
 }

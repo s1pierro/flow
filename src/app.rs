@@ -268,6 +268,36 @@ impl App {
         }
     }
 
+    /// Pour le pilote : chaque fenêtre placée, une ligne : numéro, contexte, cadre (x y
+    /// largeur hauteur, en pixels), document.
+    pub fn decrire_fenetres(&self) -> String {
+        let mut r = String::new();
+        for p in self.surface.placees() {
+            let (cle, doc) = match self.fenetres.get(&p.id) {
+                Some(i) => (i.cle(), i.document().map(|d| d.display().to_string()).unwrap_or_default()),
+                None => ("?", String::new()),
+            };
+            let ligne = format!("fenetre {} {} {:.0} {:.0} {:.0} {:.0} {}", p.id, cle, p.cadre.x, p.cadre.y, p.cadre.w, p.cadre.h, doc);
+            r.push_str(ligne.trim_end());
+            r.push('\n');
+        }
+        r
+    }
+
+    /// Pour le pilote : ouvre le contexte `cle` (avec ce document) dans la plus grande
+    /// fenêtre.
+    pub fn piloter_contexte(&mut self, cle: &str, document: Option<&str>) -> Result<(), String> {
+        let vue = contextes::indice(cle).ok_or(format!("contexte inconnu : {cle}"))?;
+        let cle = contextes::genre(vue).cle;
+        let p = self.surface.placees().iter().max_by(|a, b| (a.cadre.w * a.cadre.h).total_cmp(&(b.cadre.w * b.cadre.h))).map(|p| p.id).ok_or("aucune fenêtre")?;
+        let mut etat = Etat::default();
+        if let Some(d) = document {
+            etat.mettre("document", d);
+        }
+        self.commun.demandes.push(Demande::Ouvrir { depuis: p, cle, etat });
+        Ok(())
+    }
+
     /// (Re)lit l'historique des radios, rangé à côté des réglages.
     pub fn historique_en(&mut self, chemin: PathBuf) {
         self.commun.historique = crate::radio::Historique::ouvrir(chemin);

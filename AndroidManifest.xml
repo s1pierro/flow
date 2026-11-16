@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="fr.s1pierro.flow"
-    android:versionCode="83"
-    android:versionName="0.76">
+    android:versionCode="85"
+    android:versionName="0.78">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="30" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
@@ -59,5 +59,11 @@
         <receiver
             android:name="fr.s1pierro.flow.Installation"
             android:exported="false" />
+
+        <!-- Le pilotage depuis une autre application (Termux) : armé dans les
+             Paramètres, chaque commande porte le jeton tiré à l'armement -->
+        <receiver
+            android:name="fr.s1pierro.flow.Pilote"
+            android:exported="true" />
     </application>
 </manifest>

@@ -5,16 +5,34 @@
 //! arrondis. Les morceaux (un quadrilatère par côté, un éventail par sommet) sont
 //! réunis par `i_overlay` : les recouvrements (un décrochement du quai) sont résolus à
 //! plat, il reste un polygone simple par tronçon (avec ses trous éventuels). Ce contour
-//! sera extrudé en un seul volume.
+//! est extrudé en un seul volume (`Remblais::volume`) : son plan triangulé par
+//! `i_triangle`, le dessus à la hauteur du quai, le dessous sous le lit, des murs sur
+//! son pourtour.
 
 use crate::berges::Berge;
+use crate::booleens::Forme;
 use crate::carte::Donnees;
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::float::simplify::SimplifyShape;
+use i_triangle::float::triangulatable::Triangulatable;
+use std::collections::HashMap;
 
 /// Le remblai déborde de la ligne de berge d'autant vers l'eau et vers la terre (m).
 pub const REMBLAI_EAU: f32 = 2.0;
 pub const REMBLAI_TERRE: f32 = 2.9;
+/// Le quai : sa hauteur au-dessus de la crête de la berge (le relief à 8 m de la rive,
+/// lissé ; réglable). Le dessus du remblai la dépasse de `REMBLAI_HAUT` ;
+/// l'épaulement, plus large que lui vers la terre, l'arase à la hauteur du quai.
+pub const DECALAGE_QUAI: f32 = 0.0;
+pub const REMBLAI_HAUT: f32 = 1.0;
+/// L'épaulement des quais : la terre arasée à la hauteur du quai sur `EPAULEMENT`
+/// mètres derrière sa ligne (au-delà de la largeur du remblai vers la terre) ; sa
+/// bande déborde de `EPAULEMENT_EAU` dans l'eau, au-delà du remblai : elle l'englobe
+/// tout entier (la défonce passe ensuite dans l'eau).
+pub const EPAULEMENT: f32 = 3.0;
+pub const EPAULEMENT_EAU: f32 = REMBLAI_EAU + 0.5;
+/// La case de l'index des stations des quais (m).
+const CASE: f32 = 16.0;
 /// Un tronçon ouvert est prolongé d'autant à chaque bout (m).
 const PROLONGE: f32 = 0.5;
 /// Chaque côté chevauche ses voisins d'autant (m).
@@ -34,18 +52,133 @@ pub struct Contour {
     pub boite: [f32; 4],
 }
 
-/// Les contours des remblais de tous les quais du lieu : les morceaux de tous les
-/// tronçons réunis d'un coup (deux tronçons qui se touchent, d'anneaux voisins, ne
-/// font qu'un remblai).
-pub fn calculer(d: &Donnees) -> Vec<Contour> {
+/// Les remblais des quais du lieu : leurs contours, et les stations des quais (point,
+/// crête) indexées par case, pour la hauteur de leur dessus.
+#[derive(Debug, Default)]
+pub struct Remblais {
+    pub contours: Vec<Contour>,
+    /// Les contours de l'épaulement des quais : la bande de `EPAULEMENT` mètres derrière
+    /// la ligne du quai, arasée à sa hauteur.
+    pub epaulements: Vec<Contour>,
+    stations: HashMap<(i32, i32), Vec<([f32; 2], f32)>>,
+}
+
+/// Les remblais de tous les quais du lieu : les morceaux de tous les tronçons réunis
+/// d'un coup (deux tronçons qui se touchent, d'anneaux voisins, ne font qu'un
+/// remblai).
+pub fn calculer(d: &Donnees) -> Remblais {
     let types = d.berges();
     let mut morceaux = Vec::new();
+    let mut epaulement = Vec::new();
+    let mut stations: HashMap<(i32, i32), Vec<([f32; 2], f32)>> = HashMap::new();
     for g in types.iter().flatten() {
+        let m = g.points.len();
         for t in troncons(g) {
-            morceaux.extend(morceaux_troncon(g, &t));
+            morceaux.extend(morceaux_troncon(g, &t, REMBLAI_EAU, REMBLAI_TERRE));
+            epaulement.extend(morceaux_troncon(g, &t, EPAULEMENT_EAU, EPAULEMENT));
+            for &k in &t.cotes {
+                for i in [k, (k + 1) % m] {
+                    let p = g.points[i];
+                    stations.entry(case(p)).or_default().push((p, g.crete[i]));
+                }
+            }
         }
     }
-    reunir(morceaux)
+    Remblais { contours: reunir(morceaux), epaulements: reunir(epaulement), stations }
+}
+
+fn case(p: [f32; 2]) -> (i32, i32) {
+    ((p[0] / CASE).floor() as i32, (p[1] / CASE).floor() as i32)
+}
+
+impl Remblais {
+    /// La hauteur du dessus du remblai en `p` : celle du quai à la station la plus
+    /// proche, plus `REMBLAI_HAUT`.
+    pub fn hauteur(&self, p: [f32; 2]) -> Option<f32> {
+        self.quai(p).map(|h| h + REMBLAI_HAUT)
+    }
+
+    /// La hauteur du quai en `p` : la crête à la station la plus proche, plus
+    /// `DECALAGE_QUAI`.
+    pub fn quai(&self, p: [f32; 2]) -> Option<f32> {
+        let (ci, cj) = case(p);
+        for r in 1..6 {
+            let mut best: Option<(f32, f32)> = None;
+            for i in ci - r..=ci + r {
+                for j in cj - r..=cj + r {
+                    for &(q, c) in self.stations.get(&(i, j)).into_iter().flatten() {
+                        let d2 = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2);
+                        if best.is_none_or(|b| d2 < b.0) {
+                            best = Some((d2, c));
+                        }
+                    }
+                }
+            }
+            if let Some((_, c)) = best {
+                return Some(c + DECALAGE_QUAI);
+            }
+        }
+        None
+    }
+
+    /// Le volume du remblai de contour `c` : son plan triangulé, le dessus à la hauteur
+    /// du quai (point par point), le dessous à `bas`, des murs sur les côtés de bord. Une
+    /// variété fermée, faces dehors ; vide si la triangulation échoue.
+    pub fn volume(&self, c: &Contour, bas: f32) -> Forme {
+        extruder(c, |q| self.hauteur(q).unwrap_or(bas + 1.0).max(bas + 0.5), |_| bas)
+    }
+
+    /// Le volume de l'épaulement de contour `c` : le dessous à la hauteur du quai
+    /// (point par point), le dessus à `haut`. Ôté au solide, il arase la terre et le
+    /// remblai à la hauteur du quai.
+    pub fn volume_epaulement(&self, c: &Contour, haut: f32) -> Forme {
+        extruder(c, |_| haut, |q| self.quai(q).unwrap_or(haut - 1.0).min(haut - 0.5))
+    }
+}
+
+/// Le contour `c` extrudé : son plan triangulé (`i_triangle`), le dessus à `dessus(p)`,
+/// le dessous à `dessous(p)`, des murs sur les côtés de bord. Une variété fermée, faces
+/// dehors ; vide si la triangulation échoue.
+pub fn extruder(c: &Contour, dessus: impl Fn([f32; 2]) -> f32, dessous: impl Fn([f32; 2]) -> f32) -> Forme {
+    {
+        let forme: Vec<Vec<[f64; 2]>> = c.anneaux.iter().map(|a| a.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
+        let t = forme.triangulate().to_triangulation::<u32>();
+        let n = t.points.len() as u32;
+        if n < 3 || t.indices.len() < 3 {
+            return Forme::default();
+        }
+        let mut f = Forme::default();
+        for p in &t.points {
+            let q = [p[0] as f32, p[1] as f32];
+            f.sommets.push([q[0], dessus(q), q[1]]);
+        }
+        for p in &t.points {
+            let q = [p[0] as f32, p[1] as f32];
+            f.sommets.push([q[0], dessous(q), q[1]]);
+        }
+        // Les triangles du plan : vus d'en haut dans le sens direct (x, z), donc
+        // tournés vers le bas en 3D (y vers le haut, z vers le bas de l'écran) ; on
+        // corrige l'orientation à la fin par le signe du volume
+        let mut aretes: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in t.indices.chunks(3) {
+            let (a, b, c) = (tri[0], tri[1], tri[2]);
+            f.faces.push(vec![a, b, c]);
+            f.faces.push(vec![c + n, b + n, a + n]);
+            for (u, v) in [(a, b), (b, c), (c, a)] {
+                *aretes.entry((u, v)).or_insert(0) += 1;
+            }
+        }
+        // Les murs : sur les côtés de bord (sans leur retourné), dans le sens du dessus
+        for &(u, v) in aretes.keys() {
+            if !aretes.contains_key(&(v, u)) {
+                f.faces.push(vec![v, u, u + n, v + n]);
+            }
+        }
+        if f.volume() < 0.0 {
+            f.faces.iter_mut().for_each(|p| p.reverse());
+        }
+        f
+    }
 }
 
 /// Les tronçons de quai d'une berge : des suites de côtés (le côté `k` va du point `k`
@@ -121,12 +254,12 @@ fn eventail(p: [f32; 2], a: [f32; 2], b: [f32; 2], r: f32) -> Option<Vec<[f64; 2
 /// Le contour du remblai d'un tronçon : ses morceaux réunis.
 #[cfg(test)]
 fn contour(g: &Berge, t: &Troncon) -> Vec<Contour> {
-    reunir(morceaux_troncon(g, t))
+    reunir(morceaux_troncon(g, t, REMBLAI_EAU, REMBLAI_TERRE))
 }
 
 /// Les morceaux du remblai d'un tronçon : un quadrilatère par côté, un éventail
 /// arrondi de chaque côté à chaque sommet intérieur.
-fn morceaux_troncon(g: &Berge, t: &Troncon) -> Vec<Vec<[f64; 2]>> {
+fn morceaux_troncon(g: &Berge, t: &Troncon, vers_eau: f32, vers_terre: f32) -> Vec<Vec<[f64; 2]>> {
     let m = g.points.len();
     let mut morceaux: Vec<Vec<[f64; 2]>> = Vec::new();
     let pt = |p: [f32; 2], n: [f32; 2], o: f32| [(p[0] + n[0] * o) as f64, (p[1] + n[1] * o) as f64];
@@ -143,7 +276,7 @@ fn morceaux_troncon(g: &Berge, t: &Troncon) -> Vec<Vec<[f64; 2]>> {
         let (a, b) = (if i == 0 && !t.fermee { PROLONGE } else { CHEVAUCHE }, if i == dernier && !t.fermee { PROLONGE } else { CHEVAUCHE });
         p = [p[0] - u[0] * a, p[1] - u[1] * a];
         q = [q[0] + u[0] * b, q[1] + u[1] * b];
-        if let Some(c) = direct(vec![pt(p, n, -REMBLAI_EAU), pt(q, n, -REMBLAI_EAU), pt(q, n, REMBLAI_TERRE), pt(p, n, REMBLAI_TERRE)]) {
+        if let Some(c) = direct(vec![pt(p, n, -vers_eau), pt(q, n, -vers_eau), pt(q, n, vers_terre), pt(p, n, vers_terre)]) {
             morceaux.push(c);
         }
     }
@@ -154,8 +287,8 @@ fn morceaux_troncon(g: &Berge, t: &Troncon) -> Vec<Vec<[f64; 2]>> {
         let p = g.points[b];
         let (na, nb) = (g.terre[a], g.terre[b]);
         let eau = |n: [f32; 2]| [-n[0], -n[1]];
-        morceaux.extend(eventail(p, na, nb, REMBLAI_TERRE));
-        morceaux.extend(eventail(p, eau(na), eau(nb), REMBLAI_EAU));
+        morceaux.extend(eventail(p, na, nb, vers_terre));
+        morceaux.extend(eventail(p, eau(na), eau(nb), vers_eau));
     }
     morceaux
 }
@@ -215,6 +348,32 @@ mod tests {
                 assert!(!croise(ext[i], ext[(i + 1) % n], ext[j], ext[(j + 1) % n]), "côtés {i} et {j}");
             }
         }
+    }
+
+    #[test]
+    fn le_remblai_extrude_est_un_volume_ferme() {
+        let g = berge_a_decrochement();
+        let t = Troncon { cotes: (0..5).collect(), fermee: false };
+        let contours = contour(&g, &t);
+        let mut stations: HashMap<(i32, i32), Vec<([f32; 2], f32)>> = HashMap::new();
+        for p in &g.points {
+            stations.entry(case(*p)).or_default().push((*p, 12.0));
+        }
+        let r = Remblais { contours, epaulements: Vec::new(), stations };
+        let f = r.volume(&r.contours[0], 5.0);
+        assert!(f.volume() > 0.0);
+        // Fermé : chaque côté une fois dans chaque sens
+        let mut cotes = HashMap::new();
+        for p in &f.faces {
+            for k in 0..p.len() {
+                *cotes.entry((p[k], p[(k + 1) % p.len()])).or_insert(0) += 1;
+            }
+        }
+        assert!(cotes.iter().all(|(&(a, b), &n)| n == 1 && cotes.get(&(b, a)) == Some(&1)));
+        assert!(f.sommets.iter().any(|p| (p[1] - 12.0 - REMBLAI_HAUT).abs() < 1e-4) && f.sommets.iter().any(|p| p[1] == 5.0));
+        // Les booléens le prennent
+        let boite = crate::booleens::operation(&f, &f, crate::booleens::Op::Intersection);
+        assert!(boite.is_ok(), "{boite:?}");
     }
 
     #[test]

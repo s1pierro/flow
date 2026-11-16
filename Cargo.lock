@@ -34,11 +34,12 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "flow"
-version = "0.76.0"
+version = "0.78.0"
 dependencies = [
  "boolmesh",
  "fontdue",
  "i_overlay",
+ "i_triangle",
  "sage-reel",
 ]
 
@@ -116,6 +117,17 @@ name = "i_tree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "048af31de955890c62a8506fec511335a5089e91e1c516537add16f96c507d84"
+
+[[package]]
+name = "i_triangle"
+version = "0.51.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5810bd8c70d8eeb3b0cdf997d98576a244c3c4353e09aaf90ee1374cfdcff9ba"
+dependencies = [
+ "i_key_sort",
+ "i_overlay",
+ "i_tree",
+]
 
 [[package]]
 name = "libm"
