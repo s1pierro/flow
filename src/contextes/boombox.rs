@@ -73,7 +73,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
 }
 
 /// Joue un flux et le place en tête de l'historique.
-fn jouer(c: &mut Commun, adresse: &str) {
+pub fn jouer(c: &mut Commun, adresse: &str) {
     let adresse = adresse.trim().to_string();
     if adresse.is_empty() {
         return;
@@ -97,8 +97,20 @@ pub fn veiller_au_lancement(c: &Commun) {
     }
 }
 
+/// Commence un enregistrement du flux en cours (celui qui joue, ou en veille) dans
+/// `Music/Boombox`, avec `passe_s` secondes du tampon : le fichier, ou l'erreur.
+pub fn commencer_enregistrement(c: &Commun, passe_s: f32) -> Result<PathBuf, String> {
+    let (Some(url), Some(d)) = (source(), dossier(c)) else {
+        return Err("rien à enregistrer : lancez un flux".into());
+    };
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let ((j, mo, a), (h, mi)) = (crate::android::date_de(t), crate::android::heure_de(t));
+    let nom = format!("{}-{a:04}-{mo:02}-{j:02}-{h:02}{mi:02}", magneto::nom_de(&url));
+    magneto().commencer(&d, &nom, passe_s)
+}
+
 /// Le flux dont on peut enregistrer : celui qui joue, ou celui en veille.
-fn source() -> Option<String> {
+pub fn source() -> Option<String> {
     let l = radio::lecteur();
     l.adresse.clone().filter(|_| l.actif()).or_else(|| l.veille.clone())
 }
@@ -107,14 +119,7 @@ impl Boombox {
     /// Commence un enregistrement du flux en cours, avec `passe_s` secondes du tampon.
     fn enregistrer(&mut self, c: &Commun, passe_s: f32) {
         self.choix = false;
-        let (Some(url), Some(d)) = (source(), dossier(c)) else {
-            self.note = Some("Rien à enregistrer : lancez un flux.".into());
-            return;
-        };
-        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let ((j, mo, a), (h, mi)) = (crate::android::date_de(t), crate::android::heure_de(t));
-        let nom = format!("{}-{a:04}-{mo:02}-{j:02}-{h:02}{mi:02}", magneto::nom_de(&url));
-        self.note = match magneto().commencer(&d, &nom, passe_s) {
+        self.note = match commencer_enregistrement(c, passe_s) {
             Ok(_) => None,
             Err(e) => Some(format!("Enregistrement impossible : {e}")),
         };

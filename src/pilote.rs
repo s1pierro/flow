@@ -19,6 +19,7 @@
 //! - `capture [nom]` : l'écran en PNG dans `Flow/banc/captures/` ; rend son chemin ;
 //! - `toucher <x> <y> [durée ms]` : un doigt posé puis levé ;
 //! - `glisser <x1> <y1> <x2> <y2> [durée ms]` : un doigt qui glisse ;
+//! - `radio …`, `enregistrer …`, `mixeur …` : l'audio (`pilote_audio`) ;
 //! - toute autre commande est proposée aux contextes ouverts (`Contexte::piloter`) ;
 //!   Lieux : `vue3d [lacet tangage distance x y z]`, `vue2d x z échelle`, `carte`,
 //!   `rendu [maquette] [blanc] [defonce]`, `selection [n/i/j …]`, `seules oui|non`,
@@ -239,9 +240,9 @@ fn executer(app: &mut App, m: &[String], w: f32, h: f32, dp: f32, tx: &Sender<St
             d.push_back((Event::Up { id: DOIGT + 1 }, t + Duration::from_secs_f32(duree + 0.02)));
             Ok(Some(format!("glisser {x1} {y1} -> {x2} {y2}")))
         }
-        autre => match app.piloter_fenetres(m) {
+        autre => match crate::pilote_audio::executer(&mut app.commun, m).or_else(|| app.piloter_fenetres(m)) {
             Some(r) => r.map(Some),
-            None => Err(format!("commande inconnue : {autre} (ping, etat, contexte, capture, toucher, glisser, ou une commande d'un contexte ouvert)")),
+            None => Err(format!("commande inconnue : {autre} (ping, etat, contexte, capture, toucher, glisser, radio, enregistrer, mixeur, ou une commande d'un contexte ouvert)")),
         },
     }
 }
