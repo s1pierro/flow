@@ -553,3 +553,199 @@ impl Reseau {
         s
     }
 }
+
+// --- Étape 2 : les contraintes de hauteur -------------------------------------------
+
+/// Le gabarit sous un ouvrage (m), et l'épaisseur d'un tablier ou d'une dalle de
+/// tunnel : l'écart de hauteur minimal entre deux voies qui se croisent dénivelées.
+pub const GABARIT: f32 = 4.5;
+pub const EPAISSEUR: f32 = 1.0;
+/// Le tirant d'air d'un pont sur l'eau (m), sous son tablier.
+pub const TIRANT_D_AIR: f32 = 4.0;
+
+/// Un point d'une arête : (arête, segment, avancée sur le segment de 0 à 1).
+pub type Ou = (usize, usize, f32);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Genre {
+    /// Un pont (ou un pont implicite) sur une voie.
+    PontSurVoie,
+    /// Un tunnel sous une voie.
+    TunnelSousVoie,
+    /// Un pont sur l'eau : un croisement avec un cours d'eau, ou un point de pont au-dessus
+    /// d'une surface d'eau.
+    PontSurEau,
+}
+
+/// Une contrainte : `haut` doit passer au moins `ecart` au-dessus de `bas` (une voie) ou
+/// de `plancher` (l'eau : `bas` est alors vide).
+#[derive(Clone, Debug)]
+pub struct Contrainte {
+    pub genre: Genre,
+    pub haut: Ou,
+    pub bas: Option<Ou>,
+    pub plancher: f32,
+    pub ecart: f32,
+    /// Le haut est une voie au sol : il lui faudra un pont implicite.
+    pub implicite: bool,
+}
+
+impl Reseau {
+    pub fn hauteur(&self, (a, s, u): Ou) -> f32 {
+        let p = &self.aretes[a].points;
+        p[s][2] + (p[s + 1][2] - p[s][2]) * u
+    }
+
+    pub fn point(&self, (a, s, u): Ou) -> [f32; 3] {
+        let p = &self.aretes[a].points;
+        entre(p[s], p[s + 1], u)
+    }
+
+    /// Ce qu'il manque à une contrainte pour être tenue (0 si elle l'est).
+    pub fn manque(&self, c: &Contrainte) -> f32 {
+        let bas = c.bas.map_or(c.plancher, |b| self.hauteur(b));
+        (bas + c.ecart - self.hauteur(c.haut)).max(0.0)
+    }
+}
+
+/// Les contraintes de hauteur du réseau : chaque croisement dénivelé (sans nœud commun),
+/// chaque croisement avec un cours d'eau à ciel ouvert, chaque point de pont au-dessus
+/// de l'eau.
+pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
+    let mut v = Vec::new();
+    let ecart = GABARIT + EPAISSEUR;
+    // Les segments des arêtes, par case
+    let mut cases: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    for (k, a) in r.aretes.iter().enumerate() {
+        for i in 0..a.points.len() - 1 {
+            let (p, q) = (a.points[i], a.points[i + 1]);
+            let (c0, c1) = (case(p[0].min(q[0]), p[1].min(q[1])), case(p[0].max(q[0]), p[1].max(q[1])));
+            for ci in c0.0..=c1.0 {
+                for cj in c0.1..=c1.1 {
+                    cases.entry((ci, cj)).or_default().push((k, i));
+                }
+            }
+        }
+    }
+    // 1. Les croisements entre voies
+    let mut vus = std::collections::HashSet::new();
+    for liste in cases.values() {
+        for (x, &(k1, s1)) in liste.iter().enumerate() {
+            for &(k2, s2) in &liste[x + 1..] {
+                if k1 == k2 {
+                    continue;
+                }
+                let (a1, a2) = (&r.aretes[k1], &r.aretes[k2]);
+                // Deux arêtes qui partagent un nœud et s'y touchent ne se croisent pas
+                let Some((u1, u2)) = croise(a1.points[s1], a1.points[s1 + 1], a2.points[s2], a2.points[s2 + 1]) else { continue };
+                if !vus.insert(((k1, s1).min((k2, s2)), (k1, s1).max((k2, s2)))) {
+                    continue;
+                }
+                let (o1, o2) = ((k1, s1, u1), (k2, s2, u2));
+                let (h1, h2) = (r.hauteur(o1), r.hauteur(o2));
+                use Passage::*;
+                // Qui passe dessus : le pont, puis le sol, puis le tunnel ; à passage égal,
+                // le plus haut aujourd'hui
+                let rang = |p: Passage| match p {
+                    Pont => 2,
+                    Sol => 1,
+                    Tunnel => 0,
+                };
+                let premier_dessus = match rang(a1.passage).cmp(&rang(a2.passage)) {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Less => false,
+                    std::cmp::Ordering::Equal => h1 >= h2,
+                };
+                let ((haut, ph), (bas, pb)) = if premier_dessus { ((o1, a1.passage), (o2, a2.passage)) } else { ((o2, a2.passage), (o1, a1.passage)) };
+                let genre = if pb == Tunnel && ph != Pont { Genre::TunnelSousVoie } else { Genre::PontSurVoie };
+                v.push(Contrainte { genre, haut, bas: Some(bas), plancher: 0.0, ecart, implicite: ph == Sol && genre == Genre::PontSurVoie });
+            }
+        }
+    }
+    // 2. Les cours d'eau à ciel ouvert : la voie passe au-dessus de l'eau, tirant d'air
+    //    et tablier ; l'eau est au niveau du lieu dans la surface d'eau, ailleurs au plus
+    //    bas du relief à 10 m autour
+    let niveau_eau = |x: f32, z: f32| -> f32 {
+        if l.eau(x as f64, z as f64) > 0.5 {
+            return l.niveau;
+        }
+        let mut m = f32::MAX;
+        for dx in [-10.0f32, 0.0, 10.0] {
+            for dz in [-10.0f32, 0.0, 10.0] {
+                m = m.min(l.relief((x + dx) as f64, (z + dz) as f64) as f32);
+            }
+        }
+        m
+    };
+    for ce in l.cours_eau.iter().filter(|c| !c.souterrain) {
+        for w in ce.points.windows(2) {
+            let (c3, d3) = ([w[0][0], w[0][1], 0.0], [w[1][0], w[1][1], 0.0]);
+            let (c0, c1) = (case(c3[0].min(d3[0]), c3[1].min(d3[1])), case(c3[0].max(d3[0]), c3[1].max(d3[1])));
+            let mut vu = std::collections::HashSet::new();
+            for ci in c0.0..=c1.0 {
+                for cj in c0.1..=c1.1 {
+                    for &(k, s) in cases.get(&(ci, cj)).into_iter().flatten() {
+                        let a = &r.aretes[k];
+                        if a.passage == Passage::Tunnel || !vu.insert((k, s)) {
+                            continue;
+                        }
+                        let Some((u, _)) = croise(a.points[s], a.points[s + 1], c3, d3) else { continue };
+                        let p = entre(a.points[s], a.points[s + 1], u);
+                        v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, s, u), bas: None, plancher: niveau_eau(p[0], p[1]), ecart: TIRANT_D_AIR + EPAISSEUR, implicite: a.passage == Passage::Sol });
+                    }
+                }
+            }
+        }
+    }
+    // 3. Les points des ponts au-dessus de la surface d'eau (la Seine, sur toute la
+    //    traversée)
+    for (k, a) in r.aretes.iter().enumerate().filter(|(_, a)| a.passage == Passage::Pont) {
+        for i in 0..a.points.len() - 1 {
+            let p = a.points[i];
+            if l.eau(p[0] as f64, p[1] as f64) > 0.5 {
+                v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, i, 0.0), bas: None, plancher: l.niveau, ecart: TIRANT_D_AIR + EPAISSEUR, implicite: false });
+            }
+        }
+    }
+    v
+}
+
+/// Le résumé des contraintes : combien de chaque genre, combien ne sont pas tenues par
+/// les hauteurs d'aujourd'hui, et de combien.
+pub fn resume_contraintes(r: &Reseau, v: &[Contrainte]) -> String {
+    let mut s = vec![format!("{} contraintes de hauteur", v.len())];
+    for (g, nom) in [(Genre::PontSurVoie, "pont sur une voie"), (Genre::TunnelSousVoie, "tunnel sous une voie"), (Genre::PontSurEau, "pont sur l'eau")] {
+        let x: Vec<&Contrainte> = v.iter().filter(|c| c.genre == g).collect();
+        let mut m: Vec<f32> = x.iter().map(|c| r.manque(c)).filter(|&m| m > 0.01).collect();
+        m.sort_by(f32::total_cmp);
+        let imp = x.iter().filter(|c| c.implicite).count();
+        let manque = if m.is_empty() { "toutes tenues".to_string() } else { format!("{} non tenues (manque médian {:.1} m, max {:.1} m)", m.len(), m[m.len() / 2], m[m.len() - 1]) };
+        s.push(format!("  {nom} : {} ; {manque}{}", x.len(), if imp > 0 { format!(" ; {imp} ponts implicites (voie au sol dessus)") } else { String::new() }));
+    }
+    s.join("\n")
+}
+
+/// Les contraintes autour de (x, z) en barres debout : du bas (la voie dessous ou l'eau)
+/// à la hauteur voulue, vertes si elles sont tenues, rouges sinon, une marque blanche à
+/// la hauteur d'aujourd'hui.
+pub fn scene_contraintes(r: &Reseau, v: &[Contrainte], x: f32, z: f32, rayon: f32, s: &mut flow_banc::Scene) {
+    for c in v {
+        let p = r.point(c.haut);
+        if (p[0] - x).hypot(p[1] - z) > rayon {
+            continue;
+        }
+        let bas = c.bas.map_or(c.plancher, |b| r.hauteur(b));
+        let voulu = bas + c.ecart;
+        let col = if r.manque(c) > 0.01 { [0.95, 0.2, 0.2] } else { [0.25, 0.85, 0.35] };
+        let e = 0.5;
+        let barre = |s: &mut flow_banc::Scene, y0: f32, y1: f32, col: [f32; 3], e: f32| {
+            let q = |dx: f32, y: f32, dz: f32| [p[0] + dx, y, p[1] + dz];
+            for (a, b) in [((-e, -e), (e, -e)), ((e, -e), (e, e)), ((e, e), (-e, e)), ((-e, e), (-e, -e))] {
+                s.polygone(&[q(a.0, y0, a.1), q(b.0, y0, b.1), q(b.0, y1, b.1), q(a.0, y1, a.1)], col);
+            }
+        };
+        barre(s, bas, voulu, col, e);
+        let h = r.hauteur(c.haut);
+        barre(s, h - 0.15, h + 0.15, [1.0, 1.0, 1.0], 1.2);
+    }
+}

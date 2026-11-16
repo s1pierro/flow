@@ -25,6 +25,7 @@ struct Commandes {
     revision: u64,
     /// Le réseau construit (`reseau`), et la scène montrée : le réseau autour d'un point.
     reseau: Option<reseau::Reseau>,
+    contraintes: Vec<reseau::Contrainte>,
     zone: (f32, f32, f32),
     scene: Scene,
 }
@@ -33,6 +34,7 @@ impl Commandes {
     fn montrer(&mut self) {
         if let Some(r) = &self.reseau {
             self.scene = r.scene(self.zone.0, self.zone.1, self.zone.2);
+            reseau::scene_contraintes(r, &self.contraintes, self.zone.0, self.zone.1, self.zone.2, &mut self.scene);
             self.revision += 1;
         }
     }
@@ -40,7 +42,7 @@ impl Commandes {
 
 impl Module for Commandes {
     fn nouveau() -> Self {
-        Commandes { revision: 1, reseau: None, zone: (-217.0, 841.0, 400.0), scene: Scene::default() }
+        Commandes { revision: 1, reseau: None, contraintes: Vec::new(), zone: (-217.0, 841.0, 400.0), scene: Scene::default() }
     }
 
     fn commande(&mut self, m: &[&str]) -> Result<String, String> {
@@ -55,7 +57,9 @@ impl Module for Commandes {
                 let t0 = std::time::Instant::now();
                 let r = reseau::reseau(&d.lieu);
                 let dt = t0.elapsed().as_secs_f32();
-                let s = format!("{}\nconstruit en {:.2} s", r.resume(), dt);
+                let t1 = std::time::Instant::now();
+                self.contraintes = reseau::contraintes(&r, &d.lieu);
+                let s = format!("{}\nconstruit en {:.2} s\n{}\ncontraintes en {:.2} s", r.resume(), dt, reseau::resume_contraintes(&r, &self.contraintes), t1.elapsed().as_secs_f32());
                 self.reseau = Some(r);
                 self.montrer();
                 return Ok(s);
