@@ -304,7 +304,16 @@ impl App {
     pub fn piloter_contexte(&mut self, cle: &str, document: Option<&str>) -> Result<(), String> {
         let vue = contextes::indice(cle).ok_or(format!("contexte inconnu : {cle}"))?;
         let cle = contextes::genre(vue).cle;
-        let p = self.surface.placees().iter().max_by(|a, b| (a.cadre.w * a.cadre.h).total_cmp(&(b.cadre.w * b.cadre.h))).map(|p| p.id).ok_or("aucune fenêtre")?;
+        let montree = self.surface.placees().iter().max_by(|a, b| (a.cadre.w * a.cadre.h).total_cmp(&(b.cadre.w * b.cadre.h))).map(|p| p.id);
+        // Toutes réduites (Free flow) : la dernière revient devant et s'y ouvre
+        let p = match montree {
+            Some(p) => p,
+            None => {
+                let f = self.surface.libres().last().map(|f| f.id).ok_or("aucune fenêtre")?;
+                self.surface.etendre(f, crate::surface::Etendue::Normale);
+                f
+            }
+        };
         let mut etat = Etat::default();
         if let Some(d) = document {
             etat.mettre("document", d);

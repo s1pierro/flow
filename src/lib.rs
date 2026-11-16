@@ -41,6 +41,7 @@ pub mod paquets;
 pub mod pilote;
 pub mod pilote_audio;
 pub mod placage;
+pub mod banc;
 pub mod plan;
 pub mod parametres;
 pub mod magneto;

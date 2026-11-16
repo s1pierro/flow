@@ -527,6 +527,10 @@ pub unsafe extern "C" fn ANativeActivity_onCreate(activity: *mut ANativeActivity
     // fichiers ; à défaut, le dossier interne
     let dossier = |p: *const i8| (!p.is_null()).then(|| PathBuf::from(CStr::from_ptr(p as *const _).to_string_lossy().into_owned()));
     s.dossier = dossier((*activity).external_data_path).or_else(|| dossier((*activity).internal_data_path));
+    // Le dossier interne : les modules du banc y sont copiés pour être exécutés
+    if let Some(p) = dossier((*activity).internal_data_path) {
+        crate::banc::noter_prive(p);
+    }
     drop(s);
     crate::acces::noter_contexte((*activity).env, (*activity).clazz);
     let cb = &mut *(*activity).callbacks;
