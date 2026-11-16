@@ -889,8 +889,10 @@ pub fn fabriquer(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
 
 /// `fabriquer`, et le volume de défonce des lits de la tuile.
 pub fn fabriquer_avec_defonce(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>, Forme) {
-    // La chaussée en volume sur le réseau nivelé (FLOW_SANS_CHAUSSEE=1 : sans)
-    if !std::env::var("FLOW_SANS_CHAUSSEE").is_ok_and(|v| v == "1") {
+    // La chaussée en volume sur le réseau nivelé (FLOW_SANS_CHAUSSEE=1 : sans),
+    // seulement sur les tuiles assez fines pour qu'elle s'y voie (`chaussee::pour`) :
+    // au-dessus, pas de voies du tout (la texture de la maquette ne les peint pas)
+    if !std::env::var("FLOW_SANS_CHAUSSEE").is_ok_and(|v| v == "1") && crate::chaussee::pour(d, cle) {
         return crate::chaussee::tuile(d, cle);
     }
     let b = boite_tuile(d, cle);
@@ -978,6 +980,9 @@ pub fn remblai_morceaux(d: &Donnees, cle: Cle) -> Vec<Forme> {
     let rem = d.remblais();
     let mut v = Vec::new();
     for c in &rem.contours {
+        if crate::booleens::arrete() {
+            break;
+        }
         let b = c.boite;
         if b[2] < bt[0] || b[0] > bt[2] || b[3] < bt[1] || b[1] > bt[3] {
             continue;
@@ -1011,6 +1016,9 @@ pub fn epaulement_morceaux(d: &Donnees, cle: Cle) -> Vec<Forme> {
     let rem = d.remblais();
     let mut v = Vec::new();
     for c in &rem.epaulements {
+        if crate::booleens::arrete() {
+            break;
+        }
         let bc = c.boite;
         if bc[2] < b[0] || bc[0] > b[2] || bc[3] < b[1] || bc[1] > b[3] {
             continue;
@@ -1158,6 +1166,8 @@ impl Fabrique {
             .name("maquette".into())
             .spawn(move || {
                 baisser_priorite();
+                // Abandonnée (`Drop`), la tuile en cours s'arrête à la prochaine étape
+                crate::booleens::arreter_avec(Some(a.clone()));
                 loop {
                     // La prochaine tuile voulue
                     let (cle, faite) = {
@@ -1183,6 +1193,10 @@ impl Fabrique {
                     let lu = donnees.read();
                     drop(attente);
                     let fait = lu.ok().map(|d| tuile(&d, cle, faite));
+                    if a.load(Ordering::Relaxed) {
+                        crate::suivi::noter(format!("fabrique arrêtée : tuile {}/{}/{} abandonnée", cle.0, cle.1, cle.2));
+                        return;
+                    }
                     let (m, _) = &*e;
                     let Ok(mut g) = m.lock() else { return };
                     g.en_cours = None;

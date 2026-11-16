@@ -98,6 +98,18 @@ fn pave(a: [f32; 3], b: [f32; 3]) -> Forme {
     f
 }
 
+/// Le plus grand côté de tuile (m) qui reçoit la chaussée en volume (FLOW_CHAUSSEE_COTE
+/// pour essayer) : plus grossière, une tuile n'en montrerait rien qu'au prix de milliers
+/// de rubans (toute la ville, à la racine).
+pub const COTE_MAX: f32 = 700.0;
+
+/// La tuile `cle` reçoit-elle la chaussée en volume ?
+pub fn pour(d: &crate::carte::Donnees, cle: (u8, i32, i32)) -> bool {
+    let max = std::env::var("FLOW_CHAUSSEE_COTE").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(COTE_MAX);
+    let b = crate::carte::boite_tuile(d, cle);
+    (b[2] - b[0]).max(b[3] - b[1]) <= max
+}
+
 /// Ce que la dernière tuile a coûté : (rubans, étapes sautées, secondes).
 pub static DERNIERE: std::sync::Mutex<(usize, usize, f32)> = std::sync::Mutex::new((0, 0, 0.0));
 
@@ -127,6 +139,9 @@ pub fn tuile(d: &crate::carte::Donnees, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u
     let mut formes_ch = Vec::new();
     let mut t_rubans = crate::suivi::tache("rubans");
     for (a, pts) in morceaux(r, b, 10.0) {
+        if crate::booleens::arrete() {
+            break;
+        }
         let w = (a.largeur * 0.5).max(1.0);
         formes_deg.push(ruban(&pts, w, -0.01, DEGAGE).en(mq::matiere::REMBLAI));
         formes_ch.push(ruban(&pts, w, -EPAISSEUR, 0.0).en(mq::matiere::SOL));

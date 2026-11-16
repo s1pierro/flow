@@ -277,7 +277,17 @@ pub fn enchainer(base: &Forme, etapes: &[(Op, &Forme)]) -> Result<(Forme, usize)
     let mut faces = 0;
     let mut r = vers_manifold(base, &mut faces)?;
     let mut sautees = 0;
-    for (op, f) in etapes {
+    let n = etapes.len();
+    let mut dit = std::time::Instant::now();
+    for (i, (op, f)) in etapes.iter().enumerate() {
+        if arrete() {
+            return Err(ABANDON.into());
+        }
+        // L'avancement, au suivi (au plus cinq fois par seconde)
+        if dit.elapsed().as_secs_f32() > 0.2 {
+            dit = std::time::Instant::now();
+            crate::suivi::avancement(format!("{i} / {n}, {sautees} sautées"));
+        }
         if f.vide() {
             continue;
         }
@@ -297,6 +307,25 @@ pub fn enchainer(base: &Forme, etapes: &[(Op, &Forme)]) -> Result<(Forme, usize)
         }
     }
     Ok((vers_forme(&r), sautees))
+}
+
+/// L'erreur d'un travail abandonné (`arrete`).
+pub const ABANDON: &str = "abandonné";
+
+thread_local! {
+    /// Le drapeau d'arrêt du fil courant (`arreter_avec`), lu par `arrete`.
+    static ARRET: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Donne au fil courant le drapeau qui l'arrête : les longs travaux (`enchainer`, les
+/// tuiles de la maquette) le regardent entre deux étapes.
+pub fn arreter_avec(a: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+    ARRET.with(|x| *x.borrow_mut() = a);
+}
+
+/// Le travail du fil courant est-il abandonné ?
+pub fn arrete() -> bool {
+    ARRET.with(|x| x.borrow().as_ref().is_some_and(|a| a.load(std::sync::atomic::Ordering::Relaxed)))
 }
 
 /// `operation`, un côté vide toléré (le résultat vide d'un modifieur peut suivre).

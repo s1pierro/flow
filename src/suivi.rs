@@ -67,7 +67,7 @@ fn seuil_log() -> f32 {
 
 thread_local! {
     /// Les noms des étapes ouvertes de ce fil, de la plus externe à la plus interne.
-    static PILE: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    static PILE: RefCell<Vec<(&'static str, u64)>> = const { RefCell::new(Vec::new()) };
 }
 
 static IDS: AtomicU64 = AtomicU64::new(1);
@@ -96,12 +96,12 @@ pub fn tache(nom: &'static str) -> Tache {
 /// `tache`, mais n'entre au journal que si elle dure au moins `min_ms` (les étapes de
 /// chaque image : seulement quand elles traînent).
 pub fn tache_min(nom: &'static str, min_ms: f32) -> Tache {
+    let id = IDS.fetch_add(1, Ordering::Relaxed);
     let (chemin, profondeur) = PILE.with(|p| {
         let mut p = p.borrow_mut();
-        p.push(nom);
-        (p.join(" › "), p.len() - 1)
+        p.push((nom, id));
+        (p.iter().map(|x| x.0).collect::<Vec<_>>().join(" › "), p.len() - 1)
     });
-    let id = IDS.fetch_add(1, Ordering::Relaxed);
     let debut = Instant::now();
     if min_ms <= 0.0 {
         if let Ok(mut e) = etat().lock() {
@@ -155,6 +155,18 @@ impl Drop for Tache {
             e.finies.pop_front();
         }
         e.revision += 1;
+    }
+}
+
+/// L'avancement de l'étape la plus interne ouverte par ce fil (son détail, tant qu'elle
+/// court) : « 1200 / 62389 », par exemple.
+pub fn avancement(texte: impl Into<String>) {
+    let Some(id) = PILE.with(|p| p.borrow().last().map(|x| x.1)) else { return };
+    if let Ok(mut e) = etat().lock() {
+        if let Some(c) = e.en_cours.iter_mut().find(|c| c.id == id) {
+            c.detail = texte.into();
+            e.revision += 1;
+        }
     }
 }
 
