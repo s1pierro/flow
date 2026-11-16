@@ -749,3 +749,386 @@ pub fn scene_contraintes(r: &Reseau, v: &[Contrainte], x: f32, z: f32, rayon: f3
         barre(s, h - 0.15, h + 0.15, [1.0, 1.0, 1.0], 1.2);
     }
 }
+
+// --- Étape 3 : le profil lissé ------------------------------------------------------
+
+/// La pente des rampes d'un ouvrage (la surélévation d'un pont, l'abaissement d'un
+/// tunnel décroît d'autant par mètre, en s'ajoutant au relief) : voie carrossable, et
+/// chemins et sentiers.
+pub const PENTE_ROUTE: f32 = 0.08;
+pub const PENTE_CHEMIN: f32 = 0.15;
+/// Au sol, aucune pente maximale : la voie suit le relief (Rouen a des rues à 15–19 %).
+/// Au-delà de celle-ci, plus raide que les rues les plus raides, la pente est une
+/// anomalie du relief ou des données, et elle est rabotée.
+pub const PENTE_ANOMALIE: f32 = 0.25;
+/// Le poids qui retient un point au sol à sa hauteur d'origine (le relief lissé), et
+/// celui, faible, d'un point de pont ou de tunnel (ses rampes suivent le reste).
+const RETENUE_SOL: f32 = 0.3;
+const RETENUE_OUVRAGE: f32 = 0.02;
+/// Une contrainte ne monte (ou ne descend) pas une voie de plus de tant (m) : au-delà,
+/// les données se contredisent, elle reste non tenue.
+const MONTEE_MAX: f32 = 12.0;
+
+fn pente_max(genre: u8) -> f32 {
+    if sage_reel::carrossable(genre) {
+        PENTE_ROUTE
+    } else {
+        PENTE_CHEMIN
+    }
+}
+
+/// Le bilan du nivellement.
+pub struct Bilan {
+    pub iterations: usize,
+    /// Les contraintes écartées : le haut et le bas se rejoignent par le réseau en moins
+    /// de `ecart / PENTE_ANOMALIE` mètres (il faudrait une pente impossible).
+    pub impossibles: usize,
+    pub duree: f32,
+}
+
+/// Nivelle le réseau : une hauteur par nœud (les arêtes qui s'y rejoignent n'ont plus
+/// de saut), un profil lissé qui suit le relief au sol, tenant les contraintes de
+/// hauteur et, autant que le relief le permet, la pente maximale. Relaxation : à chaque
+/// tour, chaque point se rapproche de la moyenne de ses voisins et de sa hauteur
+/// d'origine, puis les contraintes et les pentes sont imposées (projections).
+pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
+    let t0 = std::time::Instant::now();
+    let nn = r.noeuds.len();
+    // Les variables : les nœuds, puis les points intérieurs des arêtes
+    let mut ids: Vec<Vec<usize>> = Vec::with_capacity(r.aretes.len());
+    let mut y: Vec<f32> = vec![0.0; nn];
+    let mut cible: Vec<f32> = vec![0.0; nn];
+    let mut retenue: Vec<f32> = vec![0.0; nn];
+    // Les nœuds : la moyenne des bouts au sol qui y arrivent (sinon de tous)
+    let mut somme = vec![(0.0f32, 0usize, 0.0f32, 0usize); nn];
+    for a in &r.aretes {
+        for (n, p) in [(a.a, a.points[0]), (a.b, *a.points.last().unwrap())] {
+            let s = &mut somme[n];
+            if a.passage == Passage::Sol {
+                s.0 += p[2];
+                s.1 += 1;
+            }
+            s.2 += p[2];
+            s.3 += 1;
+        }
+    }
+    for i in 0..nn {
+        let s = somme[i];
+        let (c, w) = if s.1 > 0 { (s.0 / s.1 as f32, RETENUE_SOL) } else { (s.2 / s.3.max(1) as f32, RETENUE_OUVRAGE) };
+        cible[i] = c;
+        y[i] = c;
+        retenue[i] = w;
+    }
+    for a in &r.aretes {
+        let n = a.points.len();
+        let mut v = Vec::with_capacity(n);
+        v.push(a.a);
+        for p in &a.points[1..n - 1] {
+            y.push(p[2]);
+            cible.push(p[2]);
+            retenue.push(if a.passage == Passage::Sol { RETENUE_SOL } else { RETENUE_OUVRAGE });
+            v.push(y.len() - 1);
+        }
+        v.push(a.b);
+        ids.push(v);
+    }
+    let nv = y.len();
+    // Les liens entre points voisins : (autre, longueur, pente max)
+    let mut liens: Vec<(usize, usize, f32, f32)> = Vec::new();
+    let mut voisins: Vec<Vec<usize>> = vec![Vec::new(); nv];
+    for (k, a) in r.aretes.iter().enumerate() {
+        let g = pente_max(a.genre);
+        for i in 0..a.points.len() - 1 {
+            let (p, q) = (a.points[i], a.points[i + 1]);
+            let d = (q[0] - p[0]).hypot(q[1] - p[1]).max(0.01);
+            let (x, z) = (ids[k][i], ids[k][i + 1]);
+            if x == z {
+                continue;
+            }
+            liens.push((x, z, d, g));
+            voisins[x].push(z);
+            voisins[z].push(x);
+        }
+    }
+    // Les contraintes en variables : (haut : v0, v1, u ; bas ; plancher ; écart ; part
+    // du haut dans la correction)
+    struct C {
+        h: (usize, usize, f32),
+        b: Option<(usize, usize, f32)>,
+        plancher: f32,
+        ecart: f32,
+        part: f32,
+    }
+    let var = |(a, s, u): Ou| (ids[a][s], ids[a][s + 1], u);
+    let cs: Vec<C> = v
+        .iter()
+        .map(|c| {
+            let ph = r.aretes[c.haut.0].passage;
+            let pb = c.bas.map(|b| r.aretes[b.0].passage);
+            let part = match (ph, pb) {
+                (_, None) => 1.0,
+                (Passage::Pont, Some(Passage::Sol)) => 0.85,
+                (Passage::Sol, Some(Passage::Tunnel)) => 0.15,
+                _ => 0.5,
+            };
+            C { h: var(c.haut), b: c.bas.map(var), plancher: c.plancher, ecart: c.ecart, part }
+        })
+        .collect();
+    let lire = |y: &[f32], (a, b, u): (usize, usize, f32)| y[a] * (1.0 - u) + y[b] * u;
+    let pousser = |y: &mut [f32], (a, b, u): (usize, usize, f32), dh: f32| {
+        let n = ((1.0 - u) * (1.0 - u) + u * u).max(1e-6);
+        y[a] += dh * (1.0 - u) / n;
+        if b != a {
+            y[b] += dh * u / n;
+        }
+    };
+    let imposer = |y: &mut [f32]| {
+        for c in &cs {
+            let bas = c.b.map_or(c.plancher, |b| lire(y, b));
+            let m = bas + c.ecart - lire(y, c.h);
+            if m > 0.0 {
+                pousser(y, c.h, m * c.part);
+                if let Some(b) = c.b {
+                    pousser(y, b, -m * (1.0 - c.part));
+                }
+            }
+        }
+    };
+    // 1. Le profil lissé, sans les contraintes : chaque point vers la moyenne de ses
+    //    voisins et sa hauteur d'origine (Jacobi)
+    let mut suivant = y.clone();
+    for _ in 0..iterations {
+        for i in 0..nv {
+            let vs = &voisins[i];
+            if vs.is_empty() {
+                suivant[i] = y[i];
+                continue;
+            }
+            let m: f32 = vs.iter().map(|&j| y[j]).sum::<f32>() / vs.len() as f32;
+            suivant[i] = (m + retenue[i] * cible[i]) / (1.0 + retenue[i]);
+        }
+        std::mem::swap(&mut y, &mut suivant);
+    }
+    // Les anomalies : les pentes au-delà de PENTE_ANOMALIE rabotées (projections, les
+    // deux bouts se rapprochent)
+    for _ in 0..40 {
+        let mut reste = false;
+        for &(a, b, d, _) in &liens {
+            let e = (y[a] - y[b]).abs() - PENTE_ANOMALIE * d;
+            if e > 1e-3 {
+                reste = true;
+                let s = if y[a] > y[b] { 0.5 * e } else { -0.5 * e };
+                y[a] -= s;
+                y[b] += s;
+            }
+        }
+        if !reste {
+            break;
+        }
+    }
+    // Les liens de chaque point, pour les rampes
+    let mut adj: Vec<Vec<(usize, f32)>> = vec![Vec::new(); nv];
+    let mut long: Vec<Vec<(usize, f32)>> = vec![Vec::new(); nv];
+    for &(a, b, d, g) in &liens {
+        adj[a].push((b, g * d));
+        adj[b].push((a, g * d));
+        long[a].push((b, d));
+        long[b].push((a, d));
+    }
+    // Les contraintes impossibles : le bas à moins de `ecart / PENTE_ANOMALIE` mètres du
+    // haut par le réseau (un croisement mal tracé : en vrai un carrefour, ou une bretelle)
+    let mut possible = vec![true; cs.len()];
+    for (k, c) in cs.iter().enumerate() {
+        let Some(b) = c.b else { continue };
+        let rayon = c.ecart / PENTE_ANOMALIE;
+        let mut dist: HashMap<usize, f32> = HashMap::new();
+        let mut file = vec![(c.h.0, 0.0f32), (c.h.1, 0.0)];
+        while let Some((i, di)) = file.pop() {
+            if dist.get(&i).is_some_and(|&x| x <= di) {
+                continue;
+            }
+            dist.insert(i, di);
+            if i == b.0 || i == b.1 {
+                possible[k] = false;
+                break;
+            }
+            for &(j, d) in &long[i] {
+                if di + d < rayon {
+                    file.push((j, di + d));
+                }
+            }
+        }
+    }
+    let impossibles = possible.iter().filter(|x| !**x).count();
+    let cs: Vec<&C> = cs.iter().zip(&possible).filter(|(_, p)| **p).map(|(c, _)| c).collect();
+    // Les surélévations (et les abaissements) au-dessus du profil lissé `base` : une
+    // contrainte monte ses points, la surélévation décroît de `g·d` d'un point à son
+    // voisin (la rampe s'ajoute au terrain, quelle que soit sa pente)
+    let base = y.clone();
+    let mut monte = vec![0.0f32; nv];
+    let mut descend = vec![0.0f32; nv];
+    // Les bas des contraintes ne montent pas avec les rampes, leurs hauts ne descendent
+    // pas avec les descentes
+    let mut fixe_bas = vec![false; nv];
+    let mut fixe_haut = vec![false; nv];
+    for c in cs.iter() {
+        fixe_haut[c.h.0] = true;
+        fixe_haut[c.h.1] = true;
+        if let Some(b) = c.b {
+            fixe_bas[b.0] = true;
+            fixe_bas[b.1] = true;
+        }
+    }
+    let propager = |d: &mut [f32], sources: &[usize], fixes: &[bool]| {
+        use std::cmp::Ordering;
+        #[derive(PartialEq)]
+        struct E(f32, usize);
+        impl Eq for E {}
+        impl PartialOrd for E {
+            fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for E {
+            fn cmp(&self, o: &Self) -> Ordering {
+                self.0.total_cmp(&o.0)
+            }
+        }
+        let mut tas: std::collections::BinaryHeap<E> = sources.iter().map(|&i| E(d[i], i)).collect();
+        while let Some(E(h, i)) = tas.pop() {
+            if h < d[i] - 1e-6 {
+                continue;
+            }
+            for &(j, dh) in &adj[i] {
+                let voulu = h - dh;
+                if voulu > d[j] + 1e-4 && !fixes[j] {
+                    d[j] = voulu;
+                    tas.push(E(voulu, j));
+                }
+            }
+        }
+    };
+    // 2. Les contraintes : le haut monte et le bas descend (selon leur part), puis les
+    //    rampes. Ce que demande chaque contrainte est mesuré sur le profil lissé, sans
+    //    cumul ; quelques tours reprennent celles qu'une rampe voisine a défaites
+    let mut tours = 0;
+    for _ in 0..5 {
+        tours += 1;
+        for i in 0..nv {
+            y[i] = base[i] + monte[i] - descend[i];
+        }
+        let (mut hauts, mut bas_) = (Vec::new(), Vec::new());
+        for c in cs.iter() {
+            let bas = c.b.map_or(c.plancher, |b| lire(&y, b));
+            let m = bas + c.ecart - lire(&y, c.h);
+            if m <= 0.02 {
+                continue;
+            }
+            let dh = (m * c.part + 0.01).min(MONTEE_MAX);
+            for v in [c.h.0, c.h.1] {
+                monte[v] = (monte[v] + dh).min(MONTEE_MAX);
+                hauts.push(v);
+            }
+            if let Some(b) = c.b {
+                let db = (m * (1.0 - c.part) + 0.01).min(MONTEE_MAX);
+                for v in [b.0, b.1] {
+                    descend[v] = (descend[v] + db).min(MONTEE_MAX);
+                    bas_.push(v);
+                }
+            }
+        }
+        if hauts.is_empty() && bas_.is_empty() {
+            break;
+        }
+        propager(&mut monte, &hauts, &fixe_bas);
+        propager(&mut descend, &bas_, &fixe_haut);
+    }
+    for i in 0..nv {
+        y[i] = base[i] + monte[i] - descend[i];
+    }
+    let _ = (pousser, imposer, tours);
+    // Les hauteurs rendues aux arêtes et aux nœuds
+    for (k, a) in r.aretes.iter_mut().enumerate() {
+        for (i, p) in a.points.iter_mut().enumerate() {
+            p[2] = y[ids[k][i]];
+        }
+    }
+    for (i, n) in r.noeuds.iter_mut().enumerate() {
+        n.p[2] = y[i];
+    }
+    Bilan { iterations, impossibles, duree: t0.elapsed().as_secs_f32() }
+}
+
+/// Le bilan d'un profil : contraintes non tenues, pentes au-delà du maximum, écart au
+/// relief des points au sol (remblai au-dessus, déblai au-dessous), sauts aux nœuds.
+pub fn bilan_profil(r: &Reseau, v: &[Contrainte], l: &Lieu) -> String {
+    let mut s = Vec::new();
+    let mut m: Vec<f32> = v.iter().map(|c| r.manque(c)).filter(|&m| m > 0.05).collect();
+    m.sort_by(f32::total_cmp);
+    s.push(if m.is_empty() { format!("contraintes : les {} tenues", v.len()) } else { format!("contraintes : {} non tenues sur {} (manque max {:.2} m)", m.len(), v.len(), m[m.len() - 1]) });
+    let (mut au_dela, mut total, mut pmax) = (0usize, 0usize, 0.0f32);
+    for a in &r.aretes {
+        let g = PENTE_ANOMALIE;
+        for w in a.points.windows(2) {
+            let d = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            if d < 2.0 {
+                continue;
+            }
+            let p = (w[1][2] - w[0][2]).abs() / d;
+            total += 1;
+            pmax = pmax.max(p);
+            if p > g + 0.01 {
+                au_dela += 1;
+            }
+        }
+    }
+    s.push(format!("pentes : {au_dela} segments au-delà de 25 % sur {total} ({:.2} %), pente max {:.1} %", au_dela as f32 / total.max(1) as f32 * 100.0, pmax * 100.0));
+    let mut ecarts: Vec<f32> = Vec::new();
+    for a in r.aretes.iter().filter(|a| a.passage == Passage::Sol) {
+        for p in &a.points {
+            ecarts.push(p[2] - l.relief(p[0] as f64, p[1] as f64) as f32);
+        }
+    }
+    ecarts.sort_by(f32::total_cmp);
+    if !ecarts.is_empty() {
+        let q = |f: f32| ecarts[((ecarts.len() - 1) as f32 * f) as usize];
+        s.push(format!("au sol, écart au relief : 1er centile {:.2} m, médiane {:.2} m, 99e centile {:.2} m ; remblai > 1 m : {} points, déblai > 1 m : {} points (sur {})", q(0.01), q(0.5), q(0.99), ecarts.iter().filter(|&&e| e > 1.0).count(), ecarts.iter().filter(|&&e| e < -1.0).count(), ecarts.len()));
+    }
+    // Les sauts aux nœuds (entre le bout de chaque arête et son nœud)
+    let mut saut = 0.0f32;
+    for a in &r.aretes {
+        saut = saut.max((a.points[0][2] - r.noeuds[a.a].p[2]).abs()).max((a.points.last().unwrap()[2] - r.noeuds[a.b].p[2]).abs());
+    }
+    s.push(format!("sauts aux nœuds : max {saut:.2} m"));
+    s.join("\n")
+}
+
+/// Les pires pentes : (pente, x, z, passage, genre, longueur du segment, distance à la
+/// contrainte la plus proche), et la répartition des pentes au-delà du maximum.
+pub fn pires_pentes(r: &Reseau, v: &[Contrainte], n: usize) -> String {
+    let mut seg: Vec<(f32, [f32; 3], Passage, u8, f32)> = Vec::new();
+    let mut paliers = [0usize; 4];
+    for a in &r.aretes {
+        let g = 0.15;
+        for w in a.points.windows(2) {
+            let d = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            if d < 2.0 {
+                continue;
+            }
+            let p = (w[1][2] - w[0][2]).abs() / d;
+            if p > g + 0.01 {
+                let k = if p < 0.15 { 0 } else if p < 0.3 { 1 } else if p < 1.0 { 2 } else { 3 };
+                paliers[k] += 1;
+                seg.push((p, entre(w[0], w[1], 0.5), a.passage, a.genre, d));
+            }
+        }
+    }
+    seg.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let pts: Vec<[f32; 3]> = v.iter().map(|c| r.point(c.haut)).collect();
+    let mut s = vec![format!("pentes au-delà de 15 % : < 15 % : {}, 15–30 % : {}, 30–100 % : {}, ≥ 100 % : {}", paliers[0], paliers[1], paliers[2], paliers[3])];
+    for (p, m, pa, g, d) in seg.iter().take(n) {
+        let dc = pts.iter().map(|q| (q[0] - m[0]).hypot(q[1] - m[1])).fold(f32::MAX, f32::min);
+        s.push(format!("  {:.0} % en ({:.0}, {:.0}) h {:.1} · {} genre {g} · segment {:.1} m · contrainte à {:.0} m", p * 100.0, m[0], m[1], m[2], pa.nom(), d, dc));
+    }
+    s.join("\n")
+}

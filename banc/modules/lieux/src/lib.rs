@@ -64,6 +64,20 @@ impl Module for Commandes {
                 self.montrer();
                 return Ok(s);
             }
+            "niveler" => {
+                let d = LIEU.lock().unwrap().clone().ok_or("pas encore de lieu")?;
+                let n = m.get(1).and_then(|x| x.parse().ok()).unwrap_or(200);
+                let r = self.reseau.as_mut().ok_or("banc reseau d'abord")?;
+                let avant = reseau::bilan_profil(r, &self.contraintes, &d.lieu);
+                let b = reseau::niveler(r, &self.contraintes, n);
+                let apres = reseau::bilan_profil(r, &self.contraintes, &d.lieu);
+                self.montrer();
+                return Ok(format!("avant :\n{avant}\naprès {} tours ({:.2} s), {} contraintes impossibles écartées :\n{apres}", b.iterations, b.duree, b.impossibles));
+            }
+            "pires" => {
+                let r = self.reseau.as_ref().ok_or("banc reseau d'abord")?;
+                return Ok(reseau::pires_pentes(r, &self.contraintes, m.get(1).and_then(|x| x.parse().ok()).unwrap_or(12)));
+            }
             "zone" => {
                 let n: Vec<f32> = m[1..].iter().filter_map(|x| x.parse().ok()).collect();
                 let [x, z, r] = n[..] else { return Err("zone <x> <z> <rayon>".into()) };
@@ -77,7 +91,7 @@ impl Module for Commandes {
                 VARIANTE.store(k, Ordering::Relaxed);
                 return Ok(format!("variante {n} : banc recharger, ou banc lieux non puis oui, pour refaire les tuiles"));
             }
-            x => return Err(format!("commande inconnue : {x} (etat, variante, diagnostic, reseau, zone)")),
+            x => return Err(format!("commande inconnue : {x} (etat, variante, diagnostic, reseau, niveler, zone)")),
         }
         Ok(format!("lieux sur le banc · variante {}", VARIANTES[VARIANTE.load(Ordering::Relaxed)]))
     }
