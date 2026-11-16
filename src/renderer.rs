@@ -140,6 +140,7 @@ uniform int u_avec_image;
 uniform highp sampler2DArray u_matieres;
 uniform int u_avec_matieres;
 uniform float u_cotes[8];
+uniform float u_bordure;
 uniform vec3 u_couleur;
 uniform vec3 u_ciel;
 uniform vec2 u_brume;
@@ -169,9 +170,13 @@ void main() {
     else if (k == 5) c = vec3(0.62, 0.38, 0.78);
     else c = vec3(0.95, 0.15, 0.15);
     // Le placage : la couche de la matière, répétée tous les `cote` mètres
-    if (u_avec_matieres == 1 && k >= 1 && k <= 5) {
-      vec4 t = texture(u_matieres, vec3(v_m / u_cotes[k - 1], float(k - 1)));
-      c = t.rgb;
+    // Le dessus du quai (4) : v_m le long de sa ligne et la distance à elle ; la
+    // bordure (couche 5) sur ses `u_bordure` premiers mètres, puis les pavés
+    if (u_avec_matieres == 1 && k == 4 && v_m.y < u_bordure) {
+      c = texture(u_matieres, vec3(v_m / u_cotes[5], 5.0)).rgb;
+    } else if (u_avec_matieres == 1 && k >= 1 && k <= 5) {
+      vec2 m = k == 4 ? v_m - vec2(0.0, u_bordure) : v_m;
+      c = texture(u_matieres, vec3(m / u_cotes[k - 1], float(k - 1))).rgb;
     }
   }
   if (u_avec_image == 1 && !volume) {
@@ -298,7 +303,7 @@ pub struct Renderer {
     /// Le tableau des textures des matières : révision, texture ; u_avec_matieres,
     /// u_cotes.
     matieres: RefCell<(u64, u32)>,
-    u_matieres: [i32; 2],
+    u_matieres: [i32; 3],
     images_vues: std::cell::Cell<u64>,
 }
 
@@ -386,7 +391,7 @@ impl Renderer {
             (gl.glUseProgram)(terrain_program);
             (gl.glUniform1i)(loc(terrain_program, "u_image"), 1);
             (gl.glUniform1i)(loc(terrain_program, "u_matieres"), 2);
-            let u_matieres = [loc(terrain_program, "u_avec_matieres"), loc(terrain_program, "u_cotes")];
+            let u_matieres = [loc(terrain_program, "u_avec_matieres"), loc(terrain_program, "u_cotes"), loc(terrain_program, "u_bordure")];
             let bati_program = program(&gl, BATI_VS, BATI_FS)?;
             let u_bati = ["u_mvp", "u_oeil", "u_ciel", "u_brume", "u_blanc"].map(|n| loc(bati_program, n));
             let ligne_program = program(&gl, LIGNE_VS, LIGNE_FS)?;
@@ -592,6 +597,7 @@ impl Renderer {
                 self.lier_matieres(p);
                 (gl.glUniform1i)(self.u_matieres[0], 1);
                 (gl.glUniform1fv)(self.u_matieres[1], 8, p.cotes.as_ptr());
+                (gl.glUniform1f)(self.u_matieres[2], crate::maquette::BORDURE);
             }
             _ => (gl.glUniform1i)(self.u_matieres[0], 0),
         }

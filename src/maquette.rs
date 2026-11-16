@@ -601,6 +601,10 @@ pub mod matiere {
     }
 }
 
+/// La largeur de la bordure du quai (les pierres de taille le long de son bord, avant
+/// les pavés), en mètres : le shader la lit dans `u_bordure`.
+pub const BORDURE: f32 = 0.6;
+
 /// La matière des volumes de défonce (dessinés à part, semi-transparents).
 pub const MAQUETTE_DEFONCE: f32 = 4.3;
 
@@ -806,10 +810,17 @@ pub fn habiller(d: &Donnees, f: &Forme, b: [f32; 4]) -> (Vec<f32>, Vec<u32>) {
             // Une face laissée par un volume : sa matière, à la normale de la face, ses
             // coordonnées de texture en mètres (vue d'en haut à plat ; debout, le long
             // du mur et en hauteur)
+            // ; le dessus du quai, dans le repère de sa ligne : le long d'elle, et la
+            // distance à elle (les pavés alignés, la bordure au bord)
             let l = (no[0] * no[0] + no[2] * no[2]).sqrt();
             let debout = no[1].abs() < 0.6 && l > 1e-6;
+            let quai = (m == matiere::QUAI).then(|| d.remblais());
             q.iter().map(|s| {
-                let (u, w) = if debout { ((s[0] * no[2] - s[2] * no[0]) / l, -s[1]) } else { (s[0], s[2]) };
+                let (u, w) = match &quai {
+                    Some(r) if !debout => r.repere([s[0], s[2]]).unwrap_or((s[0], s[2] + BORDURE)),
+                    _ if debout => ((s[0] * no[2] - s[2] * no[0]) / l, -s[1]),
+                    _ => (s[0], s[2]),
+                };
                 v.extend_from_slice(&[s[0], s[1], s[2], no[0], no[1], no[2], u, w, matiere::sommet(m)]);
                 (v.len() / SOMMET - 1) as u32
             }).collect()

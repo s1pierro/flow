@@ -61,6 +61,9 @@ pub struct Remblais {
     /// la ligne du quai, arasée à sa hauteur.
     pub epaulements: Vec<Contour>,
     stations: HashMap<(i32, i32), Vec<([f32; 2], f32)>>,
+    /// Les côtés des lignes de quai (début, fin, abscisse du début le long de son
+    /// tronçon), indexés par case : le repère du dessus du quai (`repere`).
+    cotes: HashMap<(i32, i32), Vec<([f32; 2], [f32; 2], f32)>>,
 }
 
 /// Les remblais de tous les quais du lieu : les morceaux de tous les tronçons réunis
@@ -71,9 +74,22 @@ pub fn calculer(d: &Donnees) -> Remblais {
     let mut morceaux = Vec::new();
     let mut epaulement = Vec::new();
     let mut stations: HashMap<(i32, i32), Vec<([f32; 2], f32)>> = HashMap::new();
+    let mut cotes: HashMap<(i32, i32), Vec<([f32; 2], [f32; 2], f32)>> = HashMap::new();
     for g in types.iter().flatten() {
         let m = g.points.len();
         for t in troncons(g) {
+            // Les côtés du tronçon, et leur abscisse le long de lui
+            let mut s = 0.0;
+            for &k in &t.cotes {
+                let (a, b) = (g.points[k], g.points[(k + 1) % m]);
+                let (c0, c1) = (case([a[0].min(b[0]), a[1].min(b[1])]), case([a[0].max(b[0]), a[1].max(b[1])]));
+                for i in c0.0..=c1.0 {
+                    for j in c0.1..=c1.1 {
+                        cotes.entry((i, j)).or_default().push((a, b, s));
+                    }
+                }
+                s += ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+            }
             morceaux.extend(morceaux_troncon(g, &t, REMBLAI_EAU, REMBLAI_TERRE));
             epaulement.extend(morceaux_troncon(g, &t, EPAULEMENT_EAU, EPAULEMENT));
             for &k in &t.cotes {
@@ -84,7 +100,7 @@ pub fn calculer(d: &Donnees) -> Remblais {
             }
         }
     }
-    Remblais { contours: reunir(morceaux), epaulements: reunir(epaulement), stations }
+    Remblais { contours: reunir(morceaux), epaulements: reunir(epaulement), stations, cotes }
 }
 
 fn case(p: [f32; 2]) -> (i32, i32) {
@@ -96,6 +112,29 @@ impl Remblais {
     /// proche, plus `REMBLAI_HAUT`.
     pub fn hauteur(&self, p: [f32; 2]) -> Option<f32> {
         self.quai(p).map(|h| h + REMBLAI_HAUT)
+    }
+
+    /// Le repère du dessus du quai en `p` : l'abscisse le long de la ligne de quai la
+    /// plus proche (m), et la distance à elle (m) ; rien à plus de deux cases d'elle.
+    /// Les pavés s'y alignent sur le quai, la bordure suit son bord.
+    pub fn repere(&self, p: [f32; 2]) -> Option<(f32, f32)> {
+        let (ci, cj) = case(p);
+        let mut best: Option<(f32, f32)> = None;
+        for i in ci - 1..=ci + 1 {
+            for j in cj - 1..=cj + 1 {
+                for &(a, b, s) in self.cotes.get(&(i, j)).into_iter().flatten() {
+                    let (ux, uz) = (b[0] - a[0], b[1] - a[1]);
+                    let l2 = ux * ux + uz * uz;
+                    let t = if l2 > 1e-12 { (((p[0] - a[0]) * ux + (p[1] - a[1]) * uz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    let (qx, qz) = (a[0] + ux * t, a[1] + uz * t);
+                    let d = ((p[0] - qx).powi(2) + (p[1] - qz).powi(2)).sqrt();
+                    if best.is_none_or(|b| d < b.1) {
+                        best = Some((s + t * l2.sqrt(), d));
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// La hauteur du quai en `p` : la crête à la station la plus proche, plus
@@ -373,7 +412,7 @@ mod tests {
         for p in &g.points {
             stations.entry(case(*p)).or_default().push((*p, 12.0));
         }
-        let r = Remblais { contours, epaulements: Vec::new(), stations };
+        let r = Remblais { contours, epaulements: Vec::new(), stations, cotes: HashMap::new() };
         let f = r.volume(&r.contours[0], 5.0);
         assert!(f.volume() > 0.0);
         // Fermé : chaque côté une fois dans chaque sens

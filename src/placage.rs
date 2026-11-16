@@ -18,14 +18,17 @@ use std::time::{Instant, SystemTime};
 /// Le côté des couches (les images des matières y sont ramenées).
 pub const COTE: u32 = 512;
 
-/// La matière de la bibliothèque de chaque matière de la maquette, de 1 à `HAUT - 1`.
-pub const TABLE: [(u16, &str); 5] = [
+/// La matière de la bibliothèque de chaque matière de la maquette, de 1 à `HAUT - 1`,
+/// puis celle de la bordure du quai (la couche `COUCHE_BORDURE`).
+pub const TABLE: [(u16, &str); 6] = [
     (matiere::LIT, "vase-lit"),
     (matiere::BERGE, "taille-quai"),
     (matiere::REMBLAI, "pierre-quai"),
     (matiere::QUAI, "paves-quai"),
     (matiere::QUAI_MUR, "pierre-quai"),
+    (matiere::QUAI, "bordure-quai"),
 ];
+pub const COUCHE_BORDURE: usize = 5;
 
 #[derive(Default)]
 struct Etat {
@@ -128,7 +131,7 @@ mod tests {
 
     #[test]
     fn la_table_suit_les_numeros() {
-        for (k, (m, _)) in TABLE.iter().enumerate() {
+        for (k, (m, _)) in TABLE[..COUCHE_BORDURE].iter().enumerate() {
             assert_eq!(*m as usize, k + 1);
         }
     }
