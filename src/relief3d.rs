@@ -134,6 +134,9 @@ pub struct Relief3d {
     pub sur: Surimpression,
     /// Les faces en surimpression du module du banc, par tuile (vide : rien).
     faces: HashMap<Cle, Option<Maillage3d>>,
+    /// Les hauteurs basse et haute du relief de chaque tuile (`bornes`), à la retouche `bornes_de`.
+    bornes: std::cell::RefCell<HashMap<Cle, (f32, f32)>>,
+    bornes_de: u64,
 }
 
 /// Une tuile de la maquette reçue de la fabrique.
@@ -155,7 +158,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default() }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0 }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -244,19 +247,26 @@ impl Relief3d {
         let (_, _, c) = d.monde();
         let e = l.etendue();
         let zmax = ((c / (COTES as f32 * l.pas as f32)).log2().floor() as i32).clamp(0, NIVEAU_MAX as i32) as u8;
-        let (hmin, hmax) = (l.base, l.base + 65535.0 * l.echelle);
         let o = self.camera.oeil();
+        let mut bornes = self.bornes.borrow_mut();
         let mut v = Vec::new();
         let mut pile = vec![(0u8, 0i32, 0i32)];
         while let Some(cle) = pile.pop() {
             let b = boite_tuile(d, cle);
-            if (b[0] as f64) > e[2] || (b[2] as f64) < e[0] || (b[1] as f64) > e[3] || (b[3] as f64) < e[1] || dehors(mvp, b, hmin, hmax) {
+            if (b[0] as f64) > e[2] || (b[2] as f64) < e[0] || (b[1] as f64) > e[3] || (b[3] as f64) < e[1] {
+                continue;
+            }
+            // Les hauteurs de la tuile elle-même (pas celles de tout le lieu), avec de
+            // quoi couvrir les lits défoncés, les remblais et les ponts
+            let (hmin, hmax) = bornes_tuile(d, cle, &mut bornes);
+            let (hmin, hmax) = (hmin - BORNE_BAS, hmax + BORNE_HAUT);
+            if dehors(mvp, b, hmin, hmax) {
                 continue;
             }
             let cote = b[2] - b[0];
             let dx = (b[0] - o[0]).max(0.0).max(o[0] - b[2]);
             let dz = (b[1] - o[2]).max(0.0).max(o[2] - b[3]);
-            let dy = (o[1] - hmax).max(0.0);
+            let dy = (o[1] - hmax).max(0.0).max(hmin - o[1]);
             let dist = (dx * dx + dy * dy + dz * dz).sqrt();
             if cle.0 < zmax && dist < PRES * cote {
                 let (z, i, j) = cle;
@@ -329,6 +339,10 @@ impl Relief3d {
         if self.fabrique.is_none() && !synchrone {
             crate::suivi::repere("maquette", false);
             self.fabrique = Some(crate::maquette::Fabrique::new(donnees.clone()));
+        }
+        if self.bornes_de != carte.compteur {
+            self.bornes_de = carte.compteur;
+            self.bornes.borrow_mut().clear();
         }
         let v = crate::banc::version_lieux();
         if v != self.banc {
@@ -421,6 +435,17 @@ impl Relief3d {
             let (z, i, j) = cle;
             // En attendant une tuile, l'ancêtre le plus proche déjà fait (pas pour les
             // seules sélectionnées : rien d'autre qu'elles)
+            // En dézoomant : ses quatre filles, si elles sont déjà faites, plutôt qu'un
+            // ancêtre plus grossier qu'elle
+            let filles = [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(a, b)| (z + 1, i * 2 + a, j * 2 + b));
+            if !seules && !self.tuiles_maquette.contains_key(&cle) && filles.iter().all(|f| self.tuiles_maquette.contains_key(f)) {
+                for f in filles {
+                    if vues.insert(f) {
+                        montrees.push(f);
+                    }
+                }
+                continue;
+            }
             let a = if seules { Some(cle).filter(|c| self.tuiles_maquette.contains_key(c)) } else { (0..=z).map(|k| (z - k, i >> k, j >> k)).find(|a| self.tuiles_maquette.contains_key(a)) };
             if let Some(a) = a {
                 if vues.insert(a) {
@@ -529,6 +554,10 @@ impl Relief3d {
         let voirie = d.voirie_version();
         self.poser(&d);
         let mvp = self.mvp(zone.w / zone.h.max(1.0));
+        if self.bornes_de != carte.compteur {
+            self.bornes_de = carte.compteur;
+            self.bornes.borrow_mut().clear();
+        }
         let voulues = self.choisir(&d, &mvp);
         // Les maillages à faire (absents ou périmés), les plus grossiers d'abord
         let mut a_faire: Vec<(u8, usize, Cle)> = Vec::new();
@@ -694,6 +723,52 @@ pub fn fabriquer_bati(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>) {
 }
 
 /// La boîte (en x, z ; de `hmin` à `hmax` en hauteur) est-elle hors du champ ?
+/// Ce qu'on ajoute sous et sur le relief d'une tuile pour la boîte de ses volumes (m).
+const BORNE_BAS: f32 = 25.0;
+const BORNE_HAUT: f32 = 40.0;
+/// Une tuile d'au plus ce nombre de pas de côté se lit point par point ; au-dessus, ses
+/// quatre filles.
+const BORNES_FEUILLE: f32 = 32.0;
+
+/// Les hauteurs basse et haute du relief sous la tuile `cle` (bord compris), d'après la
+/// grille du lieu ; gardées dans `cache` (chaque point n'est lu qu'une fois).
+fn bornes_tuile(d: &Donnees, cle: Cle, cache: &mut HashMap<Cle, (f32, f32)>) -> (f32, f32) {
+    if let Some(&b) = cache.get(&cle) {
+        return b;
+    }
+    let l = &d.lieu;
+    let b = boite_tuile(d, cle);
+    let pas = l.pas as f32;
+    let r = if b[2] - b[0] <= BORNES_FEUILLE * pas || cle.0 >= 20 {
+        let o = sage_reel::origine() as f32;
+        let g = l.grille;
+        let a = |x: f32| ((x - o) / pas).floor() as i64;
+        let (a0, a1) = (a(b[0]).max(g.a0 as i64), (a(b[2]) + 1).min((g.a0 + g.nx) as i64 - 1));
+        let (b0, b1) = (a(b[1]).max(g.b0 as i64), (a(b[3]) + 1).min((g.b0 + g.nz) as i64 - 1));
+        let mut m = (f32::MAX, f32::MIN);
+        for bb in b0..=b1 {
+            for aa in a0..=a1 {
+                let h = l.h_point(aa, bb);
+                m = (m.0.min(h), m.1.max(h));
+            }
+        }
+        if m.0 > m.1 {
+            // Hors de la grille : tout le relief possible
+            (l.base, l.base + 65535.0 * l.echelle)
+        } else {
+            m
+        }
+    } else {
+        let (z, i, j) = cle;
+        [(0, 0), (1, 0), (0, 1), (1, 1)].iter().fold((f32::MAX, f32::MIN), |m, &(a, c)| {
+            let f = bornes_tuile(d, (z + 1, i * 2 + a, j * 2 + c), cache);
+            (m.0.min(f.0), m.1.max(f.1))
+        })
+    };
+    cache.insert(cle, r);
+    r
+}
+
 fn dehors(mvp: &[f32; 16], b: [f32; 4], hmin: f32, hmax: f32) -> bool {
     let mut coins = [[0f32; 4]; 8];
     for (k, c) in coins.iter_mut().enumerate() {

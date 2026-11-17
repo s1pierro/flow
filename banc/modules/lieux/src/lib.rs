@@ -137,7 +137,7 @@ impl ModuleLieux for Fabrique {
         Ok(())
     }
 
-    fn tuile(&mut self, cle: (u8, i32, i32)) -> Result<TuileFaite, String> {
+    fn tuile(&self, cle: (u8, i32, i32)) -> Result<TuileFaite, String> {
         let d = self.donnees.as_ref().ok_or("pas de lieu")?;
         let (sommets, indices, pixels) = match VARIANTE.load(Ordering::Relaxed) {
             1 => nu(d, cle),

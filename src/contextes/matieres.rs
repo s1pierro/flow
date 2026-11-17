@@ -9,7 +9,15 @@
 //! le fichier s'enregistre une fois le doigt levé.
 //!
 //! Pilote : `matiere <nom>`, `nouvelle <genre> [nom]`, `regler <clé> <valeur…>` (les
-//! clés du fichier), `mosaique <n>`, `matieres` (la liste).
+//! clés du fichier), `reglages` (le fichier de la matière ouverte), `mosaique <n>`,
+//! `matieres` (la liste), `image` (prete, en cours ou aucune).
+//!
+//! La chaussée (`nouvelle chaussee`) a ses clés : `voies`, `largeur_voie`,
+//! `accotement` (m), `rive`, `axe`, `separation` (aucun, continu, discontinu, double,
+//! mixte), `tiret`, `espace` (m), `ligne` (cm), `usure_marquage`, `usure` (0 à 1),
+//! `granulat` (mm) ; `appareil` 0 double sens, 1 sens unique ; `cote` la longueur
+//! répétée (ramenée à un nombre entier de tirets), `grain` la granularité,
+//! `variation` les plaques, `irregularite` les fissures, `couleur_joint` le marquage.
 
 use crate::contexte::{Commun, Contexte, Etat, Genre};
 use crate::draw::{Image, Rect};
@@ -17,13 +25,13 @@ use crate::surface::Placee;
 use crate::ui::{id, sub_id, Id};
 use crate::widgets::{Body, Cx, Icon};
 use sage_matieres::generateur::{nombre_court, RESOLUTIONS};
-use sage_matieres::{Genre as Sorte, Reglages, Tsl};
+use sage_matieres::{Genre as Sorte, Reglages, Tsl, TRAITS};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
 pub const CLE: &str = "matieres";
-pub const GENRE: Genre = Genre { cle: CLE, nom: "Matières", legende: "Les textures répétables : bois, brique, pierre…", icone: Icon::Photo, ouvrir, applet: None };
+pub const GENRE: Genre = Genre { cle: CLE, nom: "Matières", legende: "Les textures répétables : bois, brique, pierre, chaussée…", icone: Icon::Photo, ouvrir, applet: None };
 
 const MATIERES: Id = id("matieres");
 const ONGLETS: [&str; 2] = ["Bibliothèque", "Réglages"];
@@ -177,11 +185,24 @@ impl Matieres {
     fn vue(&mut self, cx: &mut Cx, zone: Rect) {
         let col = cx.couleurs();
         cx.dl.rrect(zone, 0.0, col.fond);
-        let Some((img, _)) = &self.image else {
+        let Some((img, ri)) = &self.image else {
             let t = if self.reglages.is_some() { "Génération…" } else { "Choisissez ou créez une matière dans la bibliothèque." };
             cx.centered(zone, t, 15.0, col.pale);
             return;
         };
+        // La chaussée ne se répète qu'en long : une colonne de n longueurs, toute sa
+        // largeur, à l'échelle
+        if ri.genre == Sorte::Chaussee {
+            let n = self.mosaique.max(1) as f32;
+            let (l, h) = (img.largeur as f32, img.hauteur as f32 * n);
+            let k = ((zone.w - 2.0 * cx.ecart()) / l).min((zone.h - 2.0 * cx.ecart()) / h).max(1e-3);
+            let (w, t) = (l * k, img.hauteur as f32 * k);
+            let (x0, y0) = (zone.cx() - w / 2.0, zone.cy() - t * n / 2.0);
+            for j in 0..self.mosaique.max(1) {
+                cx.dl.image(Rect::new(x0, y0 + j as f32 * t, w, t + 0.5), img.clone());
+            }
+            return;
+        }
         // La mosaïque, carrée, au centre
         let n = self.mosaique.max(1);
         let cote = (zone.w.min(zone.h) - 2.0 * cx.ecart()).max(16.0);
@@ -255,6 +276,11 @@ impl Matieres {
             return;
         };
         cx.paragraph(b, &format!("{} · {} · {}", self.nom.as_deref().unwrap_or("?"), r.genre.nom(), r.resume()));
+        if r.genre == Sorte::Chaussee {
+            reglages_chaussee(cx, b, base, r);
+            r.borner();
+            return;
+        }
         cx.section(b, "Taille");
         let s = format!("{} m", nombre_court(r.cote));
         cx.slider(b, sub_id(base, 400), "Côté de la texture", &s, &mut r.cote, 0.25, 8.0);
@@ -273,6 +299,7 @@ impl Matieres {
             Sorte::Vase => ("Taille des taches", "Pas des rides"),
             Sorte::Paves => ("Longueur des pavés", "Largeur des pavés"),
             Sorte::Taille => ("Longueur des blocs", "Hauteur des assises"),
+            Sorte::Chaussee => ("", ""),
         };
         let s = format!("{} cm", nombre_court(r.longueur));
         cx.slider(b, sub_id(base, 420), lo, &s, &mut r.longueur, 2.0, 400.0);
@@ -311,6 +338,83 @@ impl Matieres {
             couleur(cx, b, sub_id(base, 500 + 10 * k), t);
         }
         r.borner();
+    }
+}
+
+/// Les réglages d'une chaussée : sa largeur (voies, accotements), sa longueur répétée,
+/// son marquage et son usure, son revêtement, ses couleurs.
+fn reglages_chaussee(cx: &mut Cx, b: &mut Body, base: Id, r: &mut Reglages) {
+    let puces = crate::contextes::lieux::Lieux::puces;
+    let m = |v: f32| format!("{} m", nombre_court(v));
+    let pc = |v: f32| format!("{:.0} %", v * 100.0);
+    cx.section(b, "Voies");
+    let ch = &mut r.chaussee;
+    let mut voies = ch.voies as f32;
+    cx.slider(b, sub_id(base, 600), "Nombre de voies", &ch.voies.to_string(), &mut voies, 1.0, 8.0);
+    ch.voies = voies.round() as u32;
+    let s = m(ch.largeur_voie);
+    cx.slider(b, sub_id(base, 601), "Largeur d'une voie", &s, &mut ch.largeur_voie, 2.0, 6.0);
+    ch.largeur_voie = (ch.largeur_voie * 20.0).round() / 20.0;
+    let s = m(ch.accotement);
+    cx.slider(b, sub_id(base, 602), "Accotements", &s, &mut ch.accotement, 0.0, 4.0);
+    ch.accotement = (ch.accotement * 20.0).round() / 20.0;
+    if let Some(k) = puces(cx, b, sub_id(base, 603), r.genre.appareils(), r.appareil as usize) {
+        r.appareil = k as u32;
+    }
+    let ch = &mut r.chaussee;
+    cx.paragraph(b, &format!("Largeur totale : {}", m(ch.largeur())));
+
+    cx.section(b, "Marquage");
+    for (k, (titre, t)) in [("Rives", &mut ch.rive), ("Axe (double sens, voies paires)", &mut ch.axe), ("Entre voies", &mut ch.separation)].into_iter().enumerate() {
+        cx.paragraph(b, titre);
+        if let Some(i) = puces(cx, b, sub_id(base, 610 + k), &TRAITS, *t as usize) {
+            *t = i as u32;
+        }
+    }
+    let s = m(ch.tiret);
+    cx.slider(b, sub_id(base, 620), "Tiret", &s, &mut ch.tiret, 0.5, 20.0);
+    ch.tiret = (ch.tiret * 4.0).round() / 4.0;
+    let s = m(ch.espace);
+    cx.slider(b, sub_id(base, 621), "Espace", &s, &mut ch.espace, 0.5, 30.0);
+    ch.espace = (ch.espace * 4.0).round() / 4.0;
+    let s = format!("{} cm", nombre_court(ch.ligne));
+    cx.slider(b, sub_id(base, 622), "Largeur des lignes", &s, &mut ch.ligne, 5.0, 50.0);
+    ch.ligne = ch.ligne.round();
+    let s = pc(ch.usure_marquage);
+    cx.slider(b, sub_id(base, 623), "Usure du marquage", &s, &mut ch.usure_marquage, 0.0, 1.0);
+
+    cx.section(b, "Revêtement");
+    let s = format!("{} mm", nombre_court(ch.granulat));
+    cx.slider(b, sub_id(base, 630), "Granulat", &s, &mut ch.granulat, 2.0, 30.0);
+    ch.granulat = ch.granulat.round();
+    let s = pc(ch.usure);
+    cx.slider(b, sub_id(base, 631), "Usure", &s, &mut ch.usure, 0.0, 1.0);
+    let s = pc(r.grain);
+    cx.slider(b, sub_id(base, 632), "Granularité", &s, &mut r.grain, 0.0, 1.0);
+    let s = pc(r.relief);
+    cx.slider(b, sub_id(base, 633), "Relief", &s, &mut r.relief, 0.0, 1.0);
+    let s = pc(r.variation);
+    cx.slider(b, sub_id(base, 634), "Plaques", &s, &mut r.variation, 0.0, 1.0);
+    let s = pc(r.irregularite);
+    cx.slider(b, sub_id(base, 635), "Fissures", &s, &mut r.irregularite, 0.0, 1.0);
+    if cx.button(b, sub_id(base, 636), &format!("Autre tirage (n° {})", r.graine)) {
+        r.graine = r.graine.wrapping_add(1);
+    }
+
+    cx.section(b, "Taille");
+    let s = format!("{} m (un multiple du pas des tirets)", nombre_court(r.cote));
+    cx.slider(b, sub_id(base, 640), "Longueur répétée", &s, &mut r.cote, 1.0, 80.0);
+    let res: Vec<String> = RESOLUTIONS.iter().map(|x| format!("{x} px")).collect();
+    let res_s: Vec<&str> = res.iter().map(|s| s.as_str()).collect();
+    let i = RESOLUTIONS.iter().position(|x| *x == r.resolution).unwrap_or(1);
+    cx.paragraph(b, "Pixels sur la largeur :");
+    if let Some(k) = puces(cx, b, sub_id(base, 641), &res_s, i) {
+        r.resolution = RESOLUTIONS[k];
+    }
+
+    for (k, (titre, t)) in [("Bitume", &mut r.couleur), ("Plaques", &mut r.couleur2), ("Marquage", &mut r.couleur_joint)].into_iter().enumerate() {
+        cx.section(b, titre);
+        couleur(cx, b, sub_id(base, 650 + 10 * k), t);
     }
 }
 
@@ -424,6 +528,10 @@ impl Contexte for Matieres {
                     Ok(format!("mosaique {n}"))
                 }
                 _ => Err("mosaique 1..6".into()),
+            },
+            "reglages" => match &self.reglages {
+                Some(r) => Ok(r.ecrire()),
+                None => Err("aucune matière ouverte".into()),
             },
             // L'image est-elle à jour ?
             "image" => Ok(if self.fabrication.is_some() { "en cours".into() } else if self.image.is_some() { "prete".into() } else { "aucune".into() }),

@@ -246,19 +246,19 @@ pub struct SortieTuile {
 /// `lieux!(Type)`, en plus de `module!`). Flow lui donne le lieu (ses octets, au format
 /// `.reel`) quand il change, puis lui demande des tuiles, dans le fil de la fabrique :
 /// son état est à part de celui de `Module` (une tuile longue ne bloque pas les
-/// commandes).
-pub trait ModuleLieux: Send + 'static {
+/// commandes). Les tuiles peuvent être demandées par plusieurs fils à la fois (`&self`).
+pub trait ModuleLieux: Send + Sync + 'static {
     fn nouveau() -> Self
     where
         Self: Sized;
     /// Le lieu, en octets `.reel`.
     fn lieu(&mut self, octets: &[u8]) -> Result<(), String>;
     /// La tuile `(z, i, j)` du dernier lieu reçu.
-    fn tuile(&mut self, cle: (u8, i32, i32)) -> Result<TuileFaite, String>;
+    fn tuile(&self, cle: (u8, i32, i32)) -> Result<TuileFaite, String>;
 }
 
 pub struct EtatLieux<M> {
-    pub module: Mutex<Option<M>>,
+    pub module: std::sync::RwLock<Option<M>>,
 }
 
 fn panique(e: Box<dyn std::any::Any + Send>) -> String {
@@ -272,14 +272,14 @@ fn octets_f32(v: &[f32]) -> Vec<u8> {
 
 impl<M: ModuleLieux> EtatLieux<M> {
     pub const fn new() -> EtatLieux<M> {
-        EtatLieux { module: Mutex::new(None) }
+        EtatLieux { module: std::sync::RwLock::new(None) }
     }
 
     /// # Safety
     /// `octets` valide sur `n` octets, `erreur` valide.
     pub unsafe fn lieu(&self, octets: *const u8, n: usize, erreur: *mut Tampon) -> i32 {
         let o = if octets.is_null() { &[][..] } else { std::slice::from_raw_parts(octets, n) };
-        let mut g = self.module.lock().unwrap_or_else(|e| e.into_inner());
+        let mut g = self.module.write().unwrap_or_else(|e| e.into_inner());
         let m = g.get_or_insert_with(M::nouveau);
         match catch_unwind(AssertUnwindSafe(|| m.lieu(o))).map_err(panique).and_then(|r| r) {
             Ok(()) => 0,
@@ -295,8 +295,12 @@ impl<M: ModuleLieux> EtatLieux<M> {
     /// # Safety
     /// `sortie` valide.
     pub unsafe fn tuile(&self, z: u8, i: i32, j: i32, sortie: *mut SortieTuile) -> i32 {
-        let mut g = self.module.lock().unwrap_or_else(|e| e.into_inner());
-        let m = g.get_or_insert_with(M::nouveau);
+        if self.module.read().map(|g| g.is_none()).unwrap_or(false) {
+            self.module.write().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(M::nouveau);
+        }
+        // En lecture : plusieurs fils à la fois
+        let g = self.module.read().unwrap_or_else(|e| e.into_inner());
+        let Some(m) = g.as_ref() else { return 1 };
         let r = catch_unwind(AssertUnwindSafe(|| m.tuile((z, i, j)))).map_err(panique).and_then(|r| r);
         let s = &mut *sortie;
         match r {

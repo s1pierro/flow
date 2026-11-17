@@ -1153,16 +1153,21 @@ pub fn texture(d: &Donnees, b: [f32; 4]) -> Vec<u8> {
 struct Echange {
     /// Les tuiles voulues, dans l'ordre où les faire, avec la retouche de la carte.
     voulues: Vec<(Cle, u64)>,
-    /// Celle en cours.
-    en_cours: Option<Cle>,
+    /// Celles en cours, une par fil occupé.
+    en_cours: Vec<Cle>,
     faites: Vec<Tuile>,
 }
 
-/// Le fil qui fabrique les tuiles de la maquette.
+/// Le nombre de fils de la fabrique (`FLOW_FILS`, 3 par défaut, de 1 à 6).
+pub fn fils() -> usize {
+    std::env::var("FLOW_FILS").ok().and_then(|v| v.parse().ok()).unwrap_or(3).clamp(1, 6)
+}
+
+/// Les fils qui fabriquent les tuiles de la maquette : chacun prend la première tuile
+/// voulue qui n'est pas déjà en cours.
 pub struct Fabrique {
     echange: Arc<(Mutex<Echange>, Condvar)>,
     arret: Arc<AtomicBool>,
-    fil: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Baisse la priorité du fil courant (Linux, Android : `setpriority` sur le fil).
@@ -1183,10 +1188,9 @@ impl Fabrique {
     pub fn new(donnees: Arc<RwLock<Donnees>>) -> Fabrique {
         let echange: Arc<(Mutex<Echange>, Condvar)> = Default::default();
         let arret = Arc::new(AtomicBool::new(false));
-        let (e, a) = (echange.clone(), arret.clone());
-        let fil = std::thread::Builder::new()
-            .name("maquette".into())
-            .spawn(move || {
+        for k in 0..fils() {
+            let (e, a, donnees) = (echange.clone(), arret.clone(), donnees.clone());
+            let _ = std::thread::Builder::new().name(format!("maquette {}", k + 1)).spawn(move || {
                 baisser_priorite();
                 // Abandonnée (`Drop`), la tuile en cours s'arrête à la prochaine étape
                 crate::booleens::arreter_avec(Some(a.clone()));
@@ -1208,7 +1212,7 @@ impl Fabrique {
                             };
                         }
                         let t = g.voulues.remove(0);
-                        g.en_cours = Some(t.0);
+                        g.en_cours.push(t.0);
                         t
                     };
                     let attente = crate::suivi::tache_min("attente des données", 5.0);
@@ -1221,23 +1225,24 @@ impl Fabrique {
                     }
                     let (m, _) = &*e;
                     let Ok(mut g) = m.lock() else { return };
-                    g.en_cours = None;
+                    g.en_cours.retain(|&c| c != cle);
                     if let Some(t) = fait {
                         g.faites.push(t);
                     }
                 }
-            })
-            .ok();
-        Fabrique { echange, arret, fil }
+            });
+        }
+        Fabrique { echange, arret }
     }
 
     /// Les tuiles voulues, dans l'ordre (remplace la demande d'avant).
     pub fn demander(&self, voulues: Vec<(Cle, u64)>) {
         let (m, c) = &*self.echange;
         if let Ok(mut g) = m.lock() {
-            let en_cours = g.en_cours;
-            g.voulues = voulues.into_iter().filter(|v| Some(v.0) != en_cours).collect();
-            c.notify_one();
+            // Ni celles en cours, ni celles finies pas encore prises (sinon refaites)
+            let deja: HashSet<Cle> = g.en_cours.iter().copied().chain(g.faites.iter().map(|t| t.cle)).collect();
+            g.voulues = voulues.into_iter().filter(|v| !deja.contains(&v.0)).collect();
+            c.notify_all();
         }
     }
 
@@ -1253,22 +1258,21 @@ impl Fabrique {
     /// Des tuiles demandées, en cours ou finies attendent.
     pub fn occupee(&self) -> bool {
         let (m, _) = &*self.echange;
-        m.lock().is_ok_and(|g| !g.voulues.is_empty() || g.en_cours.is_some() || !g.faites.is_empty())
+        m.lock().is_ok_and(|g| !g.voulues.is_empty() || !g.en_cours.is_empty() || !g.faites.is_empty())
     }
 
     /// Les clés en cours ou demandées (pour ne pas les redemander).
     pub fn attendues(&self) -> HashSet<Cle> {
         let (m, _) = &*self.echange;
-        m.lock().map(|g| g.voulues.iter().map(|v| v.0).chain(g.en_cours).collect()).unwrap_or_default()
+        m.lock().map(|g| g.voulues.iter().map(|v| v.0).chain(g.en_cours.iter().copied()).collect()).unwrap_or_default()
     }
 }
 
 impl Drop for Fabrique {
     fn drop(&mut self) {
         self.arret.store(true, Ordering::Relaxed);
+        // Sans attendre : les tuiles en cours finissent seules
         self.echange.1.notify_all();
-        // Sans attendre : la tuile en cours finit seule
-        self.fil.take();
     }
 }
 
