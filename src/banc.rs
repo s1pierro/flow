@@ -84,6 +84,9 @@ pub fn retablir(flow: &Path) {
     if b.charger(flow, &nom).is_ok() && val("lieux").as_deref() == Some("oui") {
         b.lieux = true;
         b.version += 1;
+        // `charger` vient de retenir « lieux = non » (Lieux n'y était pas encore) : sans
+        // ceci, le lancement suivant ne le remettait plus sur le banc
+        b.memoriser();
         b.noter("Lieux remis sur le banc (état du dernier lancement)");
     }
 }
