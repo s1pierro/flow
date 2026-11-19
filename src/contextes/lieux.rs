@@ -209,6 +209,12 @@ pub struct Lieux {
     suivi3d: bool,
     /// En maquette : les tracés du réseau et les remblais du banc en surimpression.
     sur: crate::relief3d::Surimpression,
+    /// La vue Matérialisation (une maquette à part : le niveau le plus fin seul, dans
+    /// un rayon, montré quand tout est fait) : on y est ou non, son rayon (m), son
+    /// centre (x, z), posé au point visé quand on y entre.
+    materialisation3d: bool,
+    zone_rayon: f32,
+    zone_centre: Option<[f32; 2]>,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
     /// la carte changent).
     selection: crate::selection::Selection,
@@ -285,6 +291,9 @@ impl Default for Lieux {
             defonce3d: false,
             suivi3d: false,
             sur: Default::default(),
+            materialisation3d: false,
+            zone_rayon: 500.0,
+            zone_centre: None,
             maquette3d: false,
             selection: Default::default(),
             resume: None,
@@ -325,8 +334,16 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     l.maquette3d = rendu.split_whitespace().any(|m| m == "maquette");
     l.defonce3d = rendu.split_whitespace().any(|m| m == "defonce");
     l.suivi3d = rendu.split_whitespace().any(|m| m == "suivi");
+    l.materialisation3d = l.maquette3d && rendu.split_whitespace().any(|m| m == "materialisation");
     if let Some(s) = crate::relief3d::Surimpression::lire(&e.nombres("surimpression")) {
         l.sur = s;
+    }
+    // « zone = rayon x z » : la zone de la Matérialisation
+    if let [r, x, z] = e.nombres("zone")[..] {
+        l.zone_rayon = r;
+        l.zone_centre = Some([x, z]);
+    } else if let Some(r) = e.nombre("zone_rayon") {
+        l.zone_rayon = r;
     }
     // Les tuiles sélectionnées : « selection = niveau/i/j … »
     l.selection = crate::selection::Selection::lire(e.texte("selection").unwrap_or(""), e.texte("selection_seules") == Some("oui"));
@@ -1313,6 +1330,13 @@ impl Lieux {
         }
         r.seules = self.selection.seules;
         r.sur = self.sur;
+        if self.materialisation3d && self.maquette3d && self.zone_centre.is_none() {
+            self.zone_centre = Some([r.camera.cible[0], r.camera.cible[2]]);
+        }
+        r.zone = match (self.materialisation3d && self.maquette3d, self.zone_centre) {
+            (true, Some(centre)) => Some(crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon }),
+            _ => None,
+        };
         r.placage = placage;
         let a = cx.couleurs().accent;
         r.accent = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
@@ -1322,28 +1346,51 @@ impl Lieux {
         // Le rendu, en haut à gauche, par-dessus la vue (et ses gestes)
         let m = cx.ecart();
         let mut x = zone.x + m;
-        // Carte ou Maquette ; Blanc, en plus, sur l'un comme sur l'autre ; en maquette,
-        // la défonce des lits
-        let n = if self.maquette3d { 5 } else { 3 };
-        for (i, nom) in ["Carte", "Maquette", "Blanc", "Défonce", "Suivi"].into_iter().enumerate().take(n) {
+        // Carte, Maquette ou Matérialisation ; Blanc, en plus, sur chacune ; en maquette
+        // (et en matérialisation), la défonce des lits et le suivi
+        let n = if self.maquette3d { 6 } else { 4 };
+        let mat = self.maquette3d && self.materialisation3d;
+        // Trop étroit : les pilules passent à la ligne
+        let mut y = zone.y + m;
+        for (i, nom) in ["Carte", "Maquette", "Matérialisation", "Blanc", "Défonce", "Suivi"].into_iter().enumerate().take(n) {
             let choisi = match i {
                 0 => !self.maquette3d,
-                1 => self.maquette3d,
-                2 => self.blanc3d,
-                3 => self.defonce3d,
+                1 => self.maquette3d && !mat,
+                2 => mat,
+                3 => self.blanc3d,
+                4 => self.defonce3d,
                 _ => self.suivi3d,
             };
-            if cx.pill(sub_id(base, 30 + i), x, zone.y + m, nom, choisi) {
+            if x > zone.x + m && x + cx.pill_width(nom) > zone.right() - m {
+                x = zone.x + m;
+                y += cx.commande() + m * 0.5;
+            }
+            if cx.pill(sub_id(base, 30 + i), x, y, nom, choisi) {
                 match i {
                     0 => self.maquette3d = false,
-                    1 => self.maquette3d = true,
-                    2 => self.blanc3d = !self.blanc3d,
-                    3 => self.defonce3d = !self.defonce3d,
+                    1 => {
+                        self.maquette3d = true;
+                        self.materialisation3d = false;
+                    }
+                    2 => {
+                        // La zone se centre au point visé en entrant
+                        if !mat {
+                            self.zone_centre = Some([r.camera.cible[0], r.camera.cible[2]]);
+                        }
+                        self.maquette3d = true;
+                        self.materialisation3d = true;
+                    }
+                    3 => self.blanc3d = !self.blanc3d,
+                    4 => self.defonce3d = !self.defonce3d,
                     _ => self.suivi3d = !self.suivi3d,
                 }
             }
             // Un peu plus d'écart avant l'interrupteur Blanc
-            x += cx.pill_width(nom) + m * if i == 1 { 1.5 } else { 0.5 };
+            x += cx.pill_width(nom) + m * if i == 2 { 1.5 } else { 0.5 };
+        }
+        // La zone fine qui se prépare : son avancement au milieu de la vue
+        if let Some(e) = r.zone_etat {
+            dessiner_attente_zone(cx, zone, &e, self.zone_rayon);
         }
         // La génération en cours, en bas à gauche : tuiles faites sur tuiles du lot, et
         // une barre d'avancement au pied de la pastille
@@ -1364,7 +1411,7 @@ impl Lieux {
             cx.dl.rrect(Rect::new(bx, by, (bw * f).max(bh), bh), bh / 2.0, c.accent);
         }
         if self.maquette3d && self.suivi3d {
-            let haut = zone.y + m + cx.commande() + m;
+            let haut = y + cx.commande() + m;
             let bas = zone.y + zone.h - m - if r.generation.is_some() { cx.commande() + m } else { 0.0 };
             dessiner_suivi(cx, Rect::new(zone.x + m, haut, zone.w - 2.0 * m, (bas - haut).max(0.0)), zone);
         }
@@ -1667,6 +1714,26 @@ impl Lieux {
                         if let Some(r) = self.trois_d.as_mut() {
                             r.refaire_traces();
                         }
+                    }
+                }
+                // La Matérialisation : le niveau le plus fin seul, dans un rayon, montré
+                // quand tout est fait
+                if self.trois_d.is_some() && self.maquette3d && self.materialisation3d {
+                    cx.section(&mut b, "Matérialisation");
+                    cx.slider(&mut b, sub_id(base, 671), "Rayon", &format!("{:.0} m", self.zone_rayon), &mut self.zone_rayon, 50.0, 1500.0);
+                    self.zone_rayon = (self.zone_rayon / 25.0).round() * 25.0;
+                    {
+                        if let Ok(d) = carte.donnees.read() {
+                            let centre = self.zone_centre.or(self.trois_d.as_ref().map(|r| [r.camera.cible[0], r.camera.cible[2]])).unwrap_or([0.0; 2]);
+                            let n = crate::relief3d::tuiles_zone(&d, crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon }).len();
+                            let (_, _, c) = d.monde();
+                            let cote = c / (1u32 << crate::relief3d::niveau_fin(&d)) as f32;
+                            let trop = if n > crate::relief3d::ZONE_MAX { format!(" : trop (au plus {})", crate::relief3d::ZONE_MAX) } else { String::new() };
+                            cx.paragraph(&mut b, &format!("{} de {:.0} m{trop}. Elles sont toutes matérialisées avant que la vue paraisse ; la caméra reste assez près pour voir la zone entière.", pluriel(n, "tuile", "tuiles"), cote));
+                        }
+                    }
+                    if cx.button(&mut b, sub_id(base, 672), "Recentrer sur le point visé") {
+                        self.zone_centre = self.trois_d.as_ref().map(|r| [r.camera.cible[0], r.camera.cible[2]]);
                     }
                 }
                 // L'ordre de dessin, du dessus au dessous ; la 3D, drapée des mêmes
@@ -2325,7 +2392,16 @@ impl Contexte for Lieux {
                 self.blanc3d = a("blanc");
                 self.defonce3d = a("defonce");
                 self.suivi3d = a("suivi");
-                Ok(format!("rendu maquette={} blanc={} defonce={} suivi={}", self.maquette3d, self.blanc3d, self.defonce3d, self.suivi3d))
+                if a("materialisation") {
+                    if !self.materialisation3d {
+                        self.zone_centre = self.trois_d.as_ref().map(|t| [t.camera.cible[0], t.camera.cible[2]]);
+                    }
+                    self.maquette3d = true;
+                    self.materialisation3d = true;
+                } else {
+                    self.materialisation3d = false;
+                }
+                Ok(format!("rendu maquette={} materialisation={} blanc={} defonce={} suivi={}", self.maquette3d, self.materialisation3d, self.blanc3d, self.defonce3d, self.suivi3d))
             }
             "selection" => {
                 if m.len() > 1 {
@@ -2362,6 +2438,24 @@ impl Contexte for Lieux {
                     _ => return Some(Err("remblai [oui | non | distance <m> | rayon <k>]".into())),
                 }
                 Ok(format!("remblai {} distance {} rayon {}", self.sur.remblai, self.sur.remblai_distance, self.sur.remblai_rayon))
+            }
+            // La zone fine : « zone non », « zone <rayon> » (au point visé), « zone »
+            "zone" => {
+                match m.get(1).map(|s| s.as_str()) {
+                    Some("non") => self.materialisation3d = false,
+                    Some(x) => match x.parse::<f32>() {
+                        Ok(r) => {
+                            self.zone_rayon = r.clamp(50.0, 1500.0);
+                            self.materialisation3d = true;
+                            self.maquette3d = true;
+                            self.zone_centre = self.trois_d.as_ref().map(|t| [t.camera.cible[0], t.camera.cible[2]]);
+                        }
+                        Err(_) => return Some(Err("zone [non | <rayon>]".into())),
+                    },
+                    None => {}
+                }
+                let etat = self.trois_d.as_ref().and_then(|t| t.zone_etat).map_or("prête ou éteinte".to_string(), |e| format!("{} / {} tuiles, {:.0} s{}{}", e.faites, e.total, e.ecoule, e.reste.map_or(String::new(), |r| format!(", reste ~{r:.0} s")), if e.trop { ", trop de tuiles" } else { "" }));
+                Ok(format!("zone {} rayon {} centre {:?} · {etat}", self.materialisation3d, self.zone_rayon, self.zone_centre))
             }
             "seules" => {
                 self.selection.seules = matches!(m.get(1).map(|s| s.as_str()), Some("oui" | "1" | "vrai"));
@@ -2402,7 +2496,7 @@ impl Contexte for Lieux {
         if self.plan.is_some() {
             e.mettre("plan", "oui");
         }
-        let rendu: Vec<&str> = [(self.maquette3d, "maquette"), (self.blanc3d, "blanc"), (self.defonce3d, "defonce"), (self.suivi3d, "suivi")].into_iter().filter(|r| r.0).map(|r| r.1).collect();
+        let rendu: Vec<&str> = [(self.maquette3d, "maquette"), (self.maquette3d && self.materialisation3d, "materialisation"), (self.blanc3d, "blanc"), (self.defonce3d, "defonce"), (self.suivi3d, "suivi")].into_iter().filter(|r| r.0).map(|r| r.1).collect();
         if !rendu.is_empty() {
             e.mettre("rendu3d", rendu.join(" "));
         }
@@ -2414,6 +2508,11 @@ impl Contexte for Lieux {
         }
         if self.sur != crate::relief3d::Surimpression::default() {
             e.mettre("surimpression", self.sur.ecrire());
+        }
+        match self.zone_centre {
+            Some(c) => e.mettre("zone", format!("{} {} {}", self.zone_rayon, c[0], c[1])),
+            _ if self.zone_rayon != 500.0 => e.mettre("zone_rayon", self.zone_rayon),
+            _ => {}
         }
         if let Some((m, n)) = &self.ligne {
             e.mettre("ligne", format!("{m} {n}"));
@@ -2739,3 +2838,43 @@ fn dessiner_suivi(cx: &mut Cx, p: Rect, zone: Rect) {
     }
     cx.clip(Some(zone));
 }
+
+/// L'attente de la zone fine, au milieu de la vue : les tuiles matérialisées sur
+/// celles de la zone, une barre, le temps passé et ce qui reste à peu près.
+fn dessiner_attente_zone(cx: &mut Cx, zone: Rect, e: &crate::relief3d::EtatZone, rayon: f32) {
+    let c = cx.couleurs();
+    let pad = cx.pad();
+    let titre = "Matérialisation en préparation";
+    let ligne = if e.trop {
+        format!("{} tuiles : trop pour la mémoire (au plus {}). Réduisez le rayon.", e.total, crate::relief3d::ZONE_MAX)
+    } else {
+        format!("{} / {} tuiles matérialisées · rayon {:.0} m", e.faites, e.total, rayon)
+    };
+    let temps = if e.trop {
+        String::new()
+    } else {
+        let duree = |s: f32| if s >= 90.0 { format!("{:.0} min {:02.0} s", (s / 60.0).floor(), s % 60.0) } else { format!("{s:.0} s") };
+        match e.reste {
+            Some(r) => format!("{} écoulées · encore ~{}", duree(e.ecoule), duree(r)),
+            None => format!("{} écoulées", duree(e.ecoule)),
+        }
+    };
+    let w = (cx.measure(&ligne, 14.0).max(cx.measure(titre, 16.0)).max(cx.measure(&temps, 13.0)) + 4.0 * pad).min(zone.w - 2.0 * pad);
+    let h = 3.0 * cx.commande();
+    let p = Rect::new(zone.cx() - w / 2.0, zone.cy() - h / 2.0, w, h);
+    let rayon_coin = cx.theme.rayon(cx.commande());
+    cx.ombre(p, rayon_coin, 8.0);
+    cx.dl.rrect(p, rayon_coin, c.surface);
+    let x = p.x + 2.0 * pad;
+    cx.text_at(x, p.y + h * 0.20, titre, 16.0, c.texte);
+    cx.text_at(x, p.y + h * 0.45, &ligne, 14.0, if e.trop { c.accent } else { c.texte });
+    cx.text_at(x, p.y + h * 0.66, &temps, 13.0, c.pale);
+    if !e.trop {
+        let (bx, bw, bh) = (x, p.w - 4.0 * pad, (4.0 * cx.dp).round());
+        let by = p.y + h * 0.84;
+        cx.dl.rrect(Rect::new(bx, by, bw, bh), bh / 2.0, c.puce);
+        let f = e.faites as f32 / e.total.max(1) as f32;
+        cx.dl.rrect(Rect::new(bx, by, (bw * f).max(bh), bh), bh / 2.0, c.accent);
+    }
+}
+

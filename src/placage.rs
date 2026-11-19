@@ -19,16 +19,21 @@ use std::time::{Instant, SystemTime};
 pub const COTE: u32 = 512;
 
 /// La matière de la bibliothèque de chaque matière de la maquette, de 1 à `HAUT - 1`,
-/// puis celle de la bordure du quai (la couche `COUCHE_BORDURE`).
-pub const TABLE: [(u16, &str); 6] = [
+/// puis celle de la bordure du quai (la couche `COUCHE_BORDURE`), puis le bitume de la
+/// chaussée (`COUCHE_CHAUSSEE`).
+pub const TABLE: [(u16, &str); 8] = [
     (matiere::LIT, "vase-lit"),
     (matiere::BERGE, "taille-quai"),
     (matiere::REMBLAI, "pierre-quai"),
     (matiere::QUAI, "paves-quai"),
     (matiere::QUAI_MUR, "pierre-quai"),
     (matiere::QUAI, "bordure-quai"),
+    (matiere::CHAUSSEE, "bitume"),
+    (matiere::BETON, "beton-clair"),
 ];
 pub const COUCHE_BORDURE: usize = 5;
+pub const COUCHE_CHAUSSEE: usize = 6;
+pub const COUCHE_BETON: usize = 7;
 
 #[derive(Default)]
 struct Etat {

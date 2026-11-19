@@ -255,6 +255,10 @@ pub trait ModuleLieux: Send + Sync + 'static {
     fn lieu(&mut self, octets: &[u8]) -> Result<(), String>;
     /// La tuile `(z, i, j)` du dernier lieu reçu.
     fn tuile(&self, cle: (u8, i32, i32)) -> Result<TuileFaite, String>;
+    /// La même tuile pour la vue Matérialisation de Lieux (par défaut : comme `tuile`).
+    fn materialiser(&self, cle: (u8, i32, i32)) -> Result<TuileFaite, String> {
+        self.tuile(cle)
+    }
 }
 
 pub struct EtatLieux<M> {
@@ -295,13 +299,23 @@ impl<M: ModuleLieux> EtatLieux<M> {
     /// # Safety
     /// `sortie` valide.
     pub unsafe fn tuile(&self, z: u8, i: i32, j: i32, sortie: *mut SortieTuile) -> i32 {
+        self.fabriquer(z, i, j, sortie, false)
+    }
+
+    /// # Safety
+    /// `sortie` valide.
+    pub unsafe fn materialiser(&self, z: u8, i: i32, j: i32, sortie: *mut SortieTuile) -> i32 {
+        self.fabriquer(z, i, j, sortie, true)
+    }
+
+    unsafe fn fabriquer(&self, z: u8, i: i32, j: i32, sortie: *mut SortieTuile, materialiser: bool) -> i32 {
         if self.module.read().map(|g| g.is_none()).unwrap_or(false) {
             self.module.write().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(M::nouveau);
         }
         // En lecture : plusieurs fils à la fois
         let g = self.module.read().unwrap_or_else(|e| e.into_inner());
         let Some(m) = g.as_ref() else { return 1 };
-        let r = catch_unwind(AssertUnwindSafe(|| m.tuile((z, i, j)))).map_err(panique).and_then(|r| r);
+        let r = catch_unwind(AssertUnwindSafe(|| if materialiser { m.materialiser((z, i, j)) } else { m.tuile((z, i, j)) })).map_err(panique).and_then(|r| r);
         let s = &mut *sortie;
         match r {
             Ok(t) => {
@@ -342,6 +356,13 @@ macro_rules! lieux {
         #[no_mangle]
         pub unsafe extern "C" fn banc_lieux_tuile(z: u8, i: i32, j: i32, sortie: *mut $crate::SortieTuile) -> i32 {
             BANC_LIEUX.tuile(z, i, j, sortie)
+        }
+
+        /// # Safety
+        /// Appelée par Flow (vue Matérialisation ; facultative pour Flow).
+        #[no_mangle]
+        pub unsafe extern "C" fn banc_lieux_materialiser(z: u8, i: i32, j: i32, sortie: *mut $crate::SortieTuile) -> i32 {
+            BANC_LIEUX.materialiser(z, i, j, sortie)
         }
     };
 }

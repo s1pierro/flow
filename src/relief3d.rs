@@ -107,6 +107,8 @@ pub struct Relief3d {
     /// Le rendu Maquette (`maquette`) : des tuiles en volume, fabriquées à part.
     pub maquette: bool,
     fabrique: Option<crate::maquette::Fabrique>,
+    /// La fabrique et les tuiles faites sont celles de la Matérialisation.
+    fabrique_materialise: bool,
     tuiles_maquette: HashMap<Cle, Faite>,
     /// Les tuiles sélectionnées de la maquette (surlignées de `accent`), et s'il ne
     /// faut montrer qu'elles.
@@ -137,6 +139,77 @@ pub struct Relief3d {
     /// Les hauteurs basse et haute du relief de chaque tuile (`bornes`), à la retouche `bornes_de`.
     bornes: std::cell::RefCell<HashMap<Cle, (f32, f32)>>,
     bornes_de: u64,
+    /// La zone de la vue Matérialisation (`ZoneFine`), si on y est : seules ses tuiles, toutes au
+    /// niveau le plus fin, montrées une fois toutes faites.
+    pub zone: Option<ZoneFine>,
+    /// Ses tuiles, pour la zone et la retouche de la carte données.
+    zone_cles: Option<(ZoneFine, u64, Vec<Cle>)>,
+    /// Son avancement tant qu'elle n'est pas prête, pour l'attente.
+    pub zone_etat: Option<EtatZone>,
+    zone_debut: Option<(ZoneFine, std::time::Instant, usize)>,
+}
+
+/// La zone de la vue Matérialisation : un disque de `rayon` mètres autour de `centre` (x, z), où seules les
+/// tuiles du niveau le plus fin sont montrées, toutes ensemble une fois faites ; la
+/// caméra ne s'en éloigne pas plus qu'il ne faut pour la voir entière.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoneFine {
+    pub centre: [f32; 2],
+    pub rayon: f32,
+}
+
+/// Les tuiles d'une zone fine au plus (au-delà, on ne la matérialise pas : la mémoire).
+pub const ZONE_MAX: usize = 400;
+
+/// Où en est la zone fine qui se prépare.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EtatZone {
+    pub faites: usize,
+    pub total: usize,
+    /// Les secondes depuis le début, et l'estimation de ce qui reste (après la
+    /// première tuile faite).
+    pub ecoule: f32,
+    pub reste: Option<f32>,
+    /// Trop de tuiles : rien n'est lancé.
+    pub trop: bool,
+}
+
+/// Le niveau le plus fin des tuiles du lieu.
+pub fn niveau_fin(d: &Donnees) -> u8 {
+    let (_, _, c) = d.monde();
+    ((c / (COTES as f32 * d.lieu.pas as f32)).log2().floor() as i32).clamp(0, NIVEAU_MAX as i32) as u8
+}
+
+/// Les tuiles du niveau le plus fin qui touchent la zone `z` (et le lieu), de la plus
+/// proche du centre à la plus lointaine.
+pub fn tuiles_zone(d: &Donnees, z: ZoneFine) -> Vec<Cle> {
+    let n = niveau_fin(d);
+    let (x0, z0, c) = d.monde();
+    let t = c / (1u32 << n) as f32;
+    let e = d.lieu.etendue();
+    let max = (1i32 << n) - 1;
+    let [cx, cz] = z.centre;
+    let r = z.rayon.max(1.0);
+    let (i0, i1) = ((((cx - r - x0) / t).floor() as i32).max(0), (((cx + r - x0) / t).floor() as i32).min(max));
+    let (j0, j1) = ((((cz - r - z0) / t).floor() as i32).max(0), (((cz + r - z0) / t).floor() as i32).min(max));
+    let mut v = Vec::new();
+    for j in j0..=j1 {
+        for i in i0..=i1 {
+            let cle = (n, i, j);
+            let b = boite_tuile(d, cle);
+            if (b[0] as f64) > e[2] || (b[2] as f64) < e[0] || (b[1] as f64) > e[3] || (b[3] as f64) < e[1] {
+                continue;
+            }
+            let dx = (b[0] - cx).max(0.0).max(cx - b[2]);
+            let dz = (b[1] - cz).max(0.0).max(cz - b[3]);
+            let dist = dx.hypot(dz);
+            if dist <= r {
+                v.push((dist, cle));
+            }
+        }
+    }
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v.into_iter().map(|x| x.1).collect()
 }
 
 /// Une tuile de la maquette reçue de la fabrique.
@@ -158,7 +231,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0 }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, banc: 0, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -336,9 +409,17 @@ impl Relief3d {
         cx.dl.rrect(zone, 0.0, [ciel[0], ciel[1], ciel[2], 255]);
         let donnees = carte.donnees.clone();
         let synchrone = cfg!(test) || std::env::var_os("FLOW_MAQUETTE_SYNC").is_some();
+        // La Matérialisation (une zone) a ses propres tuiles : en changeant de vue, la
+        // fabrique et les tuiles faites sont refaites
+        let materialiser = self.zone.is_some();
+        if materialiser != self.fabrique_materialise {
+            self.fabrique_materialise = materialiser;
+            self.fabrique = None;
+            self.tuiles_maquette.clear();
+        }
         if self.fabrique.is_none() && !synchrone {
             crate::suivi::repere("maquette", false);
-            self.fabrique = Some(crate::maquette::Fabrique::new(donnees.clone()));
+            self.fabrique = Some(crate::maquette::Fabrique::pour(donnees.clone(), materialiser));
         }
         if self.bornes_de != carte.compteur {
             self.bornes_de = carte.compteur;
@@ -354,11 +435,35 @@ impl Relief3d {
         let attente = crate::suivi::tache_min("attente des données (image)", 5.0);
         let Ok(d) = donnees.read() else { return };
         drop(attente);
+        // La zone fine : la cible reste dans le disque, la caméra assez près pour le
+        // voir entier (le champ le plus étroit, en largeur en portrait)
+        let aspect = zone.w / zone.h.max(1.0);
+        if let Some(z) = self.zone {
+            let c = &mut self.camera;
+            let (dx, dz) = (c.cible[0] - z.centre[0], c.cible[2] - z.centre[1]);
+            let l = dx.hypot(dz);
+            if l > z.rayon {
+                c.cible[0] = z.centre[0] + dx / l * z.rayon;
+                c.cible[2] = z.centre[1] + dz / l * z.rayon;
+            }
+            let demi = (CHAMP / 2.0).tan() * aspect.min(1.0);
+            c.distance = c.distance.min(z.rayon * 1.15 / demi.max(0.05)).max(20.0);
+        }
         self.poser(&d);
-        let mvp = self.mvp(zone.w / zone.h.max(1.0));
-        // Les seules tuiles sélectionnées, à leur niveau ; sinon, celles de la vue
-        let seules = self.seules && !self.selection.is_empty();
-        let voulues: Vec<Cle> = if seules {
+        let mvp = self.mvp(aspect);
+        let zone_cles: Option<Vec<Cle>> = self.zone.map(|z| {
+            if self.zone_cles.as_ref().is_none_or(|(zz, n, _)| *zz != z || *n != carte.compteur) {
+                self.zone_cles = Some((z, carte.compteur, tuiles_zone(&d, z)));
+            }
+            self.zone_cles.as_ref().map(|x| x.2.clone()).unwrap_or_default()
+        });
+        let trop = zone_cles.as_ref().is_some_and(|v| v.len() > ZONE_MAX);
+        // Les seules tuiles sélectionnées, à leur niveau ; sinon, celles de la vue ; en
+        // zone fine, les siennes (aucune s'il y en a trop)
+        let seules = (self.seules && !self.selection.is_empty()) || zone_cles.is_some();
+        let voulues: Vec<Cle> = if let Some(v) = &zone_cles {
+            if trop { Vec::new() } else { v.clone() }
+        } else if seules {
             let mut v: Vec<Cle> = self.selection.iter().copied().collect();
             v.sort();
             v
@@ -408,7 +513,7 @@ impl Relief3d {
             }
             None => {
                 // Essais et aperçus : tout de suite
-                let v: Vec<crate::maquette::Tuile> = a_faire.iter().map(|&(cle, faite)| crate::maquette::tuile(&d, cle, faite)).collect();
+                let v: Vec<crate::maquette::Tuile> = a_faire.iter().map(|&(cle, faite)| crate::maquette::tuile_pour(&d, cle, faite, materialiser)).collect();
                 self.en_attente = false;
                 v
             }
@@ -428,6 +533,40 @@ impl Relief3d {
                 (Maillage3d { id: id ^ (1 << 60), revision: self.revision, sommets: sommets.clone(), indices: Arc::new(t.defonce_indices) }, Maillage3d { id: id ^ (1 << 59), revision: self.revision, sommets, indices: Arc::new(t.defonce_aretes) })
             });
             self.tuiles_maquette.insert(t.cle, Faite { morceau: Morceau { maillage, faite: t.faite, vu: self.image, voirie: 0, aretes }, image, contour, eau, defonce, mesure: t.mesure });
+        }
+        // La zone fine : rien tant que toutes ses tuiles ne sont pas faites (à jour)
+        if let Some(v) = &zone_cles {
+            let z = self.zone.unwrap();
+            let faites = {
+                let Ok(d) = donnees.read() else { return };
+                let t = &self.tuiles_maquette;
+                if trop { 0 } else { v.iter().filter(|&&k| t.get(&k).is_some_and(|m| carte.a_jour(m.morceau.faite, boite_tuile(&d, k)))).count() }
+            };
+            if self.zone_debut.as_ref().is_none_or(|(zz, _, _)| *zz != z) {
+                self.zone_debut = Some((z, std::time::Instant::now(), faites));
+            }
+            let (_, debut, deja) = self.zone_debut.unwrap();
+            let ecoule = debut.elapsed().as_secs_f32();
+            let neuves = faites.saturating_sub(deja);
+            let reste = (neuves > 0).then(|| ecoule / neuves as f32 * (v.len() - faites) as f32);
+            let etat = EtatZone { faites, total: v.len(), ecoule, reste, trop };
+            // Gardées en mémoire tant que la zone est là
+            for &k in v {
+                if let Some(f) = self.tuiles_maquette.get_mut(&k) {
+                    f.morceau.vu = self.image;
+                }
+            }
+            if trop || faites < v.len() {
+                self.zone_etat = Some(etat);
+                self.montrees.clear();
+                self.dessinees = 0;
+                self.oublier(Some(v));
+                return;
+            }
+        }
+        self.zone_etat = None;
+        if zone_cles.is_none() {
+            self.zone_debut = None;
         }
         let mut montrees: Vec<Cle> = Vec::new();
         let mut vues = HashSet::new();
@@ -486,8 +625,10 @@ impl Relief3d {
             let c = self.camera.cible;
             let r = self.camera.distance;
             let Ok(d) = donnees.read() else { return };
+            // En Matérialisation, comme hors sélection : selon la distance et le rayon
+            let selection_seule = seules && zone_cles.is_none();
             let choisir = |distance: f32, rayon: f32| -> Vec<Cle> {
-                if seules {
+                if selection_seule {
                     if voulues.len() <= self.traces_tuiles { voulues.clone() } else { Vec::new() }
                 } else if r <= distance {
                     voulues.iter().copied().filter(|&cle| {
@@ -509,11 +650,20 @@ impl Relief3d {
         self.bati_dessinees = 0;
         let dist = self.camera.distance;
         cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: faces, blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes, placage: self.placage.clone(), traces });
-        if self.tuiles_maquette.len() > GARDES {
+        let zone = zone_cles;
+        self.oublier(zone.as_ref());
+    }
+
+    /// Au-delà de `GARDES` tuiles de maquette faites, oublie les moins récemment vues
+    /// (jamais le fond, la sélection ni la zone fine).
+    fn oublier(&mut self, zone: Option<&Vec<Cle>>) {
+        let garde = GARDES.max(zone.map_or(0, |z| z.len() + 50));
+        if self.tuiles_maquette.len() > garde {
             let sel = &self.selection;
-            let mut v: Vec<(u64, Cle)> = self.tuiles_maquette.iter().filter(|(k, _)| k.0 > 0 && !sel.contains(k)).map(|(k, m)| (m.morceau.vu, *k)).collect();
+            let dans_zone: HashSet<Cle> = zone.map(|z| z.iter().copied().collect()).unwrap_or_default();
+            let mut v: Vec<(u64, Cle)> = self.tuiles_maquette.iter().filter(|(k, _)| k.0 > 0 && !sel.contains(k) && !dans_zone.contains(k)).map(|(k, m)| (m.morceau.vu, *k)).collect();
             v.sort();
-            let n = self.tuiles_maquette.len() - GARDES;
+            let n = self.tuiles_maquette.len() - garde;
             for (_, k) in v.iter().take(n) {
                 self.tuiles_maquette.remove(k);
             }
@@ -1362,6 +1512,42 @@ mod tests {
         let h: Vec<f32> = (0..g.points()).map(|i| g.point(i).0 as f32 * 0.5).collect();
         let eau = vec![false; g.points()];
         Donnees::new(Lieu::sur("Pente", 49.0, 1.0, 0.0, 0.0, pas, g, -10.0, &h, &eau, Vec::new(), Vec::new(), Vec::new()))
+    }
+
+    /// Banc : FLOW_LIEU ; le nombre de tuiles d'une zone fine au centre selon le rayon.
+    #[test]
+    #[ignore]
+    fn banc_zone_fine() {
+        let l = sage_reel::Lieu::lire(std::path::Path::new(&std::env::var("FLOW_LIEU").unwrap())).unwrap();
+        let d = Donnees::new(l);
+        let e = d.lieu.etendue();
+        let centre = [((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32];
+        let (_, _, c) = d.monde();
+        println!("niveau fin {} : tuiles de {:.0} m", niveau_fin(&d), c / (1u32 << niveau_fin(&d)) as f32);
+        for r in [100.0, 250.0, 500.0, 750.0, 1000.0, 1500.0] {
+            println!("rayon {r} m : {} tuiles", tuiles_zone(&d, ZoneFine { centre, rayon: r }).len());
+        }
+    }
+
+    #[test]
+    fn la_zone_fine_prend_les_tuiles_les_plus_fines_du_disque() {
+        let d = donnees();
+        let n = niveau_fin(&d);
+        let z = ZoneFine { centre: [0.0, 0.0], rayon: 300.0 };
+        let v = tuiles_zone(&d, z);
+        assert!(!v.is_empty() && v.iter().all(|c| c.0 == n));
+        // Toutes touchent le disque ; la plus proche contient le centre
+        for &c in &v {
+            let b = boite_tuile(&d, c);
+            let dx = (b[0] - 0.0f32).max(0.0).max(0.0 - b[2]);
+            let dz = (b[1] - 0.0f32).max(0.0).max(0.0 - b[3]);
+            assert!(dx.hypot(dz) <= 300.0);
+        }
+        let b = boite_tuile(&d, v[0]);
+        assert!(b[0] <= 0.0 && b[2] >= 0.0 && b[1] <= 0.0 && b[3] >= 0.0);
+        // Un rayon double : environ quatre fois plus de tuiles
+        let w = tuiles_zone(&d, ZoneFine { rayon: 600.0, ..z });
+        assert!(w.len() > 3 * v.len() && w.len() < 5 * v.len(), "{} {}", v.len(), w.len());
     }
 
     #[test]

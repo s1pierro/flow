@@ -30,6 +30,8 @@ pub struct Charge {
     /// Ses fonctions de Lieux, s'il en a (`lieux!`) : il fabrique alors les tuiles de la
     /// maquette, quand Lieux est sur le banc.
     lieux: Option<(FnLieuxLieu, FnLieuxTuile)>,
+    /// Les tuiles de la vue Matérialisation (facultatif).
+    materialiser: Option<FnLieuxTuile>,
     /// Sa fonction des tracés en surimpression sur la maquette (`traces!`), s'il en a.
     traces: Option<FnLieuxTraces>,
     /// Sa fonction des faces en surimpression (`faces!`), s'il en a.
@@ -176,6 +178,7 @@ impl Banc {
                         scene: symbole(h, "banc_scene")?,
                         liberer: symbole(h, "banc_liberer")?,
                         lieux: symbole::<FnLieuxLieu>(h, "banc_lieux_lieu").ok().zip(symbole::<FnLieuxTuile>(h, "banc_lieux_tuile").ok()),
+                        materialiser: symbole::<FnLieuxTuile>(h, "banc_lieux_materialiser").ok(),
                         traces: symbole::<FnLieuxTraces>(h, "banc_lieux_traces").ok(),
                         faces: symbole::<FnLieuxFaces>(h, "banc_lieux_faces").ok(),
                         sommets: Default::default(),
@@ -189,7 +192,7 @@ impl Banc {
             Ok(mut m) => {
                 m.lire_scene();
                 let mut l = String::new();
-                for (oui, quoi) in [(m.lieux.is_some(), "tuiles"), (m.traces.is_some(), "tracés"), (m.faces.is_some(), "faces")] {
+                for (oui, quoi) in [(m.lieux.is_some(), "tuiles"), (m.materialiser.is_some(), "matérialisation"), (m.traces.is_some(), "tracés"), (m.faces.is_some(), "faces")] {
                     if oui {
                         l += if l.is_empty() { ", Lieux : " } else { ", " };
                         l += quoi;
@@ -231,10 +234,21 @@ impl Banc {
 /// Appelé dans le fil de la fabrique ; le verrou du banc n'est pas tenu pendant que le
 /// module travaille.
 pub fn tuile_lieux(d: &crate::carte::Donnees, faite: u64, cle: (u8, i32, i32)) -> Option<Result<(Vec<f32>, Vec<u32>, Vec<u8>), String>> {
+    tuile_lieux_de(d, faite, cle, false)
+}
+
+/// La tuile de la vue Matérialisation faite par le module, s'il en fait (sinon rien :
+/// Flow prend la tuile de la maquette).
+pub fn materialiser_lieux(d: &crate::carte::Donnees, faite: u64, cle: (u8, i32, i32)) -> Option<Result<(Vec<f32>, Vec<u32>, Vec<u8>), String>> {
+    tuile_lieux_de(d, faite, cle, true)
+}
+
+fn tuile_lieux_de(d: &crate::carte::Donnees, faite: u64, cle: (u8, i32, i32), materialiser: bool) -> Option<Result<(Vec<f32>, Vec<u32>, Vec<u8>), String>> {
     let (f_lieu, f_tuile, liberer, numero, donne) = {
         let b = banc();
         let m = b.module.as_ref().filter(|_| b.lieux)?;
         let (l, t) = m.lieux?;
+        let t = if materialiser { m.materialiser? } else { t };
         (l, t, m.liberer, m.numero, b.lieu_donne)
     };
     if donne != Some((numero, faite)) {

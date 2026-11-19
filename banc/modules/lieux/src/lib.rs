@@ -23,7 +23,7 @@ use sage_reel::reseau;
 pub(crate) static LIEU: Mutex<Option<Arc<Donnees>>> = Mutex::new(None);
 
 /// Les variantes de la fabrication des tuiles ; la première est celle de Flow.
-const VARIANTES: &[&str] = &["flow", "nu", "nappe"];
+const VARIANTES: &[&str] = &["flow", "nu", "nappe", "remblai"];
 static VARIANTE: AtomicUsize = AtomicUsize::new(0);
 
 struct Commandes {
@@ -54,8 +54,34 @@ impl Module for Commandes {
         match m[0] {
             "etat" => {}
             "traces" => return traces::commande(m),
+            "hauteurs" => {
+                // hauteurs x z r : les segments du réseau nivelé à moins de r m de (x, z)
+                let n: Vec<f32> = m.iter().skip(1).filter_map(|t| t.parse().ok()).collect();
+                if n.len() < 3 {
+                    return Err("hauteurs x z r".into());
+                }
+                let d = LIEU.lock().unwrap().clone().ok_or("pas encore de lieu")?;
+                let r = d.reseau();
+                let mut lignes = Vec::new();
+                for (k, a) in r.aretes.iter().enumerate() {
+                    for (i, s) in a.points.windows(2).enumerate() {
+                        let (p, q) = (s[0], s[1]);
+                        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+                        let t = (((n[0] - p[0]) * dx + (n[1] - p[1]) * dz) / (dx * dx + dz * dz).max(1e-9)).clamp(0.0, 1.0);
+                        let dist = (n[0] - p[0] - t * dx).hypot(n[1] - p[1] - t * dz);
+                        if dist <= n[2] {
+                            lignes.push(format!("arête {k} seg {i} genre {} {:?} larg {:.1} : ({:.1},{:.1}) h {:.2} → ({:.1},{:.1}) h {:.2} · à {:.1} m", a.genre, a.passage, a.largeur, p[0], p[1], p[2], q[0], q[1], q[2], dist));
+                        }
+                    }
+                }
+                return Ok(lignes.join("\n"));
+            }
+            "echecs" => {
+                let e = nappe::ECHECS.lock().unwrap();
+                return Ok(format!("{} tuiles matérialisées, {} avec un volume refusé (les dernières) :\n{}", e.1, e.0.len(), e.0.join("\n")));
+            }
             "derniere" => {
-                if VARIANTES[VARIANTE.load(Ordering::Relaxed)] == "nappe" {
+                if matches!(VARIANTES[VARIANTE.load(Ordering::Relaxed)], "nappe" | "remblai") || !nappe::DERNIERE.lock().unwrap().1.is_empty() {
                     let g = nappe::DERNIERE.lock().unwrap();
                     let etapes: Vec<String> = g.0.iter().map(|(n, t)| format!("  {n} : {t:.2} s")).collect();
                     return Ok(format!("{}\n{}", g.1, etapes.join("\n")));
@@ -142,12 +168,21 @@ impl ModuleLieux for Fabrique {
         let (sommets, indices, pixels) = match VARIANTE.load(Ordering::Relaxed) {
             1 => nu(d, cle),
             2 => nappe::tuile(d, cle),
+            3 => nappe::tuile_remblai(d, cle),
 
             _ => {
                 let (s, i, p, _) = flow::maquette::fabriquer_avec_defonce(d, cle);
                 (s, i, p)
             }
         };
+        Ok(TuileFaite { sommets, indices, pixels })
+    }
+
+    /// La vue Matérialisation : celle de Flow (`flow::materialisation`, entérinée
+    /// depuis `nappe::tuile_remblai`), à remplacer ici pour essayer une variante.
+    fn materialiser(&self, cle: (u8, i32, i32)) -> Result<TuileFaite, String> {
+        let d = self.donnees.as_ref().ok_or("pas de lieu")?;
+        let (sommets, indices, pixels) = flow::materialisation::tuile(d, cle);
         Ok(TuileFaite { sommets, indices, pixels })
     }
 }
@@ -166,4 +201,5 @@ fn nu(d: &Donnees, cle: (u8, i32, i32)) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
 module!(Commandes);
 lieux!(Fabrique);
 flow_banc::traces!(traces::traces);
-flow_banc::faces!(traces::faces);
+// Les remblais en surimpression sont entérinés dans Flow (remblais_voies) depuis la 0.108
+// flow_banc::faces!(traces::faces);

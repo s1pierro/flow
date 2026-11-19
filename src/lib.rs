@@ -20,6 +20,7 @@ pub mod selection;
 pub mod suivi;
 pub mod berges;
 pub mod remblais;
+pub mod materialisation;
 pub mod remblais_voies;
 pub mod relief3d;
 pub mod booleens;

@@ -168,6 +168,8 @@ void main() {
     else if (k == 3) c = vec3(0.88, 0.56, 0.22);
     else if (k == 4) c = vec3(0.56, 0.57, 0.62);
     else if (k == 5) c = vec3(0.62, 0.38, 0.78);
+    else if (k == 7) c = vec3(0.24, 0.24, 0.26);
+    else if (k == 8) c = vec3(0.82, 0.81, 0.78);
     else c = vec3(0.95, 0.15, 0.15);
     // Le placage : la couche de la matière, répétée tous les `cote` mètres
     // Le dessus du quai (4) : v_m le long de sa ligne et la distance à elle ; la
@@ -177,6 +179,12 @@ void main() {
     } else if (u_avec_matieres == 1 && k >= 1 && k <= 5) {
       vec2 m = k == 4 ? v_m - vec2(0.0, u_bordure) : v_m;
       c = texture(u_matieres, vec3(m / u_cotes[k - 1], float(k - 1))).rgb;
+    } else if (u_avec_matieres == 1 && k == 7) {
+      // La chaussée : la couche après la bordure
+      c = texture(u_matieres, vec3(v_m / u_cotes[6], 6.0)).rgb;
+    } else if (u_avec_matieres == 1 && k == 8) {
+      // Le béton clair des côtés et du dessus de la défonce des voies
+      c = texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb;
     }
   }
   if (u_avec_image == 1 && !volume) {

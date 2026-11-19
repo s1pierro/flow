@@ -107,23 +107,49 @@ pub fn contour(v: &[f32], ind: &[u32]) -> Vec<u32> {
 
 /// Une tuile finie, avec ses arêtes, son contour et sa mesure.
 pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
+    tuile_pour(d, cle, faite, false)
+}
+
+/// Une tuile finie pour la Maquette, ou pour la vue Matérialisation (`materialiser`) :
+/// celle-ci est faite par le module du banc s'il en fait, sinon comme en Maquette.
+pub fn tuile_pour(d: &Donnees, cle: Cle, faite: u64, materialiser: bool) -> Tuile {
     let mut suivi = crate::suivi::tache("tuile");
     suivi.detail(format!("{}/{}/{}", cle.0, cle.1, cle.2));
     // Lieux sur le banc : la tuile faite par le module (le volume de défonce, montré à
-    // part, reste celui de Flow) ; s'il échoue, celle de Flow
+    // part, reste celui de Flow) ; s'il échoue, celle de Flow. La Matérialisation :
+    // celle du module s'il en fait une, sinon celle de Flow (`materialisation`)
     let banc = {
         let _t = crate::suivi::tache("banc");
-        crate::banc::tuile_lieux(d, faite, cle)
+        if materialiser {
+            match crate::banc::materialiser_lieux(d, faite, cle) {
+                Some(Ok(t)) => Some(Ok(t)),
+                _ => Some(Ok(crate::materialisation::tuile(d, cle))),
+            }
+        } else {
+            crate::banc::tuile_lieux(d, faite, cle)
+        }
     };
+    let mut apart = None;
     let (sommets, indices, pixels, def) = match banc {
         Some(Ok((s, i, p))) => {
             let _t = crate::suivi::tache("défonce");
+            // Les triangles de matière `MAQUETTE_DEFONCE` que le module a joints (ses
+            // volumes de défonce, des voies par exemple) : montrés avec la défonce
+            let (i, a) = separer_defonce(&s, i);
+            apart = a;
             (s, i, p, defonce(d, cle))
         }
         _ => fabriquer_avec_defonce(d, cle),
     };
     let t = crate::suivi::tache("finitions");
-    let (defonce_sommets, defonce_indices, defonce_aretes) = maillage_defonce(&def);
+    let (mut defonce_sommets, mut defonce_indices, mut defonce_aretes) = maillage_defonce(&def);
+    if let Some((v, ind)) = apart {
+        let base = (defonce_sommets.len() / SOMMET) as u32;
+        let ar = crate::relief3d::aretes(&v, SOMMET, &ind, true);
+        defonce_sommets.extend_from_slice(&v);
+        defonce_indices.extend(ind.iter().map(|k| k + base));
+        defonce_aretes.extend(ar.iter().map(|k| k + base));
+    }
     let aretes = aretes(&sommets, &indices);
     let contour = contour(&sommets, &indices);
     let (eau_sommets, eau_indices) = {
@@ -137,6 +163,32 @@ pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
     mesure.octets += (eau_sommets.len() + eau_indices.len()) * 4;
     suivi.detail(format!("{}/{}/{} · {} triangles", cle.0, cle.1, cle.2, mesure.triangles));
     Tuile { cle, faite, sommets, indices, pixels, aretes, contour, eau_sommets, eau_indices, defonce_sommets, defonce_indices, defonce_aretes, mesure }
+}
+
+/// Sépare des triangles d'une tuile ceux dont les trois sommets sont de matière
+/// `MAQUETTE_DEFONCE` : les indices restants, et les triangles ôtés (leurs sommets
+/// recopiés, réindexés), s'il y en a.
+fn separer_defonce(s: &[f32], ind: Vec<u32>) -> (Vec<u32>, Option<(Vec<f32>, Vec<u32>)>) {
+    let est = |k: u32| (s[k as usize * SOMMET + 8] - MAQUETTE_DEFONCE).abs() < 1e-3;
+    if !ind.chunks(3).any(|t| t.iter().all(|&k| est(k))) {
+        return (ind, None);
+    }
+    let (mut garde, mut v, mut vi) = (Vec::with_capacity(ind.len()), Vec::new(), Vec::new());
+    let mut nouveaux: HashMap<u32, u32> = HashMap::new();
+    for t in ind.chunks(3) {
+        if t.iter().all(|&k| est(k)) {
+            for &k in t {
+                let n = *nouveaux.entry(k).or_insert_with(|| {
+                    v.extend_from_slice(&s[k as usize * SOMMET..(k as usize + 1) * SOMMET]);
+                    (v.len() / SOMMET - 1) as u32
+                });
+                vi.push(n);
+            }
+        } else {
+            garde.extend_from_slice(t);
+        }
+    }
+    (garde, Some((v, vi)))
 }
 
 /// Le fond du lit, sous l'eau : vase et sable.
@@ -614,6 +666,10 @@ pub mod matiere {
     pub const QUAI_MUR: u16 = 5;
     /// Le dessus d'un volume ôté : ne devrait jamais rester visible.
     pub const HAUT: u16 = 6;
+    /// La chaussée laissée par la défonce des voies (la Matérialisation) : le bitume.
+    pub const CHAUSSEE: u16 = 7;
+    /// Les côtés et le dessus de la défonce des voies : le béton clair.
+    pub const BETON: u16 = 8;
     /// Le flottant « matière » d'un sommet qui montre la matière `m` (le shader la
     /// teinte : 5,1 le lit, 5,2 la berge…).
     pub fn sommet(m: u16) -> f32 {
@@ -1186,6 +1242,11 @@ fn baisser_priorite() {
 
 impl Fabrique {
     pub fn new(donnees: Arc<RwLock<Donnees>>) -> Fabrique {
+        Fabrique::pour(donnees, false)
+    }
+
+    /// Une fabrique de tuiles pour la Maquette, ou pour la vue Matérialisation.
+    pub fn pour(donnees: Arc<RwLock<Donnees>>, materialiser: bool) -> Fabrique {
         let echange: Arc<(Mutex<Echange>, Condvar)> = Default::default();
         let arret = Arc::new(AtomicBool::new(false));
         for k in 0..fils() {
@@ -1218,7 +1279,7 @@ impl Fabrique {
                     let attente = crate::suivi::tache_min("attente des données", 5.0);
                     let lu = donnees.read();
                     drop(attente);
-                    let fait = lu.ok().map(|d| tuile(&d, cle, faite));
+                    let fait = lu.ok().map(|d| tuile_pour(&d, cle, faite, materialiser));
                     if a.load(Ordering::Relaxed) {
                         crate::suivi::noter(format!("fabrique arrêtée : tuile {}/{}/{} abandonnée", cle.0, cle.1, cle.2));
                         return;
