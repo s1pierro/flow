@@ -1,0 +1,19 @@
+# Matière (sage-matieres) : modifiable à la main
+# Le béton clair des côtés et du dessus de la défonce des voies (Matérialisation) :
+# une vase lisse claire et grise, à peine tachée, quelques gravillons.
+genre = vase
+cote = 2
+resolution = 512
+graine = 3
+longueur = 40
+hauteur = 8
+appareil = 0
+irregularite = 0.2
+couleur = 40 0.04 0.80
+couleur2 = 35 0.05 0.70
+variation = 0.35
+grain = 0.3
+joint = 0
+couleur_joint = 30 0.05 0.6
+relief = 0.2
+noeuds = 6

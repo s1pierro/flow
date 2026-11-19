@@ -32,6 +32,29 @@ pub const TABLE: [(u16, &str); 8] = [
     (matiere::BETON, "beton-clair"),
 ];
 pub const COUCHE_BORDURE: usize = 5;
+
+/// Les réglages livrés avec Flow (dossier `matieres/` du dépôt), un par nom de `TABLE` :
+/// écrits dans le dossier des matières quand ils y manquent.
+pub const LIVREES: [(&str, &str); 7] = [
+    ("vase-lit", include_str!("../matieres/vase-lit.txt")),
+    ("taille-quai", include_str!("../matieres/taille-quai.txt")),
+    ("pierre-quai", include_str!("../matieres/pierre-quai.txt")),
+    ("paves-quai", include_str!("../matieres/paves-quai.txt")),
+    ("bordure-quai", include_str!("../matieres/bordure-quai.txt")),
+    ("bitume", include_str!("../matieres/bitume.txt")),
+    ("beton-clair", include_str!("../matieres/beton-clair.txt")),
+];
+
+/// Écrit dans `d` les matières livrées qui y manquent.
+fn livrer(d: &Path) {
+    for (nom, texte) in LIVREES {
+        let f = d.join(format!("{nom}.txt"));
+        if !f.exists() {
+            let _ = std::fs::create_dir_all(d);
+            let _ = std::fs::write(f, texte);
+        }
+    }
+}
 pub const COUCHE_CHAUSSEE: usize = 6;
 pub const COUCHE_BETON: usize = 7;
 
@@ -77,8 +100,10 @@ fn ramener(rgba: &[u8], n: u32) -> Vec<u8> {
 pub fn fabriquer(d: &Path) -> (Vec<u8>, Vec<f32>) {
     let mut pixels = Vec::with_capacity((COTE * COTE * 4) as usize * TABLE.len());
     let mut cotes = Vec::with_capacity(TABLE.len());
+    livrer(d);
     for (_, nom) in TABLE {
-        match crate::contextes::matieres::lire(d, nom) {
+        let livree = || LIVREES.iter().find(|(n, _)| *n == nom).and_then(|(_, t)| sage_matieres::Reglages::lire(t));
+        match crate::contextes::matieres::lire(d, nom).or_else(livree) {
             Some(r) => {
                 let img = sage_matieres::generer(&r);
                 pixels.extend(ramener(&img.rgba, img.l.min(img.h)));
@@ -137,6 +162,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn chaque_matiere_de_la_table_est_livree_et_lisible() {
+        for (_, nom) in TABLE {
+            let (_, t) = LIVREES.iter().find(|(n, _)| *n == nom).unwrap_or_else(|| panic!("{nom} non livrée"));
+            assert!(sage_matieres::Reglages::lire(t).is_some(), "{nom} illisible");
+        }
+    }
+
+    #[test]
     fn la_table_suit_les_numeros() {
         for (k, (m, _)) in TABLE[..COUCHE_BORDURE].iter().enumerate() {
             assert_eq!(*m as usize, k + 1);
@@ -144,10 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn une_matiere_absente_est_grise() {
-        let (px, cotes) = fabriquer(Path::new("/nulle-part"));
+    fn une_matiere_absente_est_livree() {
+        let d = std::env::temp_dir().join(format!("flow-placage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (px, cotes) = fabriquer(&d);
         assert_eq!(px.len(), (COTE * COTE * 4) as usize * TABLE.len());
-        assert_eq!(cotes, vec![1.0; TABLE.len()]);
-        assert_eq!(&px[..4], &[150, 150, 150, 255]);
+        // Les côtés des réglages livrés, et leurs fichiers écrits
+        assert_eq!(cotes[TABLE.len() - 1], sage_matieres::Reglages::lire(LIVREES[6].1).unwrap().cote.max(0.05));
+        assert!(d.join("bitume.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

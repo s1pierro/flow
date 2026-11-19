@@ -1,0 +1,17 @@
+# Matière (sage-matieres) : modifiable à la main
+genre = vase
+cote = 2
+resolution = 512
+graine = 1
+longueur = 40
+hauteur = 8
+appareil = 1
+irregularite = 0.5
+couleur = 36 0.22 0.34
+couleur2 = 28 0.2 0.22
+variation = 0.6
+grain = 0.6
+joint = 4
+couleur_joint = 25 0.25 0.12
+relief = 0.5
+noeuds = 30

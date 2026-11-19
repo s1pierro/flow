@@ -1,0 +1,16 @@
+# Matière (sage-matieres) : modifiable à la main
+genre = paves
+cote = 1
+resolution = 512
+graine = 1
+longueur = 20
+hauteur = 14
+appareil = 0
+irregularite = 0.5
+couleur = 30 0.06 0.5
+couleur2 = 25 0.08 0.34
+variation = 0.6
+grain = 0.7
+joint = 12
+couleur_joint = 40 0.25 0.55
+relief = 0.7

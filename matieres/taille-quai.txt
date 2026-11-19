@@ -1,0 +1,16 @@
+# Matière (sage-matieres) : modifiable à la main
+genre = taille
+cote = 2
+resolution = 512
+graine = 1
+longueur = 80
+hauteur = 40
+appareil = 0
+irregularite = 0.2
+couleur = 42 0.22 0.72
+couleur2 = 38 0.18 0.58
+variation = 0.4
+grain = 0.4
+joint = 5
+couleur_joint = 40 0.1 0.8
+relief = 0.5

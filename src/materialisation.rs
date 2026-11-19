@@ -1,182 +1,25 @@
 //! La Matérialisation des Lieux (vue Matérialisation de la 3D) : les tuiles les plus
-//! fines, fabriquées comme celles de la Maquette, puis :
-//! 1. l'union des remblais des voies : sous chaque route, le plan des voies (un
-//!    quadrilatère par segment, un disque à chaque point, réunis) extrudé de la
-//!    chaussée nivelée jusqu'à `SOUS` sous le terrain ; sous un pont (bretelle comprise)
-//!    ou dans un tunnel, une dalle de `OUVRAGE` mètres ; les piétonnes ne sont pas
-//!    remblayées au sol (leurs hauteurs sont bruitées), à part sur les ouvrages ;
-//! 2. la défonce des voies par le dessus, sauf les piétonnes : de la chaussée jusqu'à
-//!    `DEFONCE_HAUT` au-dessus ; son fond est la chaussée (bitume), ses côtés et son
-//!    dessus du béton clair.
+//! fines, fabriquées comme celles de la Maquette, puis, route par route (les piétonnes
+//! ne sont ni remblayées ni défoncées) :
+//! 1. l'union de son remblai : de la chaussée jusqu'à `SOUS` sous le terrain ; sur un
+//!    pont (bretelle comprise) ou dans un tunnel, une dalle de `OUVRAGE` mètres ;
+//! 2. sa défonce par le dessus : de la chaussée jusqu'à `DEFONCE_HAUT` au-dessus ; son
+//!    fond est la chaussée (bitume), ses côtés et son dessus du béton clair.
 //!
-//! Chaque passage (sol, ponts, tunnels) a son plan et ses hauteurs ; les voies dont
-//! l'emprise en chevauche une autre à des hauteurs différentes (une trémie le long d'un
-//! boulevard) ont chacune leur volume (`groupes`). La triangulation du plan passe par
-//! des points du tracé et des bords tous les `PAS_TRACE` mètres : la chaussée reste
-//! horizontale en travers. Pas de dissolution (elle tordait les longues chaussées).
+//! Chaque volume est un ruban le long du tracé de la route (`ruban`) : une section
+//! horizontale en travers à chaque point du tracé, les sections reliées. Aucun triangle
+//! ne relie deux routes : la chaussée est plate en travers par construction (0.120 ;
+//! avant, le plan des voies fusionné puis triangulé donnait stries et dévers).
 //! Les volumes de défonce, coupés à la tuile, sont joints en matière
 //! `MAQUETTE_DEFONCE` : la 3D les montre avec la défonce des lits.
-//!
-//! Mis au point sur le banc (module lieux, `nappe.rs`), entériné ici.
 
 use crate::booleens::{Forme, Op};
 use crate::carte::{Cle, Donnees};
 use crate::maquette as mq;
-use crate::remblais::{extruder, Contour};
-use i_overlay::core::fill_rule::FillRule;
-use i_overlay::float::simplify::SimplifyShape;
-use sage_reel::reseau::{Arete, Passage, Reseau};
-use std::collections::HashMap;
-
-/// Les côtés des disques posés à chaque point des voies.
-const DISQUE: usize = 8;
-/// La case de l'index des segments (m).
-const CASE: f32 = 16.0;
-
-
-/// Un anneau dans le sens direct (aire positive), ou rien s'il est plat.
-fn direct(mut c: Vec<[f64; 2]>) -> Option<Vec<[f64; 2]>> {
-    let mut a = 0.0;
-    for i in 0..c.len() {
-        let (p, q) = (c[i], c[(i + 1) % c.len()]);
-        a += p[0] * q[1] - q[0] * p[1];
-    }
-    if a.abs() < 1e-6 {
-        return None;
-    }
-    if a < 0.0 {
-        c.reverse();
-    }
-    Some(c)
-}
-
-/// Le plan des voies : quadrilatères des segments et disques des points, réunis.
-fn plan(segs: &[([f32; 3], [f32; 3], f32)]) -> Vec<Contour> {
-    let mut morceaux: Vec<Vec<[f64; 2]>> = Vec::with_capacity(segs.len() * 2);
-    let disque = |p: [f32; 3], w: f32| {
-        // Le rayon circonscrit : le disque couvre au moins la demi-largeur
-        let r = w / (std::f32::consts::PI / DISQUE as f32).cos();
-        (0..DISQUE).map(|k| {
-            let t = k as f32 * std::f32::consts::TAU / DISQUE as f32;
-            [(p[0] + r * t.cos()) as f64, (p[1] + r * t.sin()) as f64]
-        }).collect::<Vec<_>>()
-    };
-    for &(p, q, w) in segs {
-        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
-        let l = dx.hypot(dz);
-        let (nx, nz) = (-dz / l * w, dx / l * w);
-        let quad = vec![[(p[0] + nx) as f64, (p[1] + nz) as f64], [(q[0] + nx) as f64, (q[1] + nz) as f64], [(q[0] - nx) as f64, (q[1] - nz) as f64], [(p[0] - nx) as f64, (p[1] - nz) as f64]];
-        morceaux.extend(direct(quad));
-        morceaux.extend(direct(disque(p, w)));
-        morceaux.extend(direct(disque(q, w)));
-    }
-    if morceaux.is_empty() {
-        return Vec::new();
-    }
-    morceaux
-        .simplify_shape(FillRule::NonZero)
-        .into_iter()
-        .filter(|forme| !forme.is_empty())
-        .map(|forme| {
-            let anneaux: Vec<Vec<[f32; 2]>> = forme.iter().map(|c| c.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()).collect();
-            let boite = anneaux[0].iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]);
-            Contour { anneaux, boite }
-        })
-        .collect()
-}
-
-/// La hauteur du réseau au point le plus proche : les segments indexés par case.
-struct Hauteurs<'a> {
-    segs: &'a [([f32; 3], [f32; 3], f32)],
-    cases: HashMap<(i32, i32), Vec<u32>>,
-}
-
-impl<'a> Hauteurs<'a> {
-    fn new(segs: &'a [([f32; 3], [f32; 3], f32)]) -> Self {
-        let mut cases: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
-        for (k, &(p, q, w)) in segs.iter().enumerate() {
-            let (x0, x1) = (((p[0].min(q[0]) - w) / CASE).floor() as i32, ((p[0].max(q[0]) + w) / CASE).floor() as i32);
-            let (z0, z1) = (((p[1].min(q[1]) - w) / CASE).floor() as i32, ((p[1].max(q[1]) + w) / CASE).floor() as i32);
-            for i in x0..=x1 {
-                for j in z0..=z1 {
-                    cases.entry((i, j)).or_default().push(k as u32);
-                }
-            }
-        }
-        Hauteurs { segs, cases }
-    }
-
-    fn proche(&self, k: u32, x: [f32; 2]) -> (f32, f32) {
-        let (p, q, _) = self.segs[k as usize];
-        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
-        let t = (((x[0] - p[0]) * dx + (x[1] - p[1]) * dz) / (dx * dx + dz * dz).max(1e-9)).clamp(0.0, 1.0);
-        let (cx, cz) = (p[0] + t * dx, p[1] + t * dz);
-        ((x[0] - cx).hypot(x[1] - cz), p[2] + t * (q[2] - p[2]))
-    }
-
-    /// La hauteur fondue : la moyenne des segments à moins de `FONDU` mètres de plus que
-    /// le plus proche, pondérée par cet écart. Continue là où deux voies voisines (deux
-    /// chaussées d'un boulevard) ont des hauteurs différentes.
-    fn hauteur_douce(&self, x: [f32; 2]) -> f32 {
-        const FONDU: f32 = 4.0;
-        let (ci, cj) = ((x[0] / CASE).floor() as i32, (x[1] / CASE).floor() as i32);
-        let mut vus: Vec<(f32, f32)> = Vec::new();
-        let mut trouve = None;
-        for r in 0..64 {
-            if trouve.is_some_and(|t| r > t + 1) {
-                break;
-            }
-            for i in ci - r..=ci + r {
-                for j in cj - r..=cj + r {
-                    if (i - ci).abs() != r && (j - cj).abs() != r {
-                        continue;
-                    }
-                    for &k in self.cases.get(&(i, j)).map(|v| v.as_slice()).unwrap_or(&[]) {
-                        vus.push(self.proche(k, x));
-                    }
-                }
-            }
-            if trouve.is_none() && !vus.is_empty() {
-                trouve = Some(r);
-            }
-        }
-        let dmin = vus.iter().map(|v| v.0).fold(f32::MAX, f32::min);
-        let (mut somme, mut poids) = (0.0, 0.0);
-        for (d, h) in vus {
-            let w = (1.0 - (d - dmin) / FONDU).max(0.0).powi(2);
-            somme += w * h;
-            poids += w;
-        }
-        if poids > 0.0 { somme / poids } else { self.hauteur(x) }
-    }
-
-    fn hauteur(&self, x: [f32; 2]) -> f32 {
-        let (ci, cj) = ((x[0] / CASE).floor() as i32, (x[1] / CASE).floor() as i32);
-        let mut best = (f32::MAX, 0.0);
-        // La case, puis des anneaux de cases jusqu'à trouver un segment
-        for r in 0..64 {
-            for i in ci - r..=ci + r {
-                for j in cj - r..=cj + r {
-                    if (i - ci).abs() != r && (j - cj).abs() != r {
-                        continue;
-                    }
-                    for &k in self.cases.get(&(i, j)).map(|v| v.as_slice()).unwrap_or(&[]) {
-                        let d = self.proche(k, x);
-                        if d.0 < best.0 {
-                            best = d;
-                        }
-                    }
-                }
-            }
-            if best.0 < r as f32 * CASE {
-                break;
-            }
-        }
-        best.1
-    }
-}
+use sage_reel::reseau::{Passage, Reseau};
 
 /// Des volumes disjoints en une seule forme (plusieurs coques).
+#[allow(dead_code)]
 fn reunir_formes(v: Vec<Forme>) -> Forme {
     let mut f = Forme::default();
     for g in v {
@@ -230,185 +73,154 @@ fn chaussee(f: Forme) -> Forme {
     f
 }
 
-/// L'écart de hauteur (m) au-delà duquel deux voies qui se chevauchent ne vont pas
-/// dans le même plan (une trémie le long d'un boulevard).
-const ECART_NIVEAUX: f32 = 0.5;
+/// La demi-longueur (m) du lissage des hauteurs le long d'une voie : le réseau nivelé
+/// a des écarts de quelques dizaines de centimètres d'un point à l'autre.
+const LISSAGE: f32 = 10.0;
 
-/// Les segments des voies que `garder` retient, en groupes : d'abord toutes les voies
-/// fusionnables ensemble, puis, chacune à part, celles dont l'emprise chevauche celle
-/// d'une autre voie à plus de `ECART_NIVEAUX` de hauteur (leurs plans fusionnés
-/// devraient avoir une marche ; à part, chacune reste plate en travers).
-fn groupes(r: &Reseau, b: [f32; 4], garder: impl Fn(&Arete) -> bool) -> Vec<Vec<([f32; 3], [f32; 3], f32)>> {
-    let marge = 10.0;
-    let mut v: Vec<(usize, ([f32; 3], [f32; 3], f32))> = Vec::new();
-    for (k, a) in r.aretes.iter().enumerate().filter(|(_, a)| garder(a)) {
-        let w = (a.largeur * 0.5).max(1.0);
-        for s in a.points.windows(2) {
-            let (p, q) = (s[0], s[1]);
-            if p[0].max(q[0]) >= b[0] - marge - w && p[0].min(q[0]) <= b[2] + marge + w && p[1].max(q[1]) >= b[1] - marge - w && p[1].min(q[1]) <= b[3] + marge + w && (q[0] - p[0]).hypot(q[1] - p[1]) > 0.05 {
-                v.push((k, (p, q, w)));
-            }
-        }
+/// Les points (x, z, h) d'une voie, les hauteurs lissées le long d'elle (moyenne
+/// pondérée en triangle sur ± `LISSAGE` mètres).
+fn lisser(p: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut s = vec![0.0f32; p.len()];
+    for i in 1..p.len() {
+        s[i] = s[i - 1] + (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
     }
-    if v.is_empty() {
-        return Vec::new();
-    }
-    // Les cases des segments, pour ne comparer que les voisins
-    let mut cases: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-    for (n, &(_, (p, q, w))) in v.iter().enumerate() {
-        for i in ((p[0].min(q[0]) - w) / CASE).floor() as i32..=((p[0].max(q[0]) + w) / CASE).floor() as i32 {
-            for j in ((p[1].min(q[1]) - w) / CASE).floor() as i32..=((p[1].max(q[1]) + w) / CASE).floor() as i32 {
-                cases.entry((i, j)).or_default().push(n);
+    (0..p.len())
+        .map(|i| {
+            let (mut somme, mut poids) = (0.0, 0.0);
+            for j in 0..p.len() {
+                let w = (1.0 - (s[j] - s[i]).abs() / LISSAGE).max(0.0);
+                somme += w * p[j][2];
+                poids += w;
             }
-        }
-    }
-    // Le point de s le plus proche de x : sa distance et sa hauteur
-    let proche = |s: ([f32; 3], [f32; 3], f32), x: [f32; 2]| {
-        let (p, q, _) = s;
-        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
-        let t = (((x[0] - p[0]) * dx + (x[1] - p[1]) * dz) / (dx * dx + dz * dz).max(1e-9)).clamp(0.0, 1.0);
-        ((x[0] - p[0] - t * dx).hypot(x[1] - p[1] - t * dz), p[2] + t * (q[2] - p[2]))
-    };
-    let mut a_part = std::collections::HashSet::new();
-    for liste in cases.values() {
-        for (x, &m) in liste.iter().enumerate() {
-            for &n in &liste[x + 1..] {
-                let ((ka, sa), (kb, sb)) = (v[m], v[n]);
-                if ka == kb || (a_part.contains(&ka) && a_part.contains(&kb)) {
-                    continue;
-                }
-                // Quelques points de chaque segment contre l'autre
-                let mut conflit = false;
-                for (s, o) in [(sa, sb), (sb, sa)] {
-                    for t in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
-                        let x = [s.0[0] + t * (s.1[0] - s.0[0]), s.0[1] + t * (s.1[1] - s.0[1])];
-                        let h = s.0[2] + t * (s.1[2] - s.0[2]);
-                        let (d, ho) = proche(o, x);
-                        if d < s.2 + o.2 && (h - ho).abs() > ECART_NIVEAUX {
-                            conflit = true;
-                        }
-                    }
-                }
-                if conflit {
-                    a_part.insert(ka);
-                    a_part.insert(kb);
-                }
-            }
-        }
-    }
-    let mut g: Vec<Vec<([f32; 3], [f32; 3], f32)>> = vec![Vec::new()];
-    let mut seules: HashMap<usize, usize> = HashMap::new();
-    for &(k, s) in &v {
-        if a_part.contains(&k) {
-            let n = g.len();
-            let i = *seules.entry(k).or_insert(n);
-            if i == n {
-                g.push(Vec::new());
-            }
-            g[i].push(s);
-        } else {
-            g[0].push(s);
-        }
-    }
-    g.retain(|x| !x.is_empty());
-    g
-}
-
-/// L'espacement des points ajoutés le long du tracé dans la triangulation du plan (m).
-const PAS_TRACE: f32 = 3.0;
-
-/// Les points du tracé (bouts des segments et tous les `PAS_TRACE` mètres) qui sont
-/// dans le contour `c` : ajoutés à la triangulation, ils empêchent un triangle de
-/// relier deux bords de voie pris à des hauteurs différentes — la chaussée reste
-/// horizontale en travers.
-fn points_trace(c: &Contour, segs: &[([f32; 3], [f32; 3], f32)]) -> Vec<[f64; 2]> {
-    let dedans = |x: f32, z: f32| {
-        if x < c.boite[0] || x > c.boite[2] || z < c.boite[1] || z > c.boite[3] {
-            return false;
-        }
-        let mut n = false;
-        for a in &c.anneaux {
-            for i in 0..a.len() {
-                let (p, q) = (a[i], a[(i + 1) % a.len()]);
-                if (p[1] > z) != (q[1] > z) && x < p[0] + (z - p[1]) / (q[1] - p[1]) * (q[0] - p[0]) {
-                    n = !n;
-                }
-            }
-        }
-        n
-    };
-    let mut vus = std::collections::HashSet::new();
-    let mut v = Vec::new();
-    for &(p, q, _) in segs {
-        let l = (q[0] - p[0]).hypot(q[1] - p[1]);
-        let n = (l / PAS_TRACE).ceil().max(1.0) as usize;
-        for k in 0..=n {
-            let t = k as f32 / n as f32;
-            let (x, z) = (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]));
-            if dedans(x, z) && vus.insert(((x * 10.0).round() as i64, (z * 10.0).round() as i64)) {
-                v.push([x as f64, z as f64]);
-            }
-        }
-    }
-    v
-}
-
-/// Comme `crate::remblais::extruder`, la triangulation du plan passant aussi par les
-/// points du tracé (`points_trace`).
-fn extruder_plat(c: &Contour, segs: &[([f32; 3], [f32; 3], f32)], dessus: impl Fn([f32; 2]) -> f32, dessous: impl Fn([f32; 2]) -> f32) -> Forme {
-    use i_triangle::float::triangulatable::Triangulatable;
-    // Les bords aussi, redécoupés tous les `PAS_TRACE` mètres
-    let forme: Vec<Vec<[f64; 2]>> = c
-        .anneaux
-        .iter()
-        .map(|a| {
-            let mut v = Vec::with_capacity(a.len() * 2);
-            for i in 0..a.len() {
-                let (p, q) = (a[i], a[(i + 1) % a.len()]);
-                let n = ((q[0] - p[0]).hypot(q[1] - p[1]) / PAS_TRACE).ceil().max(1.0) as usize;
-                for k in 0..n {
-                    let t = k as f32 / n as f32;
-                    v.push([(p[0] + t * (q[0] - p[0])) as f64, (p[1] + t * (q[1] - p[1])) as f64]);
-                }
-            }
-            v
+            [p[i][0], p[i][1], somme / poids]
         })
-        .collect();
-    let pts = points_trace(c, segs);
-    let t = forme.triangulate_with_steiner_points(&pts).to_triangulation::<u32>();
-    let n = t.points.len() as u32;
-    if n < 3 || t.indices.len() < 3 {
-        return extruder(c, dessus, dessous);
+        .collect()
+}
+
+/// Les points (x, z, h) plus proches que ça (m) sont confondus.
+const CONFONDUS: f32 = 0.05;
+/// Au-delà de ce virage (cosinus entre deux segments), le ruban est coupé en deux.
+const VIRAGE_MAX: f32 = 0.0;
+
+/// Les morceaux d'un tracé (x, z, h) bons pour un ruban : les points confondus ôtés,
+/// coupé aux virages plus serrés que `VIRAGE_MAX` (le morceau suivant repart du point
+/// du virage).
+fn morceaux(p: &[[f32; 3]]) -> Vec<Vec<[f32; 3]>> {
+    let mut v: Vec<[f32; 3]> = Vec::with_capacity(p.len());
+    for &q in p {
+        if v.last().is_none_or(|l: &[f32; 3]| (q[0] - l[0]).hypot(q[1] - l[1]) > CONFONDUS) {
+            v.push(q);
+        }
     }
+    let dir = |a: [f32; 3], b: [f32; 3]| {
+        let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
+        [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
+    };
+    let mut out = Vec::new();
+    let mut cur: Vec<[f32; 3]> = Vec::new();
+    for i in 0..v.len() {
+        cur.push(v[i]);
+        if i > 0 && i + 1 < v.len() {
+            let (a, b) = (dir(v[i - 1], v[i]), dir(v[i], v[i + 1]));
+            if a[0] * b[0] + a[1] * b[1] < VIRAGE_MAX {
+                out.push(std::mem::take(&mut cur));
+                cur.push(v[i]);
+            }
+        }
+    }
+    out.push(cur);
+    out.retain(|m| m.len() >= 2);
+    out
+}
+
+/// Le ruban d'un morceau de tracé (x, z, h) de demi-largeur `w` : à chaque point une
+/// section horizontale en travers (bords en onglet), de `bas(gauche, centre, droite)`
+/// à `haut(h)` ; les deux bouts prolongés de `w` (ils couvrent le carrefour).
+fn ruban(p: &[[f32; 3]], w: f32, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 3], [f32; 2]) -> f32) -> Forme {
+    let n = p.len();
+    let dir = |a: [f32; 3], b: [f32; 3]| {
+        let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
+        [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
+    };
+    // Les points, bouts prolongés
+    let (d0, d1) = (dir(p[0], p[1]), dir(p[n - 2], p[n - 1]));
+    let mut q: Vec<[f32; 3]> = Vec::with_capacity(n + 2);
+    q.push([p[0][0] - d0[0] * w, p[0][1] - d0[1] * w, p[0][2]]);
+    q.extend_from_slice(p);
+    q.push([p[n - 1][0] + d1[0] * w, p[n - 1][1] + d1[1] * w, p[n - 1][2]]);
     let mut f = Forme::default();
-    for p in &t.points {
-        let q = [p[0] as f32, p[1] as f32];
-        f.sommets.push([q[0], dessus(q), q[1]]);
+    for i in 0..q.len() {
+        let a = if i > 0 { dir(q[i - 1], q[i]) } else { dir(q[0], q[1]) };
+        let b = if i + 1 < q.len() { dir(q[i], q[i + 1]) } else { a };
+        let mut t = [a[0] + b[0], a[1] + b[1]];
+        let l = t[0].hypot(t[1]);
+        if l < 1e-6 {
+            t = b;
+        } else {
+            t = [t[0] / l, t[1] / l];
+        }
+        // L'onglet : la demi-largeur tenue de part et d'autre du virage
+        let c = (t[0] * b[0] + t[1] * b[1]).max(0.5);
+        let (nx, nz) = (-t[1] * w / c, t[0] * w / c);
+        let (g, d) = ([q[i][0] + nx, q[i][1] + nz], [q[i][0] - nx, q[i][1] - nz]);
+        let (h, y0) = (haut(q[i][2]), bas(g, q[i], d));
+        // Gauche bas, droite bas, droite haut, gauche haut
+        f.sommets.push([g[0], y0, g[1]]);
+        f.sommets.push([d[0], y0, d[1]]);
+        f.sommets.push([d[0], h, d[1]]);
+        f.sommets.push([g[0], h, g[1]]);
     }
-    for p in &t.points {
-        let q = [p[0] as f32, p[1] as f32];
-        f.sommets.push([q[0], dessous(q), q[1]]);
-    }
-    let mut aretes: HashMap<(u32, u32), u32> = HashMap::new();
-    for tri in t.indices.chunks(3) {
-        let (a, b, c) = (tri[0], tri[1], tri[2]);
-        f.faces.push(vec![a, b, c]);
-        f.faces.push(vec![c + n, b + n, a + n]);
-        for (u, v) in [(a, b), (b, c), (c, a)] {
-            *aretes.entry((u, v)).or_insert(0) += 1;
+    let m = q.len() as u32;
+    for i in 0..m - 1 {
+        let (a, b) = (4 * i, 4 * (i + 1));
+        for k in 0..4 {
+            let k1 = (k + 1) % 4;
+            f.faces.push(vec![a + k, a + k1, b + k1]);
+            f.faces.push(vec![a + k, b + k1, b + k]);
         }
     }
-    for &(u, v) in aretes.keys() {
-        if !aretes.contains_key(&(v, u)) {
-            f.faces.push(vec![v, u, u + n, v + n]);
-        }
-    }
+    let z = 4 * (m - 1);
+    f.faces.push(vec![3, 2, 1]);
+    f.faces.push(vec![3, 1, 0]);
+    f.faces.push(vec![z, z + 1, z + 2]);
+    f.faces.push(vec![z, z + 2, z + 3]);
     if f.volume() < 0.0 {
         f.faces.iter_mut().for_each(|p| p.reverse());
     }
     f
 }
 
+/// Les morceaux du tracé lissé de chaque route de `passage` qui touchent la boîte `b`
+/// (marge comprise), avec leur demi-largeur.
+fn traces(r: &Reseau, b: [f32; 4], passage: Passage) -> Vec<(Vec<[f32; 3]>, f32)> {
+    let marge = 10.0;
+    let mut v = Vec::new();
+    for a in r.aretes.iter().filter(|a| a.passage == passage && a.genre != sage_reel::PIETONNE) {
+        let w = (a.largeur * 0.5).max(1.0);
+        let m = marge + 2.0 * w;
+        let dedans = |p: [f32; 3], q: [f32; 3]| p[0].max(q[0]) >= b[0] - m && p[0].min(q[0]) <= b[2] + m && p[1].max(q[1]) >= b[1] - m && p[1].min(q[1]) <= b[3] + m;
+        if !a.points.iter().any(|p| dedans(*p, *p)) && !a.points.windows(2).any(|s| dedans(s[0], s[1])) {
+            continue;
+        }
+        let pts = lisser(&a.points);
+        // Les suites de segments qui touchent la boîte
+        let mut cur: Vec<[f32; 3]> = Vec::new();
+        for s in pts.windows(2) {
+            if dedans(s[0], s[1]) {
+                if cur.is_empty() {
+                    cur.push(s[0]);
+                }
+                cur.push(s[1]);
+            } else if !cur.is_empty() {
+                v.extend(morceaux(&std::mem::take(&mut cur)).into_iter().map(|c| (c, w)));
+            }
+        }
+        if !cur.is_empty() {
+            v.extend(morceaux(&cur).into_iter().map(|c| (c, w)));
+        }
+    }
+    v
+}
 
 /// La tuile `cle` matérialisée (sommets, indices, texture) ; hors des tuiles assez
 /// fines pour la chaussée (`chaussee::pour`), celle de la Maquette.
@@ -426,29 +238,14 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     let terre = |p: [f32; 2]| d.lieu.relief(p[0] as f64, p[1] as f64) as f32;
     let (mut remblais, mut defonces) = (Vec::new(), Vec::new());
     for passage in [Passage::Sol, Passage::Pont, Passage::Tunnel] {
-        // Les routes (mêmes groupes et hauteurs que leur défonce : son fond tombe
-        // toujours dans le remblai) ; les piétonnes à part, sauf au sol
-        let routes = groupes(&r, b, |a| a.passage == passage && a.genre != sage_reel::PIETONNE);
-        let pietonnes = if passage == Passage::Sol { Vec::new() } else { groupes(&r, b, |a| a.passage == passage && a.genre == sage_reel::PIETONNE) };
-        for g in routes.iter().chain(&pietonnes) {
-            let h = Hauteurs::new(g);
-            let rp = plan(g)
-                .iter()
-                .map(|c| {
-                    let f = if passage == Passage::Sol {
-                        extruder_plat(c, g, |p| h.hauteur_douce(p), |p| terre(p).min(h.hauteur_douce(p)) - SOUS)
-                    } else {
-                        extruder_plat(c, g, |p| h.hauteur_douce(p), |p| h.hauteur_douce(p) - OUVRAGE)
-                    };
-                    f.en(mq::matiere::REMBLAI)
-                })
-                .collect();
-            remblais.push(reunir_formes(rp));
-        }
-        for g in &routes {
-            let h = Hauteurs::new(g);
-            let dp = plan(g).iter().map(|c| extruder_plat(c, g, |p| h.hauteur_douce(p) + DEFONCE_HAUT, |p| h.hauteur_douce(p) - DEFONCE_SOUS)).collect();
-            defonces.push(chaussee(reunir_formes(dp)));
+        for (t, w) in traces(&r, b, passage) {
+            let rem = if passage == Passage::Sol {
+                ruban(&t, w, |h| h, |g, c, d| terre(g).min(terre([c[0], c[1]])).min(terre(d)).min(c[2]) - SOUS)
+            } else {
+                ruban(&t, w, |h| h, |_, c, _| c[2] - OUVRAGE)
+            };
+            remblais.push(rem.en(mq::matiere::REMBLAI));
+            defonces.push(chaussee(ruban(&t, w, |h| h + DEFONCE_HAUT, |_, c, _| c[2] - DEFONCE_SOUS)));
         }
     }
     let socle = mq::socle(d);

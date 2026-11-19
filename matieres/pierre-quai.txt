@@ -1,0 +1,16 @@
+# Matière (sage-matieres) : modifiable à la main
+genre = pierre
+cote = 2
+resolution = 512
+graine = 1
+longueur = 60
+hauteur = 40
+appareil = 1
+irregularite = 0.6
+couleur = 42 0.18 0.66
+couleur2 = 35 0.14 0.48
+variation = 0.6
+grain = 0.7
+joint = 15
+couleur_joint = 40 0.08 0.76
+relief = 0.6
