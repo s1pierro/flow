@@ -502,7 +502,7 @@ impl Relief3d {
             };
             (if self.sur.traces { choisir(self.sur.traces_distance, self.sur.traces_rayon) } else { Vec::new() }, if self.sur.remblai { choisir(self.sur.remblai_distance, self.sur.remblai_rayon) } else { Vec::new() })
         };
-        let faces = self.faces_montrees(&pres_faces, carte.compteur);
+        let faces = self.faces_montrees(&donnees, &pres_faces, carte.compteur);
         let traces = self.traces_montrees(&donnees, &pres_traces, carte.compteur);
         self.montrees = montrees;
         self.dessinees = morceaux.len();
@@ -1106,6 +1106,9 @@ impl Surimpression {
 
 /// Les tracés passent d'autant au-dessus de la chaussée (m).
 const TRACES_DESSUS: f32 = 1.0;
+
+/// Les tuiles de remblais des voies faites au plus par image.
+const FACES_PAR_IMAGE: usize = 1;
 /// La demi-largeur des croix des nœuds (m).
 const TRACES_BRAS: f32 = 1.5;
 
@@ -1121,16 +1124,45 @@ impl Relief3d {
         self.faces.clear();
     }
 
-    /// Les faces en surimpression du module du banc sur les tuiles `pres` (les mêmes
-    /// que les tracés), s'il en fait.
-    fn faces_montrees(&mut self, pres: &[Cle], faite: u64) -> Vec<Maillage3d> {
-        if !crate::banc::faces_actives() {
-            return Vec::new();
-        }
+    /// Les remblais des voies en surimpression sur les tuiles `pres` : ceux de Flow
+    /// (`remblais_voies`), ou ceux du module du banc s'il en fait (pour les essais).
+    /// Le réseau nivelé est calculé à part la première fois : en attendant, rien.
+    fn faces_montrees(&mut self, donnees: &Arc<std::sync::RwLock<Donnees>>, pres: &[Cle], faite: u64) -> Vec<Maillage3d> {
+        let banc = crate::banc::faces_actives();
+        let reseau = if banc {
+            None
+        } else {
+            let r = donnees.read().ok().and_then(|d| d.reseau_pret());
+            if r.is_none() && !pres.is_empty() && !self.reseau_lance {
+                self.reseau_lance = true;
+                let donnees = donnees.clone();
+                let _ = std::thread::Builder::new().name("reseau".into()).spawn(move || {
+                    if let Ok(d) = donnees.read() {
+                        d.reseau();
+                    }
+                });
+            }
+            match r {
+                Some(r) => Some(r),
+                None => return Vec::new(),
+            }
+        };
         let mut v = Vec::new();
+        // Au plus quelques tuiles neuves par image : l'image ne s'arrête pas
+        let mut neuves = 0;
         for &cle in pres {
-            if !self.faces.contains_key(&cle) {
-                match crate::banc::faces_lieux(faite, cle).unwrap_or(Ok(None)) {
+            if !self.faces.contains_key(&cle) && neuves < FACES_PAR_IMAGE {
+                let faites = match &reseau {
+                    Some(r) => {
+                        neuves += 1;
+                        match donnees.read() {
+                            Ok(d) => Ok(Some(crate::remblais_voies::tuile(&d, r, cle))),
+                            Err(_) => Ok(None),
+                        }
+                    }
+                    None => crate::banc::faces_lieux(faite, cle).unwrap_or(Ok(None)),
+                };
+                match faites {
                     Ok(Some((s, i))) => {
                         self.revision += 1;
                         let id = 0x6661_0000_0000_0000u64 ^ (self.num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);

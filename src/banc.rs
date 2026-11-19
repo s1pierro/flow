@@ -397,6 +397,7 @@ pub fn piloter(flow: Option<&Path>, m: &[String]) -> Option<Result<String, Strin
                 b.lieux = v;
                 b.version += 1;
                 b.memoriser();
+                b.noter(if v { "Lieux mis sur le banc" } else { "Lieux retiré du banc" });
             }
             let fabrique = b.module.as_ref().is_some_and(|x| x.lieux.is_some());
             Ok(match (v, fabrique) {

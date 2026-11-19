@@ -1657,7 +1657,7 @@ impl Lieux {
                         cx.slider(&mut b, sub_id(base, 661), "Distance", &format!("{:.0} m", s.traces_distance), &mut s.traces_distance, 50.0, 3000.0);
                         cx.slider(&mut b, sub_id(base, 662), "Rayon", &format!("× {:.1}", s.traces_rayon).replace('.', ","), &mut s.traces_rayon, 0.5, 4.0);
                     }
-                    cx.toggle(&mut b, sub_id(base, 663), "Remblais (module du banc)", &mut s.remblai);
+                    cx.toggle(&mut b, sub_id(base, 663), "Remblais des voies", &mut s.remblai);
                     if s.remblai {
                         cx.slider(&mut b, sub_id(base, 664), "Distance", &format!("{:.0} m", s.remblai_distance), &mut s.remblai_distance, 50.0, 3000.0);
                         cx.slider(&mut b, sub_id(base, 665), "Rayon", &format!("× {:.1}", s.remblai_rayon).replace('.', ","), &mut s.remblai_rayon, 0.5, 4.0);
