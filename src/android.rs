@@ -268,10 +268,6 @@ fn render_loop() -> Result<(), String> {
             app.commun.fichier_reglages = fichier.as_ref().map(|f| f.chemin.display().to_string());
             app.commun.fichier_espace = espace.as_ref().map(|f| f.chemin.display().to_string());
             app.commun.dossier = espace.as_ref().and_then(|f| f.chemin.parent()).map(|d| d.to_path_buf());
-            // Le banc d'essai tel qu'au dernier lancement (module, Lieux sur le banc)
-            if let Some(d) = &app.commun.dossier {
-                crate::banc::retablir(d);
-            }
             // L'espace de travail, s'il a changé sur le disque (au premier lancement, ou
             // modifié à la main) ; sinon les fenêtres relisent ce qui a pu changer
             if let Some(f) = espace.as_mut() {
@@ -531,10 +527,6 @@ pub unsafe extern "C" fn ANativeActivity_onCreate(activity: *mut ANativeActivity
     // fichiers ; à défaut, le dossier interne
     let dossier = |p: *const i8| (!p.is_null()).then(|| PathBuf::from(CStr::from_ptr(p as *const _).to_string_lossy().into_owned()));
     s.dossier = dossier((*activity).external_data_path).or_else(|| dossier((*activity).internal_data_path));
-    // Le dossier interne : les modules du banc y sont copiés pour être exécutés
-    if let Some(p) = dossier((*activity).internal_data_path) {
-        crate::banc::noter_prive(p);
-    }
     drop(s);
     crate::acces::noter_contexte((*activity).env, (*activity).clazz);
     let cb = &mut *(*activity).callbacks;

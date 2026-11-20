@@ -6,12 +6,40 @@
 //! tunnel, plus sombre, ne se voit qu'aux têtes et là où le relief le découvre). Rien
 //! n'entre dans les tuiles : la 3D la pose par-dessus, tuile par tuile.
 //!
-//! Mis au point sur le banc (module lieux, `traces.rs`), entériné ici : il ne dépend
-//! plus du module chargé.
 
 use crate::carte::{boite_tuile, Cle, Donnees};
-use flow_banc::Scene;
 use sage_reel::reseau::{Passage, Reseau};
+
+/// Des triangles aux sommets de `relief3d::SOMMET` flottants (position, normale,
+/// couleur).
+#[derive(Default)]
+struct Scene {
+    sommets: Vec<f32>,
+    indices: Vec<u32>,
+}
+
+impl Scene {
+    /// Un triangle à plat, de couleur `c` (normale de sa face).
+    fn triangle(&mut self, a: [f32; 3], b: [f32; 3], d: [f32; 3], c: [f32; 3]) {
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+        let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
+        let n = n.map(|x| x / l);
+        let i = (self.sommets.len() / crate::relief3d::SOMMET) as u32;
+        for p in [a, b, d] {
+            self.sommets.extend_from_slice(&[p[0], p[1], p[2], n[0], n[1], n[2], c[0], c[1], c[2]]);
+        }
+        self.indices.extend_from_slice(&[i, i + 1, i + 2]);
+    }
+
+    /// Un polygone plan (en éventail), de couleur `c`.
+    fn polygone(&mut self, p: &[[f32; 3]], c: [f32; 3]) {
+        for k in 1..p.len().saturating_sub(1) {
+            self.triangle(p[0], p[k], p[k + 1], c);
+        }
+    }
+}
 
 /// Le dessus du tracé au-dessus de la chaussée (m), ce que le remblai dépasse au-dessus
 /// de lui, ce qu'il descend sous le terrain, ce qu'il déborde de la voie de chaque côté.

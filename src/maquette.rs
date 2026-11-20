@@ -111,30 +111,20 @@ pub fn tuile(d: &Donnees, cle: Cle, faite: u64) -> Tuile {
 }
 
 /// Une tuile finie pour la Maquette, ou pour la vue Matérialisation (`materialiser`) :
-/// celle-ci est faite par le module du banc s'il en fait, sinon comme en Maquette.
+/// celle-ci est faite par `materialisation::tuile`.
 pub fn tuile_pour(d: &Donnees, cle: Cle, faite: u64, materialiser: bool) -> Tuile {
     let mut suivi = crate::suivi::tache("tuile");
     suivi.detail(format!("{}/{}/{}", cle.0, cle.1, cle.2));
-    // Lieux sur le banc : la tuile faite par le module (le volume de défonce, montré à
-    // part, reste celui de Flow) ; s'il échoue, celle de Flow. La Matérialisation :
-    // celle du module s'il en fait une, sinon celle de Flow (`materialisation`)
-    let banc = {
-        let _t = crate::suivi::tache("banc");
-        if materialiser {
-            match crate::banc::materialiser_lieux(d, faite, cle) {
-                Some(Ok(t)) => Some(Ok(t)),
-                _ => Some(Ok(crate::materialisation::tuile(d, cle))),
-            }
-        } else {
-            crate::banc::tuile_lieux(d, faite, cle)
-        }
-    };
+    let _ = faite;
+    // La Matérialisation (`materialisation`) : ses volumes de défonce des voies sont
+    // joints en matière `MAQUETTE_DEFONCE`, mis à part pour la défonce
+    let fait: Option<Result<(Vec<f32>, Vec<u32>, Vec<u8>), String>> = materialiser.then(|| Ok(crate::materialisation::tuile(d, cle)));
     let mut apart = None;
-    let (sommets, indices, pixels, def) = match banc {
+    let (sommets, indices, pixels, def) = match fait {
         Some(Ok((s, i, p))) => {
             let _t = crate::suivi::tache("défonce");
-            // Les triangles de matière `MAQUETTE_DEFONCE` que le module a joints (ses
-            // volumes de défonce, des voies par exemple) : montrés avec la défonce
+            // Les triangles de matière `MAQUETTE_DEFONCE` (les volumes de défonce des
+            // voies) : montrés avec la défonce
             let (i, a) = separer_defonce(&s, i);
             apart = a;
             (s, i, p, defonce(d, cle))

@@ -1,7 +1,0 @@
-[package]
-name = "flow-banc"
-version = "0.1.0"
-edition = "2021"
-description = "L'interface des modules du banc d'essai de Flow (bibliothèques .so chargées à chaud)"
-
-[dependencies]

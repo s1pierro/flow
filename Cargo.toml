@@ -1,6 +1,6 @@
 [package]
 name = "flow"
-version = "0.120.0"
+version = "0.125.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -17,7 +17,6 @@ i_triangle = "0.51"
 sage-reel = { path = "../sage/modules/sage-reel" }
 # Les matières (textures répétables), issues de Texturine : partagées avec S.A.G.E.
 sage-matieres = { path = "../sage/modules/sage-matieres" }
-flow-banc = { path = "banc/abi" }
 
 [lib]
 crate-type = ["cdylib", "rlib"]

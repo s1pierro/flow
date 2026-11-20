@@ -207,13 +207,15 @@ pub struct Lieux {
     maquette3d: bool,
     /// En maquette : le suivi des tâches (`suivi`) par-dessus la vue.
     suivi3d: bool,
-    /// En maquette : les tracés du réseau et les remblais du banc en surimpression.
+    /// En maquette : les tracés du réseau et les remblais des voies en surimpression.
     sur: crate::relief3d::Surimpression,
     /// La vue Matérialisation (une maquette à part : le niveau le plus fin seul, dans
     /// un rayon, montré quand tout est fait) : on y est ou non, son rayon (m), son
     /// centre (x, z), posé au point visé quand on y entre.
     materialisation3d: bool,
     zone_rayon: f32,
+    /// En Matérialisation : les bâtiments en volumes fermés en surimpression.
+    bati_mat: bool,
     zone_centre: Option<[f32; 2]>,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
     /// la carte changent).
@@ -293,6 +295,7 @@ impl Default for Lieux {
             sur: Default::default(),
             materialisation3d: false,
             zone_rayon: 500.0,
+            bati_mat: false,
             zone_centre: None,
             maquette3d: false,
             selection: Default::default(),
@@ -338,6 +341,7 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
     if let Some(s) = crate::relief3d::Surimpression::lire(&e.nombres("surimpression")) {
         l.sur = s;
     }
+    l.bati_mat = e.texte("materialisation_batiments") == Some("oui");
     // « zone = rayon x z » : la zone de la Matérialisation
     if let [r, x, z] = e.nombres("zone")[..] {
         l.zone_rayon = r;
@@ -1330,6 +1334,7 @@ impl Lieux {
         }
         r.seules = self.selection.seules;
         r.sur = self.sur;
+        r.bati_mat = self.bati_mat;
         if self.materialisation3d && self.maquette3d && self.zone_centre.is_none() {
             self.zone_centre = Some([r.camera.cible[0], r.camera.cible[2]]);
         }
@@ -1695,7 +1700,7 @@ impl Lieux {
                         }
                     }
                 }
-                // La surimpression sur la maquette : tracés du réseau, remblais du banc
+                // La surimpression sur la maquette : tracés du réseau, remblais des voies
                 if self.trois_d.is_some() && self.maquette3d {
                     cx.section(&mut b, "Surimpression");
                     let s = &mut self.sur;
@@ -1734,6 +1739,15 @@ impl Lieux {
                     }
                     if cx.button(&mut b, sub_id(base, 672), "Recentrer sur le point visé") {
                         self.zone_centre = self.trois_d.as_ref().map(|r| [r.camera.cible[0], r.camera.cible[2]]);
+                    }
+                    // Les bâtiments en volumes fermés, avant de les unir au terrain
+                    cx.toggle(&mut b, sub_id(base, 673), "Bâtiments (volumes fermés)", &mut self.bati_mat);
+                    if self.bati_mat {
+                        if let Some(r) = &self.trois_d {
+                            let (faites, total, ok, aplanis, refuses) = r.bati_mat_bilan;
+                            let attente = if faites < total { format!(" ({faites} tuiles sur {total})") } else { String::new() };
+                            cx.paragraph(&mut b, &format!("{} fermés, en bleu, dont {} à toit plat (toit d'origine qui ne fermait pas) ; {} en rouge{attente}.", pluriel(ok, "bâtiment", "bâtiments"), aplanis, pluriel(refuses, "refusé", "refusés")));
+                        }
                     }
                 }
                 // L'ordre de dessin, du dessus au dessous ; la 3D, drapée des mêmes
@@ -2426,7 +2440,7 @@ impl Contexte for Lieux {
                 }
                 Ok(format!("traces distance {} rayon {} tuiles {} · remblai distance {} rayon {} · {}", self.sur.traces_distance, self.sur.traces_rayon, r.traces_tuiles, self.sur.remblai_distance, self.sur.remblai_rayon, r.traces_bilan))
             }
-            // Les faces du banc (remblais) : « remblai distance <m> », « remblai rayon <k> »
+            // Les remblais des voies : « remblai distance <m> », « remblai rayon <k> »
             "remblai" => {
                 let n = m.get(2).and_then(|s| s.parse::<f32>().ok());
                 match (m.get(1).map(|s| s.as_str()), n) {
@@ -2505,6 +2519,9 @@ impl Contexte for Lieux {
         }
         if self.selection.seules {
             e.mettre("selection_seules", "oui");
+        }
+        if self.bati_mat {
+            e.mettre("materialisation_batiments", "oui");
         }
         if self.sur != crate::relief3d::Surimpression::default() {
             e.mettre("surimpression", self.sur.ecrire());

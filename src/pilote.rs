@@ -4,19 +4,19 @@
 //!
 //! ```text
 //! am broadcast -n fr.s1pierro.flow/.Pilote -a fr.s1pierro.flow.PILOTE \
-//!     --es jeton "$(cat /sdcard/Flow/banc/jeton)" --es cmd "capture"
+//!     --es jeton "$(cat /sdcard/Flow/pilote/jeton)" --es cmd "capture"
 //! ```
 //!
 //! La réponse revient dans le même échange : sa première ligne est `ok` ou `erreur`,
 //! la suite le détail. Le pilotage s'arme dans les Paramètres (Interface › Pilotage) ;
 //! il repart désarmé à chaque lancement. En l'armant, Flow tire un jeton au hasard et
-//! l'écrit dans `Flow/banc/jeton` : une commande sans ce jeton est refusée.
+//! l'écrit dans `Flow/pilote/jeton` : une commande sans ce jeton est refusée.
 //!
 //! Les commandes (coordonnées en pixels de l'écran) :
 //! - `ping` : la version de Flow ;
 //! - `etat` : l'écran, et chaque fenêtre (numéro, contexte, cadre, document) ;
 //! - `contexte <clé> [document]` : ouvre un contexte dans la plus grande fenêtre ;
-//! - `capture [nom]` : l'écran en PNG dans `Flow/banc/captures/` ; rend son chemin ;
+//! - `capture [nom]` : l'écran en PNG dans `Flow/pilote/captures/` ; rend son chemin ;
 //! - `toucher <x> <y> [durée ms]` : un doigt posé puis levé ;
 //! - `glisser <x1> <y1> <x2> <y2> [durée ms]` : un doigt qui glisse ;
 //! - `radio …`, `enregistrer …`, `mixeur …` : l'audio (`pilote_audio`) ;
@@ -48,7 +48,7 @@ const DOIGT: i32 = 9_000;
 
 static ARME: AtomicBool = AtomicBool::new(false);
 static JETON: Mutex<String> = Mutex::new(String::new());
-/// Le dossier du banc (`Flow/banc`), connu une fois le pilotage armé.
+/// Le dossier du pilote (`Flow/pilote`), connu une fois le pilotage armé.
 static DOSSIER: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Les commandes en attente du thread de rendu.
 static FILE: Mutex<VecDeque<(Vec<String>, Sender<String>)>> = Mutex::new(VecDeque::new());
@@ -62,7 +62,7 @@ pub fn arme() -> bool {
 }
 
 /// Arme (ou désarme) le pilotage. En l'armant, un jeton neuf est tiré et écrit dans
-/// `<dossier>/banc/jeton` ; rend le chemin du jeton, ou l'erreur.
+/// `<dossier>/pilote/jeton` ; rend le chemin du jeton, ou l'erreur.
 pub fn armer(oui: bool, dossier: Option<&Path>) -> Result<String, String> {
     if !oui {
         ARME.store(false, Ordering::Relaxed);
@@ -71,13 +71,13 @@ pub fn armer(oui: bool, dossier: Option<&Path>) -> Result<String, String> {
         }
         return Ok(String::new());
     }
-    let banc = dossier.ok_or("le dossier de Flow est inconnu")?.join("banc");
-    std::fs::create_dir_all(banc.join("captures")).map_err(|e| e.to_string())?;
+    let pilote = dossier.ok_or("le dossier de Flow est inconnu")?.join("pilote");
+    std::fs::create_dir_all(pilote.join("captures")).map_err(|e| e.to_string())?;
     let jeton = tirer_jeton()?;
-    let chemin = banc.join("jeton");
+    let chemin = pilote.join("jeton");
     std::fs::write(&chemin, format!("{jeton}\n")).map_err(|e| e.to_string())?;
     *JETON.lock().map_err(|e| e.to_string())? = jeton;
-    *DOSSIER.lock().map_err(|e| e.to_string())? = Some(banc);
+    *DOSSIER.lock().map_err(|e| e.to_string())? = Some(pilote);
     ARME.store(true, Ordering::Relaxed);
     Ok(chemin.display().to_string())
 }
@@ -208,7 +208,7 @@ fn executer(app: &mut App, m: &[String], w: f32, h: f32, dp: f32, tx: &Sender<St
             Ok(Some(format!("{cle} demandé")))
         }
         "capture" => {
-            let dossier = DOSSIER.lock().ok().and_then(|d| d.clone()).ok_or("dossier du banc inconnu")?;
+            let dossier = DOSSIER.lock().ok().and_then(|d| d.clone()).ok_or("dossier du pilote inconnu")?;
             let nom = match m.get(1) {
                 Some(n) => n.trim_end_matches(".png").replace('/', "_"),
                 None => format!("capture-{}", crate::disque::maintenant()),
@@ -240,7 +240,7 @@ fn executer(app: &mut App, m: &[String], w: f32, h: f32, dp: f32, tx: &Sender<St
             d.push_back((Event::Up { id: DOIGT + 1 }, t + Duration::from_secs_f32(duree + 0.02)));
             Ok(Some(format!("glisser {x1} {y1} -> {x2} {y2}")))
         }
-        autre => match crate::banc::piloter(app.commun.dossier.clone().as_deref(), m).or_else(|| crate::suivi::piloter(m)).or_else(|| crate::pilote_audio::executer(&mut app.commun, m)).or_else(|| app.piloter_fenetres(m)) {
+        autre => match crate::suivi::piloter(m).or_else(|| crate::pilote_audio::executer(&mut app.commun, m)).or_else(|| app.piloter_fenetres(m)) {
             Some(r) => r.map(Some),
             None => Err(format!("commande inconnue : {autre} (ping, etat, contexte, capture, toucher, glisser, suivi, radio, enregistrer, mixeur, ou une commande d'un contexte ouvert)")),
         },

@@ -116,6 +116,11 @@ impl Mul<f64> for Coin {
 
 pub const NON_FERME: &str = "maillage non fermé";
 
+/// La forme est-elle un volume fermé que les booléens acceptent ?
+pub fn ferme(m: &Forme) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vers_manifold(m, &mut 0).is_ok())).unwrap_or(false)
+}
+
 fn vers_manifold(m: &Forme, faces: &mut usize) -> Result<Manifold<Coin>, String> {
     if m.faces.is_empty() {
         return Err(NON_FERME.into());

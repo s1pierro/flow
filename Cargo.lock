@@ -34,20 +34,15 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "flow"
-version = "0.120.0"
+version = "0.125.0"
 dependencies = [
  "boolmesh",
- "flow-banc",
  "fontdue",
  "i_overlay",
  "i_triangle",
  "sage-matieres",
  "sage-reel",
 ]
-
-[[package]]
-name = "flow-banc"
-version = "0.1.0"
 
 [[package]]
 name = "foldhash"

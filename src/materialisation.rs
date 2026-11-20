@@ -10,6 +10,10 @@
 //! horizontale en travers à chaque point du tracé, les sections reliées. Aucun triangle
 //! ne relie deux routes : la chaussée est plate en travers par construction (0.120 ;
 //! avant, le plan des voies fusionné puis triangulé donnait stries et dévers).
+//! À chaque carrefour, une dalle horizontale à la hauteur du nœud (`dalle`) bouche
+//! les coins entre les rubans ; autour du nœud, sur `rayon_carrefour`, les routes
+//! sont à plat à sa hauteur (`lisser`) : leurs volumes s'y recouvrent sans marche
+//! (0.121, 0.123).
 //! Les volumes de défonce, coupés à la tuile, sont joints en matière
 //! `MAQUETTE_DEFONCE` : la 3D les montre avec la défonce des lits.
 
@@ -78,23 +82,79 @@ fn chaussee(f: Forme) -> Forme {
 const LISSAGE: f32 = 10.0;
 
 /// Les points (x, z, h) d'une voie, les hauteurs lissées le long d'elle (moyenne
-/// pondérée en triangle sur ± `LISSAGE` mètres).
-fn lisser(p: &[[f32; 3]]) -> Vec<[f32; 3]> {
-    let mut s = vec![0.0f32; p.len()];
-    for i in 1..p.len() {
-        s[i] = s[i - 1] + (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
-    }
-    (0..p.len())
+/// pondérée en triangle sur ± `LISSAGE` mètres). Sur `ra` mètres depuis le début et
+/// `rb` depuis la fin (les carrefours, `rayon_carrefour`), la voie est à plat à la
+/// hauteur de son nœud : toutes les routes d'un carrefour s'y recouvrent à la même
+/// hauteur (pas de marche) ; le lissage s'installe sur les `LISSAGE` mètres suivants.
+/// Des points sont ajoutés aux limites des parties à plat.
+fn lisser(p: &[[f32; 3]], ra: f32, rb: f32) -> Vec<[f32; 3]> {
+    let abscisses = |p: &[[f32; 3]]| {
+        let mut s = vec![0.0f32; p.len()];
+        for i in 1..p.len() {
+            s[i] = s[i - 1] + (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+        }
+        s
+    };
+    let s0 = abscisses(p);
+    let long = s0[p.len() - 1];
+    let (ha, hb) = (p[0][2], p[p.len() - 1][2]);
+    // Les hauteurs lissées aux points d'origine
+    let lisse: Vec<f32> = (0..p.len())
         .map(|i| {
             let (mut somme, mut poids) = (0.0, 0.0);
             for j in 0..p.len() {
-                let w = (1.0 - (s[j] - s[i]).abs() / LISSAGE).max(0.0);
+                let w = (1.0 - (s0[j] - s0[i]).abs() / LISSAGE).max(0.0);
                 somme += w * p[j][2];
                 poids += w;
             }
-            [p[i][0], p[i][1], somme / poids]
+            somme / poids
+        })
+        .collect();
+    // Les points, avec ceux des limites des parties à plat
+    let mut q: Vec<([f32; 3], f32)> = Vec::with_capacity(p.len() + 2);
+    for i in 0..p.len() {
+        if i > 0 {
+            for c in [ra, long - rb] {
+                if c > s0[i - 1] + 0.05 && c < s0[i] - 0.05 {
+                    let t = (c - s0[i - 1]) / (s0[i] - s0[i - 1]);
+                    let h = lisse[i - 1] + t * (lisse[i] - lisse[i - 1]);
+                    q.push(([p[i - 1][0] + t * (p[i][0] - p[i - 1][0]), p[i - 1][1] + t * (p[i][1] - p[i - 1][1]), h], c));
+                }
+            }
+        }
+        q.push(([p[i][0], p[i][1], lisse[i]], s0[i]));
+    }
+    q.into_iter()
+        .map(|(x, s)| {
+            let h = if ra + rb >= long {
+                // Trop courte : d'un nœud à l'autre en ligne droite
+                ha + (hb - ha) * (s / long.max(1e-6))
+            } else if s <= ra {
+                ha
+            } else if s >= long - rb {
+                hb
+            } else {
+                let fa = ((s - ra) / LISSAGE).clamp(0.0, 1.0);
+                let fb = ((long - rb - s) / LISSAGE).clamp(0.0, 1.0);
+                // Du nœud vers le lissé, par le plus proche des deux bouts
+                let (f, hn) = if s - ra < long - rb - s { (fa, ha) } else { (fb, hb) };
+                hn * (1.0 - f) + f * x[2]
+            };
+            [x[0], x[1], h]
         })
         .collect()
+}
+
+/// Le rayon (m) de la partie à plat d'un carrefour : le nœud `n` s'il réunit au moins
+/// deux routes, assez pour que leurs emprises (bouts prolongés compris) s'y recouvrent
+/// toutes ; 0 sinon.
+fn rayon_carrefour(r: &Reseau, n: usize) -> f32 {
+    let routes: Vec<_> = r.noeuds[n].aretes.iter().map(|&k| &r.aretes[k]).filter(|a| a.genre != sage_reel::PIETONNE).collect();
+    if routes.len() < 2 {
+        return 0.0;
+    }
+    let w = routes.iter().map(|a| (a.largeur * 0.5).max(1.0)).fold(0.0, f32::max);
+    1.5 * w + 1.0
 }
 
 /// Les points (x, z, h) plus proches que ça (m) sont confondus.
@@ -190,6 +250,54 @@ fn ruban(p: &[[f32; 3]], w: f32, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2
     f
 }
 
+/// Une dalle de carrefour : un octogone horizontal de rayon inscrit `w` centré en `c`
+/// (x, z), de `bas(sommet)` à `haut`.
+fn dalle(c: [f32; 2], w: f32, haut: f32, bas: impl Fn([f32; 2]) -> f32) -> Forme {
+    const COTES: usize = 8;
+    let r = w / (std::f32::consts::PI / COTES as f32).cos();
+    let mut f = Forme::default();
+    for k in 0..COTES {
+        let t = k as f32 * std::f32::consts::TAU / COTES as f32;
+        let q = [c[0] + r * t.cos(), c[1] + r * t.sin()];
+        f.sommets.push([q[0], bas(q), q[1]]);
+        f.sommets.push([q[0], haut, q[1]]);
+    }
+    let n = COTES as u32;
+    for k in 0..n {
+        let k1 = (k + 1) % n;
+        f.faces.push(vec![2 * k, 2 * k1, 2 * k1 + 1]);
+        f.faces.push(vec![2 * k, 2 * k1 + 1, 2 * k + 1]);
+    }
+    for k in 1..n - 1 {
+        f.faces.push(vec![0, 2 * (k + 1), 2 * k]);
+        f.faces.push(vec![1, 2 * k + 1, 2 * (k + 1) + 1]);
+    }
+    if f.volume() < 0.0 {
+        f.faces.iter_mut().for_each(|p| p.reverse());
+    }
+    f
+}
+
+/// Les carrefours près de la boîte `b` : les nœuds où se rejoignent au moins deux
+/// routes, avec la plus grande demi-largeur et s'il y arrive une route au sol.
+fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<([f32; 3], f32, bool)> {
+    let marge = 20.0;
+    let mut v = Vec::new();
+    for n in &r.noeuds {
+        let p = n.p;
+        if p[0] < b[0] - marge || p[0] > b[2] + marge || p[1] < b[1] - marge || p[1] > b[3] + marge {
+            continue;
+        }
+        let routes: Vec<_> = n.aretes.iter().map(|&k| &r.aretes[k]).filter(|a| a.genre != sage_reel::PIETONNE).collect();
+        if routes.len() < 2 {
+            continue;
+        }
+        let w = routes.iter().map(|a| (a.largeur * 0.5).max(1.0)).fold(0.0, f32::max);
+        v.push((p, w, routes.iter().any(|a| a.passage == Passage::Sol)));
+    }
+    v
+}
+
 /// Les morceaux du tracé lissé de chaque route de `passage` qui touchent la boîte `b`
 /// (marge comprise), avec leur demi-largeur.
 fn traces(r: &Reseau, b: [f32; 4], passage: Passage) -> Vec<(Vec<[f32; 3]>, f32)> {
@@ -202,7 +310,7 @@ fn traces(r: &Reseau, b: [f32; 4], passage: Passage) -> Vec<(Vec<[f32; 3]>, f32)
         if !a.points.iter().any(|p| dedans(*p, *p)) && !a.points.windows(2).any(|s| dedans(s[0], s[1])) {
             continue;
         }
-        let pts = lisser(&a.points);
+        let pts = lisser(&a.points, rayon_carrefour(r, a.a), rayon_carrefour(r, a.b));
         // Les suites de segments qui touchent la boîte
         let mut cur: Vec<[f32; 3]> = Vec::new();
         for s in pts.windows(2) {
@@ -247,6 +355,13 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
             remblais.push(rem.en(mq::matiere::REMBLAI));
             defonces.push(chaussee(ruban(&t, w, |h| h + DEFONCE_HAUT, |_, c, _| c[2] - DEFONCE_SOUS)));
         }
+    }
+    // Les dalles des carrefours : elles bouchent les coins entre les rubans
+    for (p, w, sol) in carrefours(&r, b) {
+        let (c, h) = ([p[0], p[1]], p[2]);
+        let rem = if sol { dalle(c, w, h, |q| terre(q).min(terre(c)).min(h) - SOUS) } else { dalle(c, w, h, |_| h - OUVRAGE) };
+        remblais.push(rem.en(mq::matiere::REMBLAI));
+        defonces.push(chaussee(dalle(c, w, h + DEFONCE_HAUT, |_| h - DEFONCE_SOUS)));
     }
     let socle = mq::socle(d);
     let boite = pave([b[0], socle - 50.0, b[1]], [b[2], 2000.0, b[3]]);
