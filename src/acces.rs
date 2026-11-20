@@ -435,6 +435,12 @@ pub fn reseau(arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "telecharger", Some(arg))
 }
 
+/// Garde l'appareil éveillé (processeur, Wi-Fi à pleine vitesse) pour un long travail
+/// (`renfort::eveil`) : pris (`true`) ou rendu.
+pub fn eveil(pris: bool) -> Option<String> {
+    appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "eveil", Some(if pris { "1" } else { "0" }))
+}
+
 /// Les verrous Wi-Fi de la télécommande (faible latence, diffusions) : pris (`true`)
 /// ou rendus ; "" si tout va bien, l'erreur sinon ; rien hors d'Android.
 pub fn verrous_wifi(pris: bool) -> Option<String> {

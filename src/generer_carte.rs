@@ -36,6 +36,128 @@ pub struct Etat {
     pub duree: f32,
     /// Le temps passé par étape (aussi écrit dans `mesures.txt` de la carte).
     pub mesures: crate::materialisation::Mesures,
+    /// Le renfort (`renfort`) : où il en est, et les tuiles qu'il a faites.
+    pub renfort: Option<String>,
+    pub par_renfort: usize,
+}
+
+/// Change l'état de la génération.
+fn maj(f: impl FnOnce(&mut Etat)) {
+    if let Ok(mut e) = ETAT.lock() {
+        if let Some(e) = e.as_mut() {
+            f(e);
+        }
+    }
+}
+
+/// La file des tuiles à faire, partagée avec le renfort : les tuiles, et combien le
+/// renfort en a pris sans les avoir rendues.
+type File = Arc<Mutex<(std::collections::VecDeque<Cle>, usize)>>;
+
+/// Prend la prochaine tuile de la file (comptée en vol pour le renfort).
+fn prendre(file: &File, renfort: bool) -> Option<Cle> {
+    let mut f = file.lock().ok()?;
+    let c = f.0.pop_front();
+    if c.is_some() && renfort {
+        f.1 += 1;
+    }
+    c
+}
+
+/// Écrit l'index (une carte partielle reste lisible).
+fn indexer(carte: &Mutex<sage_carte::Carte>, dossier: &Path) -> Result<(), String> {
+    let c = carte.lock().map_err(|_| "carte inaccessible")?;
+    std::fs::write(dossier.join(sage_carte::INDEX), c.ecrire()).map_err(|e| e.to_string())
+}
+
+/// Écrit une tuile (par un fichier provisoire renommé ensuite).
+fn ecrire_tuile(chemin: &Path, glb: &[u8]) -> Result<(), String> {
+    let tmp = chemin.with_extension("glb.part");
+    std::fs::write(&tmp, glb).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, chemin).map_err(|e| e.to_string())
+}
+
+/// Le renfort de la génération : en cherche un (au départ, puis toutes les
+/// `renfort::RECHERCHE`), lui donne le lieu, puis lui fait faire des tuiles de la file
+/// jusqu'à ce qu'elle soit vide. Une tuile perdue revient à la file.
+#[allow(clippy::too_many_arguments)]
+fn boucle_renfort(donnees: Arc<RwLock<Donnees>>, lieu: String, file: File, fini: Arc<AtomicBool>, carte: Arc<Mutex<sage_carte::Carte>>, dossier: PathBuf, memoire: Arc<crate::materialisation::Memoire>) {
+    use crate::renfort;
+    let attendre = |d: std::time::Duration| {
+        let fin = std::time::Instant::now() + d;
+        while std::time::Instant::now() < fin && !fini.load(Ordering::Relaxed) && !ARRET.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    };
+    while !fini.load(Ordering::Relaxed) && !ARRET.load(Ordering::Relaxed) {
+        if file.lock().map_or(true, |f| f.0.is_empty()) {
+            return;
+        }
+        let Some((a, _)) = renfort::chercher() else {
+            maj(|e| e.renfort = Some("aucun renfort (« Servir de renfort » dans la liste des Lieux de l'autre appareil)".into()));
+            attendre(renfort::RECHERCHE);
+            continue;
+        };
+        maj(|e| e.renfort = Some(format!("renfort trouvé : {}…", a.ip())));
+        let lien = match donnees.read() {
+            Ok(d) => renfort::Lien::ouvrir(a, &d, &lieu, |m| maj(|e| e.renfort = Some(m.to_string()))),
+            Err(_) => return,
+        };
+        let mut lien = match lien {
+            Ok(l) => l,
+            Err(m) => {
+                maj(|e| e.renfort = Some(m));
+                attendre(renfort::RECHERCHE);
+                continue;
+            }
+        };
+        maj(|e| e.renfort = Some(format!("renfort : {}", a.ip())));
+        while !ARRET.load(Ordering::Relaxed) {
+            let Some(cle) = prendre(&file, true) else { return };
+            let rendre = |file: &File, remettre: bool| {
+                if let Ok(mut f) = file.lock() {
+                    if remettre {
+                        f.0.push_front(cle);
+                    }
+                    f.1 = f.1.saturating_sub(1);
+                }
+            };
+            match lien.tuile(cle) {
+                Ok(r) => {
+                    let b = match donnees.read() {
+                        Ok(d) => {
+                            memoire.faite_ailleurs(&d, cle);
+                            boite_tuile(&d, cle)
+                        }
+                        Err(_) => [0.0; 4],
+                    };
+                    let mut triangles = 0;
+                    if let Some((hmin, hmax, n, glb)) = r {
+                        if ecrire_tuile(&dossier.join(sage_carte::nom_tuile(cle)), &glb).is_err() {
+                            rendre(&file, true);
+                            return;
+                        }
+                        triangles = n as usize;
+                        if let Ok(mut c) = carte.lock() {
+                            c.tuiles.push(sage_carte::EntreeTuile { cle, boite: b, hmin, hmax, triangles: n });
+                        }
+                    }
+                    maj(|e| {
+                        e.faites += 1;
+                        e.par_renfort += 1;
+                        e.triangles += triangles;
+                    });
+                    let _ = indexer(&carte, &dossier);
+                    rendre(&file, false);
+                }
+                Err(m) => {
+                    rendre(&file, true);
+                    maj(|e| e.renfort = Some(format!("renfort perdu ({m}) ; nouvelle recherche…")));
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Le bilan des mesures, écrit dans le dossier de la carte.
@@ -114,7 +236,7 @@ fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
 }
 
 /// La tuile `cle` en tuile de carte (rien si elle est vide).
-fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Option<sage_carte::Tuile> {
+pub(crate) fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Option<sage_carte::Tuile> {
     let (v, ind, px) = crate::materialisation::tuile_carte(d, cle, memoire);
     let t0 = std::time::Instant::now();
     let b = boite_tuile(d, cle);
@@ -173,7 +295,7 @@ fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Op
 }
 
 /// L'entrée d'index d'une tuile.
-fn entree(t: &sage_carte::Tuile, b: [f32; 4]) -> sage_carte::EntreeTuile {
+pub(crate) fn entree(t: &sage_carte::Tuile, b: [f32; 4]) -> sage_carte::EntreeTuile {
     let (mut hmin, mut hmax) = (f32::MAX, f32::MIN);
     for p in &t.primitives {
         for q in &p.positions {
@@ -196,13 +318,8 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
     if let Ok(mut e) = ETAT.lock() {
         *e = Some(Etat { nom: nom.clone(), dossier: dossier.clone(), debut: Some(std::time::Instant::now()), ..Default::default() });
     }
-    let maj = |f: &dyn Fn(&mut Etat)| {
-        if let Ok(mut e) = ETAT.lock() {
-            if let Some(e) = e.as_mut() {
-                f(e);
-            }
-        }
-    };
+    // L'appareil reste éveillé pendant la génération (rendu à la fin)
+    crate::renfort::eveil(true);
     let _ = std::thread::Builder::new().name("carte".into()).spawn(move || {
         let r = (|| -> Result<(), String> {
             std::fs::create_dir_all(dossier.join(sage_carte::TUILES)).map_err(|e| e.to_string())?;
@@ -220,7 +337,7 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                 let carte = sage_carte::Carte { nom: nom.clone(), lieu: lieu.clone(), lat: d.lieu.lat, lon: d.lieu.lon, centre: z.centre, rayon: z.rayon, cote, depart: [z.centre[0], h + 2.0, z.centre[1]], matieres: matieres(&matieres_flow), tuiles: Vec::new() };
                 (cles, carte, memoire)
             };
-            maj(&|e| e.total = cles.len());
+            maj(|e| e.total = cles.len());
             // Les matières : réglages et images copiés
             for m in &carte0.matieres {
                 for ext in ["txt", "png"] {
@@ -230,56 +347,86 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                     }
                 }
             }
+            // Reprise : les tuiles déjà écrites sont relues ; les autres vont à la file
             let mut carte = carte0;
+            let mut file = std::collections::VecDeque::new();
             for &cle in &cles {
                 if ARRET.load(Ordering::Relaxed) {
                     return Err("arrêtée".into());
                 }
                 let chemin = dossier.join(sage_carte::nom_tuile(cle));
-                let b = {
-                    let d = donnees.read().map_err(|_| "données inaccessibles")?;
-                    boite_tuile(&d, cle)
-                };
-                // Reprise : une tuile déjà écrite est relue
-                if let Ok(t) = sage_carte::Tuile::ouvrir(&chemin) {
-                    let en = entree(&t, b);
-                    maj(&|e| {
-                        e.faites += 1;
-                        e.reprises += 1;
-                        e.triangles += en.triangles as usize;
-                    });
-                    carte.tuiles.push(en);
-                    continue;
+                match sage_carte::Tuile::ouvrir(&chemin) {
+                    Ok(t) => {
+                        let b = boite_tuile(&*donnees.read().map_err(|_| "données inaccessibles")?, cle);
+                        let en = entree(&t, b);
+                        maj(|e| {
+                            e.faites += 1;
+                            e.reprises += 1;
+                            e.triangles += en.triangles as usize;
+                        });
+                        carte.tuiles.push(en);
+                    }
+                    Err(_) => file.push_back(cle),
                 }
-                let t = {
-                    let d = donnees.read().map_err(|_| "données inaccessibles")?;
-                    let _s = crate::suivi::tache("carte (tuile)");
-                    tuile(&d, cle, &memoire)
-                };
-                if let Some(t) = t {
-                    let en = entree(&t, b);
-                    let t0 = std::time::Instant::now();
-                    let tmp = chemin.with_extension("glb.part");
-                    std::fs::write(&tmp, sage_carte::glb::ecrire(&t)).map_err(|e| e.to_string())?;
-                    std::fs::rename(&tmp, &chemin).map_err(|e| e.to_string())?;
-                    memoire.noter("écriture du GLB", t0.elapsed().as_secs_f64());
-                    maj(&|e| e.triangles += en.triangles as usize);
-                    carte.tuiles.push(en);
-                }
-                let m = memoire.mesures();
-                maj(&|e| {
-                    e.faites += 1;
-                    e.mesures = m.clone();
-                });
-                // L'index à jour au fur et à mesure (une carte partielle reste lisible)
-                std::fs::write(dossier.join(sage_carte::INDEX), carte.ecrire()).map_err(|e| e.to_string())?;
-                let _ = std::fs::write(dossier.join(MESURES), m.texte());
             }
-            std::fs::write(dossier.join(sage_carte::INDEX), carte.ecrire()).map_err(|e| e.to_string())?;
+            let carte = Arc::new(Mutex::new(carte));
+            let file: File = Arc::new(Mutex::new((file, 0)));
+            let memoire = Arc::new(memoire);
+            // Le renfort, en parallèle
+            let fini = Arc::new(AtomicBool::new(false));
+            let aide = {
+                let (donnees, lieu, file, fini, carte, dossier, memoire) = (donnees.clone(), lieu.clone(), file.clone(), fini.clone(), carte.clone(), dossier.clone(), memoire.clone());
+                std::thread::Builder::new().name("carte-renfort".into()).spawn(move || boucle_renfort(donnees, lieu, file, fini, carte, dossier, memoire)).ok()
+            };
+            let r = (|| -> Result<(), String> {
+                loop {
+                    if ARRET.load(Ordering::Relaxed) {
+                        return Err("arrêtée".into());
+                    }
+                    let Some(cle) = prendre(&file, false) else {
+                        // La file est vide : attendre les tuiles encore chez le renfort
+                        // (une tuile perdue revient à la file)
+                        if file.lock().map_or(true, |f| f.1 == 0) {
+                            return Ok(());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    };
+                    let chemin = dossier.join(sage_carte::nom_tuile(cle));
+                    let (t, b) = {
+                        let d = donnees.read().map_err(|_| "données inaccessibles")?;
+                        let _s = crate::suivi::tache("carte (tuile)");
+                        (tuile(&d, cle, &memoire), boite_tuile(&d, cle))
+                    };
+                    if let Some(t) = t {
+                        let en = entree(&t, b);
+                        let t0 = std::time::Instant::now();
+                        ecrire_tuile(&chemin, &sage_carte::glb::ecrire(&t))?;
+                        memoire.noter("écriture du GLB", t0.elapsed().as_secs_f64());
+                        maj(|e| e.triangles += en.triangles as usize);
+                        if let Ok(mut c) = carte.lock() {
+                            c.tuiles.push(en);
+                        }
+                    }
+                    let m = memoire.mesures();
+                    maj(|e| {
+                        e.faites += 1;
+                        e.mesures = m.clone();
+                    });
+                    indexer(&carte, &dossier)?;
+                    let _ = std::fs::write(dossier.join(MESURES), m.texte());
+                }
+            })();
+            fini.store(true, Ordering::Relaxed);
+            if let Some(a) = aide {
+                let _ = a.join();
+            }
+            indexer(&carte, &dossier)?;
             let _ = std::fs::write(dossier.join(MESURES), memoire.mesures().texte());
-            Ok(())
+            r
         })();
-        maj(&|e| {
+        crate::renfort::eveil(false);
+        maj(|e| {
             e.fini = true;
             e.duree = e.debut.map_or(0.0, |d| d.elapsed().as_secs_f32());
             if let Err(m) = &r {

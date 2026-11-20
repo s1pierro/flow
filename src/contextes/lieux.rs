@@ -217,6 +217,8 @@ pub struct Lieux {
     /// En Matérialisation : les bâtiments en volumes fermés en surimpression.
     bati_mat: bool,
     zone_centre: Option<[f32; 2]>,
+    /// Pourquoi le renfort n'a pas pu démarrer (port pris…).
+    erreur_renfort: Option<String>,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
     /// la carte changent).
     selection: crate::selection::Selection,
@@ -297,6 +299,7 @@ impl Default for Lieux {
             zone_rayon: 500.0,
             bati_mat: false,
             zone_centre: None,
+            erreur_renfort: None,
             maquette3d: false,
             selection: Default::default(),
             resume: None,
@@ -1917,6 +1920,9 @@ impl Lieux {
                 (None, false) => format!("Génération de {lieu_carte} : {} tuiles sur {}, {} triangles…", e.faites, e.total, e.triangles),
             };
             cx.paragraph(b, &texte);
+            if let Some(r) = &e.renfort {
+                cx.paragraph(b, &format!("{r}{}", if e.par_renfort > 0 { format!(" · {} tuiles faites par le renfort", e.par_renfort) } else { String::new() }));
+            }
             // Le temps passé par étape (les cinq plus longues), écrit aussi dans
             // mesures.txt de la carte à la fin
             if e.mesures.tuiles > 0 {
@@ -2210,6 +2216,26 @@ impl Lieux {
             }
             if arret {
                 cx.paragraph(&mut b, "arrêt demandé : les téléchargements en cours finissent…");
+            }
+        }
+        // Le renfort : cet appareil calcule des tuiles pour la génération de carte d'un
+        // autre (`renfort`)
+        cx.section(&mut b, "Renfort de génération");
+        let etat = crate::renfort::etat_renfort();
+        let mut actif = etat.is_some();
+        cx.toggle(&mut b, sub_id(base, 730), "Servir de renfort", &mut actif);
+        if actif != etat.is_some() {
+            self.erreur_renfort = crate::renfort::servir(actif, c.dossier.clone()).err();
+        }
+        match (&etat, &self.erreur_renfort) {
+            (_, Some(m)) => cx.paragraph(&mut b, m),
+            (None, None) => cx.paragraph(&mut b, &format!("Un autre appareil du même Wi-Fi qui génère une carte (Flow {}) lui confiera des tuiles. Celui-ci reste éveillé tant que c'est actif.", crate::renfort::version())),
+            (Some(e), None) => {
+                let ou = match e.servie {
+                    Some(a) => format!("au travail pour {}{}", a.ip(), e.lieu.as_ref().map_or(String::new(), |l| format!(" (lieu {l})"))),
+                    None => "en attente d'une génération".into(),
+                };
+                cx.paragraph(&mut b, &format!("{ou} · {} tuiles faites{}", e.faites, e.message.as_ref().map_or(String::new(), |m| format!(" · {m}"))));
             }
         }
         cx.section(&mut b, "Lieux");

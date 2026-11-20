@@ -353,8 +353,9 @@ pub struct Memoire {
     /// Par bâtiment : son volume (rien s'il est refusé) et les tuiles qui le
     /// demanderont encore.
     batiments: Mutex<HashMap<u32, (Option<Arc<Forme>>, u32)>>,
-    /// Les tuiles qui touchent chaque bâtiment, parmi celles de la génération.
-    touches: HashMap<u32, u32>,
+    /// Les tuiles qui touchent chaque bâtiment, parmi celles de la génération (moins
+    /// celles faites ailleurs, par le renfort).
+    touches: Mutex<HashMap<u32, u32>>,
     /// Par arête du réseau : son tracé lissé.
     traces: Mutex<HashMap<usize, Arc<Vec<[f32; 3]>>>>,
     /// Le temps passé par étape.
@@ -410,7 +411,24 @@ impl Memoire {
                 }
             }
         }
-        Memoire { touches, ..Default::default() }
+        Memoire { touches: Mutex::new(touches), ..Default::default() }
+    }
+
+    /// La tuile `cle` a été faite ailleurs (par le renfort) : ses bâtiments ne
+    /// l'attendent plus ici.
+    pub fn faite_ailleurs(&self, d: &Donnees, cle: Cle) {
+        let (Ok(mut b), Ok(mut t)) = (self.batiments.lock(), self.touches.lock()) else { return };
+        for k in d.batiments_dans(crate::carte::boite_tuile(d, cle)) {
+            if let Some(n) = t.get_mut(&k) {
+                *n = n.saturating_sub(1);
+            }
+            if let Some(e) = b.get_mut(&k) {
+                e.1 = e.1.saturating_sub(1);
+                if e.1 == 0 {
+                    b.remove(&k);
+                }
+            }
+        }
     }
 
     /// Note `s` secondes passées à l'étape `nom`.
@@ -443,7 +461,8 @@ fn volume_batiment(d: &Donnees, k: u32) -> Option<Forme> {
 fn batiment(d: &Donnees, k: u32, memoire: Option<&Memoire>) -> Option<Arc<Forme>> {
     let Some(m) = memoire else { return volume_batiment(d, k).map(Arc::new) };
     let Ok(mut b) = m.batiments.lock() else { return volume_batiment(d, k).map(Arc::new) };
-    let e = b.entry(k).or_insert_with(|| (volume_batiment(d, k).map(Arc::new), m.touches.get(&k).copied().unwrap_or(1)));
+    let reste = m.touches.lock().ok().and_then(|t| t.get(&k).copied()).unwrap_or(1).max(1);
+    let e = b.entry(k).or_insert_with(|| (volume_batiment(d, k).map(Arc::new), reste));
     let f = e.0.clone();
     e.1 = e.1.saturating_sub(1);
     if e.1 == 0 {

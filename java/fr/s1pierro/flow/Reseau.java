@@ -62,6 +62,40 @@ public class Reseau {
         }
     }
 
+    private static android.os.PowerManager.WakeLock eveil;
+    private static WifiManager.WifiLock eveilWifi;
+
+    /**
+     * « 1 » : garde le processeur éveillé (écran éteint) et le Wi-Fi à pleine vitesse,
+     * pour un long travail (génération d'une carte, renfort) ; « 0 » : les rend. Rend ""
+     * si tout va bien, sinon l'erreur.
+     */
+    public static synchronized String eveil(Context c, String arg) {
+        try {
+            if ("1".equals(arg)) {
+                if (eveil == null) {
+                    android.os.PowerManager p = (android.os.PowerManager) c.getApplicationContext().getSystemService(Context.POWER_SERVICE);
+                    eveil = p.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "flow:carte");
+                    eveil.setReferenceCounted(false);
+                    eveil.acquire();
+                }
+                WifiManager w = (WifiManager) c.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (eveilWifi == null && w != null) {
+                    eveilWifi = w.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flow-carte");
+                    eveilWifi.setReferenceCounted(false);
+                    eveilWifi.acquire();
+                }
+            } else {
+                if (eveil != null) { eveil.release(); eveil = null; }
+                if (eveilWifi != null) { eveilWifi.release(); eveilWifi = null; }
+            }
+            return "";
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            return e.getClass().getSimpleName() + (m == null ? "" : " : " + m);
+        }
+    }
+
     private static Network reseauWifi(ConnectivityManager cm) {
         for (Network n : cm.getAllNetworks()) {
             NetworkCapabilities k = cm.getNetworkCapabilities(n);
