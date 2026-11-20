@@ -106,7 +106,7 @@ fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
     let cote = |nom: &str| {
         std::fs::read_to_string(d.join(format!("{nom}.txt"))).ok().and_then(|t| sage_matieres::Reglages::lire(&t)).map(|r| r.cote.max(0.05)).unwrap_or(1.0)
     };
-    let mut v = vec![sage_carte::Matiere { nom: "sol".into(), texture: String::new(), cote: 0.0 }];
+    let mut v = vec![sage_carte::Matiere { nom: "sol".into(), texture: String::new(), cote: 0.0 }, sage_carte::Matiere { nom: sage_carte::EAU.into(), texture: String::new(), cote: 0.0 }];
     for (m, tex) in [("lit", "vase-lit"), ("berge", "taille-quai"), ("remblai", "pierre-quai"), ("quai", "paves-quai"), ("quai_mur", "pierre-quai"), ("chaussee", "bitume"), ("beton", "beton-clair")] {
         v.push(sage_carte::Matiere { nom: m.into(), texture: tex.into(), cote: cote(tex) });
     }
@@ -151,6 +151,18 @@ fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Op
         }
     }
     memoire.noter("rangement par matière", t0.elapsed().as_secs_f64());
+    // La surface de l'eau (`maquette::surface_eau`), à part : elle ne fait pas de volume
+    let (ev, ei) = mq::surface_eau(d, cle);
+    if !ei.is_empty() {
+        let mut e = sage_carte::Primitive { matiere: sage_carte::EAU.into(), ..Default::default() };
+        for s in ev.chunks_exact(SOMMET) {
+            e.positions.push([s[0] - origine[0], s[1], s[2] - origine[2]]);
+            e.normales.push([s[3], s[4], s[5]]);
+            e.uv.push([s[6], s[7]]);
+        }
+        e.indices = ei;
+        prims.push(e);
+    }
     if prims.is_empty() {
         return None;
     }
