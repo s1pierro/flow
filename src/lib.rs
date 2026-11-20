@@ -26,6 +26,7 @@ pub mod relief3d;
 pub mod bati_ferme;
 pub mod generer_carte;
 pub mod renfort;
+pub mod champ_voirie;
 pub mod booleens;
 pub mod modifieurs;
 pub mod voirie3d;
