@@ -217,6 +217,8 @@ pub struct Lieux {
     /// En Matérialisation : les bâtiments en volumes fermés en surimpression.
     bati_mat: bool,
     zone_centre: Option<[f32; 2]>,
+    /// La rubrique dépliée de l'onglet Voir (une seule à la fois).
+    rubrique: Option<&'static str>,
     /// Pourquoi le renfort n'a pas pu démarrer (port pris…).
     erreur_renfort: Option<String>,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
@@ -299,6 +301,7 @@ impl Default for Lieux {
             zone_rayon: 500.0,
             bati_mat: false,
             zone_centre: None,
+            rubrique: None,
             erreur_renfort: None,
             maquette3d: false,
             selection: Default::default(),
@@ -1632,13 +1635,19 @@ impl Lieux {
                 }
                 if let Ok(dn) = carte.donnees.read() {
                     let l = &dn.lieu;
-                    cx.section(&mut b, "Le lieu");
-                    cx.paragraph(&mut b, &format!("{} · centre {:.4}, {:.4}", l.nom, l.lat, l.lon));
-                    cx.paragraph(&mut b, &format!("{} × {} points de {} m · eau à {:.1} m", l.grille.nx, l.grille.nz, l.pas, l.niveau).replace('.', ","));
-                    cx.paragraph(&mut b, &format!("{} bâtiments, {} routes, {} ponts", l.batiments.len(), l.routes.len(), l.ponts.len()));
+                    let t = &l.transports;
+                    if rubrique(cx, &mut b, &mut self.rubrique, base, "Le lieu") {
+                        cx.paragraph(&mut b, &format!("{} · centre {:.4}, {:.4}", l.nom, l.lat, l.lon));
+                        cx.paragraph(&mut b, &format!("{} × {} points de {} m · eau à {:.1} m", l.grille.nx, l.grille.nz, l.pas, l.niveau).replace('.', ","));
+                        cx.paragraph(&mut b, &format!("{} bâtiments, {} routes, {} ponts", l.batiments.len(), l.routes.len(), l.ponts.len()));
+                        if t.est_vide() {
+                            cx.paragraph(&mut b, "Pas de transports : un lieu généré avant Flow 0.68 ; le générer à nouveau les ajoute (le cache garde le reste).");
+                        } else {
+                            cx.paragraph(&mut b, &format!("{} tunnels, {} voies ferrées, {} arrêts, {} lignes", t.tunnels.len(), t.rails.len(), t.arrets.len(), t.lignes.len()));
+                        }
+                    }
                     // Les cours d'eau, par nom : genre, longueur, part sous terre
-                    if !l.cours_eau.is_empty() {
-                        cx.section(&mut b, "Cours d'eau");
+                    if !l.cours_eau.is_empty() && rubrique(cx, &mut b, &mut self.rubrique, base, "Cours d'eau") {
                         let mut noms: Vec<(String, u8, f32, f32)> = Vec::new();
                         let mut sans_nom = 0;
                         for c in &l.cours_eau {
@@ -1668,25 +1677,18 @@ impl Lieux {
                         }
                     }
                     // Les surfaces d'eau d'OSM : leurs côtés sont les berges
-                    for (k, sf) in l.surfaces_eau.iter().enumerate() {
-                        if k == 0 {
-                            cx.section(&mut b, "Surfaces d'eau (berges)");
-                        }
+                    let berges = !l.surfaces_eau.is_empty() && rubrique(cx, &mut b, &mut self.rubrique, base, "Surfaces d'eau (berges)");
+                    for sf in l.surfaces_eau.iter().filter(|_| berges) {
                         let peri: f32 = sf.anneaux.iter().map(|r| (0..r.len()).map(|i| (r[(i + 1) % r.len()][0] - r[i][0]).hypot(r[(i + 1) % r.len()][1] - r[i][1])).sum::<f32>()).sum();
                         let points: usize = sf.anneaux.iter().map(|r| r.len()).sum();
                         let iles = sf.anneaux.len().saturating_sub(1);
                         cx.paragraph(&mut b, &format!("{} · {:.1} km de berges · {} points{}", sage_reel::cours_eau::NOMS_SURFACES[(sf.nature as usize).min(2)], peri / 1000.0, points, if iles > 0 { format!(" · {iles} anneaux intérieurs") } else { String::new() }).replace('.', ","));
                     }
-                    if !l.surfaces_eau.is_empty() {
+                    if berges {
                         let (q, n) = crate::berges::longueurs(&dn);
                         cx.paragraph(&mut b, &format!("Berges : {:.1} km de quais, {:.1} km naturelles (sur la carte : quais gris, berges naturelles vertes)", q / 1000.0, n / 1000.0).replace('.', ","));
                     }
-                    let t = &l.transports;
-                    if t.est_vide() {
-                        cx.paragraph(&mut b, "Pas de transports : un lieu généré avant Flow 0.68 ; le générer à nouveau les ajoute (le cache garde le reste).");
-                    } else {
-                        cx.paragraph(&mut b, &format!("{} tunnels, {} voies ferrées, {} arrêts, {} lignes", t.tunnels.len(), t.rails.len(), t.arrets.len(), t.lignes.len()));
-                        cx.section(&mut b, "Lignes");
+                    if !t.est_vide() && rubrique(cx, &mut b, &mut self.rubrique, base, "Lignes") {
                         cx.paragraph(&mut b, "Touchez une ligne pour la voir sur la carte, avec ses arrêts.");
                         for (i, (mode, numero, ks)) in Lieux::groupes_lignes(t).into_iter().enumerate() {
                             let li = &t.lignes[ks[0]];
@@ -1717,8 +1719,7 @@ impl Lieux {
                     }
                 }
                 // La surimpression sur la maquette : tracés du réseau, remblais des voies
-                if self.trois_d.is_some() && self.maquette3d {
-                    cx.section(&mut b, "Surimpression");
+                if self.trois_d.is_some() && self.maquette3d && rubrique(cx, &mut b, &mut self.rubrique, base, "Surimpression") {
                     let s = &mut self.sur;
                     cx.toggle(&mut b, sub_id(base, 660), "Tracés des voies", &mut s.traces);
                     if s.traces {
@@ -1739,8 +1740,7 @@ impl Lieux {
                 }
                 // La Matérialisation : le niveau le plus fin seul, dans un rayon, montré
                 // quand tout est fait
-                if self.trois_d.is_some() && self.maquette3d && self.materialisation3d {
-                    cx.section(&mut b, "Matérialisation");
+                if self.trois_d.is_some() && self.maquette3d && self.materialisation3d && rubrique(cx, &mut b, &mut self.rubrique, base, "Matérialisation") {
                     cx.slider(&mut b, sub_id(base, 671), "Rayon", &format!("{:.0} m", self.zone_rayon), &mut self.zone_rayon, 50.0, 1500.0);
                     self.zone_rayon = (self.zone_rayon / 25.0).round() * 25.0;
                     {
@@ -1768,39 +1768,43 @@ impl Lieux {
                 }
                 // L'ordre de dessin, du dessus au dessous ; la 3D, drapée des mêmes
                 // tuiles, le suit
-                cx.section(&mut b, "Ordre de dessin");
-                cx.paragraph(&mut b, "Du dessus au dessous. Touchez une couche, puis montez-la ou descendez-la.");
-                let avant = self.ordre.clone();
-                for (i, &k) in avant.iter().enumerate().rev() {
-                    let c = crate::carte::couleur_couche(k).map(|v| (v * 255.0) as u8);
-                    if cx.row(&mut b, sub_id(base, 600 + i), crate::carte::nom_couche(k), Some([c[0], c[1], c[2], 255]), self.couche == Some(k)) {
-                        self.couche = if self.couche == Some(k) { None } else { Some(k) };
+                if rubrique(cx, &mut b, &mut self.rubrique, base, "Ordre de dessin") {
+                    cx.paragraph(&mut b, "Du dessus au dessous. Touchez une couche, puis montez-la ou descendez-la.");
+                    let avant = self.ordre.clone();
+                    for (i, &k) in avant.iter().enumerate().rev() {
+                        let c = crate::carte::couleur_couche(k).map(|v| (v * 255.0) as u8);
+                        if cx.row(&mut b, sub_id(base, 600 + i), crate::carte::nom_couche(k), Some([c[0], c[1], c[2], 255]), self.couche == Some(k)) {
+                            self.couche = if self.couche == Some(k) { None } else { Some(k) };
+                        }
                     }
-                }
-                let pos = self.couche.and_then(|k| self.ordre.iter().position(|&c| c == k));
-                if let Some(p) = pos {
-                    if p + 1 < self.ordre.len() && cx.button(&mut b, sub_id(base, 640), "Monter") {
-                        self.ordre.swap(p, p + 1);
+                    let pos = self.couche.and_then(|k| self.ordre.iter().position(|&c| c == k));
+                    if let Some(p) = pos {
+                        if p + 1 < self.ordre.len() && cx.button(&mut b, sub_id(base, 640), "Monter") {
+                            self.ordre.swap(p, p + 1);
+                        }
+                        if p > 0 && cx.button(&mut b, sub_id(base, 641), "Descendre") {
+                            self.ordre.swap(p, p - 1);
+                        }
                     }
-                    if p > 0 && cx.button(&mut b, sub_id(base, 641), "Descendre") {
-                        self.ordre.swap(p, p - 1);
+                    if self.ordre != crate::carte::ordre_par_defaut() && cx.button(&mut b, sub_id(base, 642), "Ordre par défaut") {
+                        self.ordre = crate::carte::ordre_par_defaut();
                     }
-                }
-                if self.ordre != crate::carte::ordre_par_defaut() && cx.button(&mut b, sub_id(base, 642), "Ordre par défaut") {
-                    self.ordre = crate::carte::ordre_par_defaut();
-                }
-                if self.ordre != avant {
-                    if let Ok(mut dn) = carte.donnees.write() {
-                        dn.ordre = self.ordre.clone();
+                    if self.ordre != avant {
+                        if let Ok(mut dn) = carte.donnees.write() {
+                            dn.ordre = self.ordre.clone();
+                        }
+                        carte.tout_retoucher();
                     }
-                    carte.tout_retoucher();
                 }
                 // Les cartes pour WhiteRoom et S.A.G.E. (`sage-carte`) : la zone ou le lieu
                 // entier matérialisés tuile par tuile dans un fil et écrits dans
                 // Flow/cartes, sans passer par la vue Matérialisation
-                self.panneau_cartes(cx, &mut b, base, c.dossier.clone());
-                cx.section(&mut b, "Sources");
-                cx.paragraph(&mut b, "Relief © IGN · eau, routes, transports, bâtiments, sol © les contributeurs OpenStreetMap (ODbL). Un lieu généré en est dérivé : ne le publiez pas.");
+                if rubrique(cx, &mut b, &mut self.rubrique, base, "Cartes (WhiteRoom, S.A.G.E.)") {
+                    self.panneau_cartes(cx, &mut b, base, c.dossier.clone());
+                }
+                if rubrique(cx, &mut b, &mut self.rubrique, base, "Sources") {
+                    cx.paragraph(&mut b, "Relief © IGN · eau, routes, transports, bâtiments, sol © les contributeurs OpenStreetMap (ODbL). Un lieu généré en est dérivé : ne le publiez pas.");
+                }
             }
             SELECTION => self.panneau_selection(cx, &mut b, base),
             BATI => self.panneau_bati(cx, &mut b, base),
@@ -1868,7 +1872,6 @@ impl Lieux {
     fn panneau_cartes(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, base: Id, flow: Option<std::path::PathBuf>) {
         let Some(carte) = &self.carte else { return };
         let donnees = carte.donnees.clone();
-        cx.section(b, "Cartes (WhiteRoom, S.A.G.E.)");
         // Rayon et centre sont ceux de la Matérialisation ; réglés ici quand elle n'est
         // pas ouverte (le cercle de la zone est tracé sur la carte)
         let materialisation = self.trois_d.is_some() && self.maquette3d && self.materialisation3d;
@@ -3017,3 +3020,14 @@ fn dessiner_attente_zone(cx: &mut Cx, zone: Rect, e: &crate::relief3d::EtatZone,
     }
 }
 
+/// Une rubrique dépliable de l'onglet Voir, comme l'aide de Rustcraft : une seule
+/// dépliée à la fois, un appui sur son titre la déplie ou la replie. Rend si elle est
+/// dépliée.
+fn rubrique(cx: &mut Cx, b: &mut crate::widgets::Body, ouverte: &mut Option<&'static str>, base: Id, titre: &'static str) -> bool {
+    let k = titre.bytes().fold(0usize, |h, c| h.wrapping_mul(31).wrapping_add(c as usize)) % 10_000;
+    let est = *ouverte == Some(titre);
+    if cx.rubrique(b, sub_id(base, 40_000 + k), titre, est) {
+        *ouverte = if est { None } else { Some(titre) };
+    }
+    *ouverte == Some(titre)
+}

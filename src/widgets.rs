@@ -731,6 +731,36 @@ impl Cx<'_> {
         b.y += (10.0 + 18.0 * self.theme.texte) * self.dp;
     }
 
+    /// Une rubrique dépliable : son titre sur une ligne bord à bord, un chevron à
+    /// droite (vers la droite pliée, vers le bas dépliée). Renvoie vrai à l'appui.
+    pub fn rubrique(&mut self, b: &mut Body, id: Id, title: &str, ouverte: bool) -> bool {
+        let r = Rect::new(b.rect.x, b.y, b.rect.w, (self.theme.ligne * self.dp).round());
+        let c = self.couleurs();
+        let clicked = self.ui.click(id, r, Some(b.id));
+        if self.ui.pressed(id) {
+            self.dl.rrect(r.inset(2.0 * self.dp), self.theme.rayon(r.h) * 0.45, c.puce);
+        }
+        self.label(b.x, r.cy(), title, 16.0, if ouverte { c.accent } else { c.texte });
+        // Le chevron
+        let (u, t) = (self.dp, 2.0 * self.dp);
+        let (x, y) = (b.x + b.w - 10.0 * u, r.cy());
+        let col = if ouverte { c.accent } else { c.pale };
+        if ouverte {
+            self.dl.line([x - 6.0 * u, y - 3.0 * u], [x, y + 3.0 * u], t, col);
+            self.dl.line([x, y + 3.0 * u], [x + 6.0 * u, y - 3.0 * u], t, col);
+        } else {
+            self.dl.line([x - 3.0 * u, y - 6.0 * u], [x + 3.0 * u, y], t, col);
+            self.dl.line([x + 3.0 * u, y], [x - 3.0 * u, y + 6.0 * u], t, col);
+        }
+        // Un filet sous la ligne
+        self.dl.rrect(Rect::new(b.x, r.bottom() - 1.0, b.w, 1.0), 0.0, c.ligne);
+        b.y += r.h;
+        if ouverte {
+            b.y += 6.0 * self.dp;
+        }
+        clicked
+    }
+
     pub fn paragraph(&mut self, b: &mut Body, s: &str) {
         let (px, c, k) = (self.px(15.0), self.couleurs(), self.theme.texte);
         for line in self.text.wrap(s, px, b.w) {
