@@ -6,6 +6,10 @@
 //! 2. sa défonce par le dessus : de la chaussée jusqu'à `DEFONCE_HAUT` au-dessus ; son
 //!    fond est la chaussée (bitume), ses côtés et son dessus du béton clair.
 //!
+//! Avant les routes, les bâtiments qui touchent la tuile sont unis au terrain, en
+//! volumes fermés enfoncés de `SOUBASSEMENT` sous le terrain (0.126) : la défonce d'un
+//! tunnel recoupe leurs sous-sols. Ils sont en béton clair, en attendant leur matière.
+//!
 //! Chaque volume est un ruban le long du tracé de la route (`ruban`) : une section
 //! horizontale en travers à chaque point du tracé, les sections reliées. Aucun triangle
 //! ne relie deux routes : la chaussée est plate en travers par construction (0.120 ;
@@ -51,6 +55,10 @@ const SOUS: f32 = 0.3;
 /// laisser de face confondue avec le dessus du remblai) jusqu'à `DEFONCE_HAUT` au-dessus.
 const DEFONCE_HAUT: f32 = 3.2;
 const DEFONCE_SOUS: f32 = 0.05;
+/// L'enfoncement des bâtiments dans la tuile (m) : leur soubassement descend d'autant
+/// sous le point le plus bas du terrain le long de leur contour.
+const SOUBASSEMENT: f32 = 3.0;
+
 /// Le remblai d'un pont (bretelle en l'air comprise) ou d'un tunnel : une dalle de
 /// `OUVRAGE` mètres sous la chaussée, comme en surimpression.
 const OUVRAGE: f32 = 1.0;
@@ -363,6 +371,25 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
         remblais.push(rem.en(mq::matiere::REMBLAI));
         defonces.push(chaussee(dalle(c, w, h + DEFONCE_HAUT, |_| h - DEFONCE_SOUS)));
     }
+    // Les bâtiments qui touchent la tuile, en volumes fermés (`bati_ferme`), enfoncés de
+    // `SOUBASSEMENT` : unis avant les routes, dont les défonces (un tunnel) recoupent
+    // alors leurs sous-sols
+    let batiments: Vec<Forme> = {
+        let _t = crate::suivi::tache("bâtiments");
+        d.batiments_dans(b)
+            .into_iter()
+            .filter_map(|k| {
+                let bt = &d.lieu.batiments[k as usize];
+                if bt.contour.len() < 3 {
+                    return None;
+                }
+                let bas = bt.contour.iter().map(|&p| terre(p)).fold(f32::MAX, f32::min);
+                let mut bt = bt.clone();
+                bt.pied = bas - SOUBASSEMENT;
+                crate::bati_ferme::volume_accepte(&bt).map(|(f, _)| f.en(mq::matiere::BETON))
+            })
+            .collect()
+    };
     let socle = mq::socle(d);
     let boite = pave([b[0], socle - 50.0, b[1]], [b[2], 2000.0, b[3]]);
     // Comme la Maquette (remblai des quais, épaulement, défonce des lits), puis les
@@ -370,6 +397,7 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     let mut etapes: Vec<(Op, &Forme)> = rem.iter().map(|m| (Op::Union, m)).collect();
     etapes.extend(epa.iter().map(|m| (Op::Difference, m)));
     etapes.push((Op::Difference, &def));
+    etapes.extend(batiments.iter().map(|f| (Op::Union, f)));
     etapes.extend(remblais.iter().filter(|f| !f.vide()).map(|f| (Op::Union, f)));
     etapes.extend(defonces.iter().filter(|f| !f.vide()).map(|f| (Op::Difference, f)));
     etapes.push((Op::Intersection, &boite));
