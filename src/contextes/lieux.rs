@@ -1917,6 +1917,16 @@ impl Lieux {
                 (None, false) => format!("Génération de {lieu_carte} : {} tuiles sur {}, {} triangles…", e.faites, e.total, e.triangles),
             };
             cx.paragraph(b, &texte);
+            // Le temps passé par étape (les cinq plus longues), écrit aussi dans
+            // mesures.txt de la carte à la fin
+            if e.mesures.tuiles > 0 {
+                let m = &e.mesures;
+                let total = m.total().max(1e-9);
+                let mut v = m.etapes.clone();
+                v.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let lignes: Vec<String> = v.iter().take(5).map(|(nom, t, _)| format!("{nom} {:.0} %", 100.0 * t / total)).collect();
+                cx.paragraph(b, &format!("Temps : {:.0} s pour {} tuiles ({} simples) · {}", total, m.tuiles, m.simples, lignes.join(" · ")));
+            }
         }
     }
 

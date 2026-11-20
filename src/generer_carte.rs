@@ -34,7 +34,12 @@ pub struct Etat {
     pub erreur: Option<String>,
     pub debut: Option<std::time::Instant>,
     pub duree: f32,
+    /// Le temps passé par étape (aussi écrit dans `mesures.txt` de la carte).
+    pub mesures: crate::materialisation::Mesures,
 }
+
+/// Le bilan des mesures, écrit dans le dossier de la carte.
+pub const MESURES: &str = "mesures.txt";
 
 static ETAT: Mutex<Option<Etat>> = Mutex::new(None);
 static ARRET: AtomicBool = AtomicBool::new(false);
@@ -111,6 +116,7 @@ fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
 /// La tuile `cle` en tuile de carte (rien si elle est vide).
 fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Option<sage_carte::Tuile> {
     let (v, ind, px) = crate::materialisation::tuile_carte(d, cle, memoire);
+    let t0 = std::time::Instant::now();
     let b = boite_tuile(d, cle);
     let socle = mq::socle(d);
     let origine = [b[0], 0.0, b[1]];
@@ -144,10 +150,13 @@ fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Op
             pr.indices.push(j);
         }
     }
+    memoire.noter("rangement par matière", t0.elapsed().as_secs_f64());
     if prims.is_empty() {
         return None;
     }
+    let t0 = std::time::Instant::now();
     let image_sol = prims.iter().any(|p| p.matiere == "sol").then(|| sage_matieres::png::encoder(mq::TEX as u32, (mq::TEX + mq::BANDE) as u32, &px));
+    memoire.noter("image du sol (PNG)", t0.elapsed().as_secs_f64());
     Some(sage_carte::Tuile { cle, origine, primitives: prims, image_sol })
 }
 
@@ -237,17 +246,25 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                 };
                 if let Some(t) = t {
                     let en = entree(&t, b);
+                    let t0 = std::time::Instant::now();
                     let tmp = chemin.with_extension("glb.part");
                     std::fs::write(&tmp, sage_carte::glb::ecrire(&t)).map_err(|e| e.to_string())?;
                     std::fs::rename(&tmp, &chemin).map_err(|e| e.to_string())?;
+                    memoire.noter("écriture du GLB", t0.elapsed().as_secs_f64());
                     maj(&|e| e.triangles += en.triangles as usize);
                     carte.tuiles.push(en);
                 }
-                maj(&|e| e.faites += 1);
+                let m = memoire.mesures();
+                maj(&|e| {
+                    e.faites += 1;
+                    e.mesures = m.clone();
+                });
                 // L'index à jour au fur et à mesure (une carte partielle reste lisible)
                 std::fs::write(dossier.join(sage_carte::INDEX), carte.ecrire()).map_err(|e| e.to_string())?;
+                let _ = std::fs::write(dossier.join(MESURES), m.texte());
             }
             std::fs::write(dossier.join(sage_carte::INDEX), carte.ecrire()).map_err(|e| e.to_string())?;
+            let _ = std::fs::write(dossier.join(MESURES), memoire.mesures().texte());
             Ok(())
         })();
         maj(&|e| {

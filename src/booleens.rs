@@ -279,8 +279,16 @@ pub fn operation(a: &Forme, b: &Forme, op: Op) -> Result<Forme, String> {
 /// étape (`op`, forme) ; une étape qui échoue est sautée. Rend le résultat et le
 /// nombre d'étapes sautées.
 pub fn enchainer(base: &Forme, etapes: &[(Op, &Forme)]) -> Result<(Forme, usize), String> {
+    enchainer_avec(base, etapes, |_, _| {})
+}
+
+/// `enchainer`, en disant la durée de chaque étape (`Some(i)`, conversion comprise) et
+/// des conversions de la base et du résultat (`None`), en secondes.
+pub fn enchainer_avec(base: &Forme, etapes: &[(Op, &Forme)], mut chrono: impl FnMut(Option<usize>, f64)) -> Result<(Forme, usize), String> {
     let mut faces = 0;
+    let t0 = std::time::Instant::now();
     let mut r = vers_manifold(base, &mut faces)?;
+    chrono(None, t0.elapsed().as_secs_f64());
     let mut sautees = 0;
     let n = etapes.len();
     let mut dit = std::time::Instant::now();
@@ -296,8 +304,10 @@ pub fn enchainer(base: &Forme, etapes: &[(Op, &Forme)]) -> Result<(Forme, usize)
         if f.vide() {
             continue;
         }
+        let t0 = std::time::Instant::now();
         let Ok(y) = vers_manifold(f, &mut faces) else {
             sautees += 1;
+            chrono(Some(i), t0.elapsed().as_secs_f64());
             continue;
         };
         let t = match op {
@@ -310,8 +320,114 @@ pub fn enchainer(base: &Forme, etapes: &[(Op, &Forme)]) -> Result<(Forme, usize)
             Ok(Err(e)) if e.contains("empty") => return Ok((Forme::default(), sautees)),
             _ => sautees += 1,
         }
+        chrono(Some(i), t0.elapsed().as_secs_f64());
     }
-    Ok((vers_forme(&r), sautees))
+    let t0 = std::time::Instant::now();
+    let f = vers_forme(&r);
+    chrono(None, t0.elapsed().as_secs_f64());
+    Ok((f, sautees))
+}
+
+/// Une famille d'étapes de `enchainer_familles` : la même opération pour chacune de ses
+/// formes ; `arbre` : les formes sont d'abord unies entre elles deux à deux (en arbre),
+/// puis le résultat appliqué une seule fois (une union de bâtiments, une différence des
+/// défonces unies), au lieu d'une opération par forme sur toute la base.
+pub struct Famille<'a> {
+    pub op: Op,
+    pub formes: Vec<&'a Forme>,
+    pub arbre: bool,
+}
+
+/// Ce que mesure le chronomètre de `enchainer_familles`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Temps {
+    /// Les conversions de la base et du résultat.
+    Conversions,
+    /// Les unions entre les formes d'une famille (son numéro).
+    Regroupement(usize),
+    /// L'application à la base.
+    Application(usize),
+}
+
+/// Unit les volumes deux à deux, niveau par niveau. Deux volumes dont l'union échoue
+/// sont mis de côté tels quels (ils seront appliqués un à un). Rend les groupes.
+fn unir_en_arbre(mut v: Vec<Manifold<Coin>>) -> Result<Vec<Manifold<Coin>>, String> {
+    let mut ecartes = Vec::new();
+    while v.len() > 1 {
+        if arrete() {
+            return Err(ABANDON.into());
+        }
+        let mut suivant = Vec::with_capacity(v.len() / 2 + 1);
+        let mut it = v.into_iter();
+        while let Some(a) = it.next() {
+            let Some(b) = it.next() else {
+                suivant.push(a);
+                break;
+            };
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute_boolean(&a, &b, OpType::Add))) {
+                Ok(Ok(m)) => suivant.push(m),
+                _ => {
+                    ecartes.push(a);
+                    ecartes.push(b);
+                }
+            }
+        }
+        v = suivant;
+    }
+    v.extend(ecartes);
+    Ok(v)
+}
+
+/// Comme `enchainer`, par familles : `base`, puis chaque famille dans l'ordre. Une
+/// étape qui échoue est sautée. Le résultat est le même qu'en appliquant les formes une
+/// à une (unir des volumes puis ajouter le tout revient à les ajouter un par un ; ôter
+/// leur union revient à les ôter un par un), mais chaque opération sur la base, qui est
+/// grosse, ne se fait qu'une fois par groupe. Rend le résultat et le nombre d'étapes
+/// sautées ; `chrono` reçoit le temps de chaque partie, en secondes.
+pub fn enchainer_familles(base: &Forme, familles: &[Famille], mut chrono: impl FnMut(Temps, f64)) -> Result<(Forme, usize), String> {
+    let mut faces = 0;
+    let t0 = std::time::Instant::now();
+    let mut r = vers_manifold(base, &mut faces)?;
+    chrono(Temps::Conversions, t0.elapsed().as_secs_f64());
+    let mut sautees = 0;
+    for (k, fam) in familles.iter().enumerate() {
+        if arrete() {
+            return Err(ABANDON.into());
+        }
+        let t0 = std::time::Instant::now();
+        let mut ms = Vec::with_capacity(fam.formes.len());
+        for f in fam.formes.iter().filter(|f| !f.vide()) {
+            match vers_manifold(f, &mut faces) {
+                Ok(m) => ms.push(m),
+                Err(_) => sautees += 1,
+            }
+        }
+        if fam.arbre && ms.len() > 1 {
+            ms = unir_en_arbre(ms)?;
+        }
+        chrono(Temps::Regroupement(k), t0.elapsed().as_secs_f64());
+        let t0 = std::time::Instant::now();
+        let t = || match fam.op {
+            Op::Union => OpType::Add,
+            Op::Difference => OpType::Subtract,
+            Op::Intersection => OpType::Intersect,
+        };
+        for y in &ms {
+            if arrete() {
+                return Err(ABANDON.into());
+            }
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compute_boolean(&r, y, t()))) {
+                Ok(Ok(m)) => r = m,
+                Ok(Err(e)) if e.contains("empty") => return Ok((Forme::default(), sautees)),
+                _ => sautees += 1,
+            }
+        }
+        chrono(Temps::Application(k), t0.elapsed().as_secs_f64());
+    }
+    let t0 = std::time::Instant::now();
+    let f = vers_forme(&r);
+    chrono(Temps::Conversions, t0.elapsed().as_secs_f64());
+    Ok((f, sautees))
 }
 
 /// L'erreur d'un travail abandonné (`arrete`).

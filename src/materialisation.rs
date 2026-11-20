@@ -357,6 +357,46 @@ pub struct Memoire {
     touches: HashMap<u32, u32>,
     /// Par arête du réseau : son tracé lissé.
     traces: Mutex<HashMap<usize, Arc<Vec<[f32; 3]>>>>,
+    /// Le temps passé par étape.
+    mesures: Mutex<Mesures>,
+}
+
+/// Le temps passé par étape d'une génération : nom, secondes, nombre de fois (dans
+/// l'ordre de première apparition) ; les tuiles faites, dont les simples (sans route,
+/// bâtiment, quai ni lit : aucun booléen utile).
+#[derive(Clone, Debug, Default)]
+pub struct Mesures {
+    pub etapes: Vec<(&'static str, f64, u32)>,
+    pub tuiles: u32,
+    pub simples: u32,
+}
+
+impl Mesures {
+    pub fn ajouter(&mut self, nom: &'static str, s: f64) {
+        match self.etapes.iter_mut().find(|e| e.0 == nom) {
+            Some(e) => {
+                e.1 += s;
+                e.2 += 1;
+            }
+            None => self.etapes.push((nom, s, 1)),
+        }
+    }
+
+    pub fn total(&self) -> f64 {
+        self.etapes.iter().map(|e| e.1).sum()
+    }
+
+    /// Le bilan en texte, une étape par ligne, la plus longue d'abord.
+    pub fn texte(&self) -> String {
+        let total = self.total().max(1e-9);
+        let mut v = self.etapes.clone();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut t = format!("{} tuiles, dont {} simples ; {:.1} s mesurées\n", self.tuiles, self.simples, total);
+        for (nom, s, n) in v {
+            t += &format!("{nom} : {s:.1} s ({:.0} %), {n} fois, {:.1} ms en moyenne\n", 100.0 * s / total, 1000.0 * s / n.max(1) as f64);
+        }
+        t
+    }
 }
 
 impl Memoire {
@@ -373,9 +413,16 @@ impl Memoire {
         Memoire { touches, ..Default::default() }
     }
 
-    /// Les bâtiments en mémoire (pour le suivi).
-    pub fn batiments_gardes(&self) -> usize {
-        self.batiments.lock().map_or(0, |b| b.len())
+    /// Note `s` secondes passées à l'étape `nom`.
+    pub fn noter(&self, nom: &'static str, s: f64) {
+        if let Ok(mut m) = self.mesures.lock() {
+            m.ajouter(nom, s);
+        }
+    }
+
+    /// Le temps passé par étape jusqu'ici.
+    pub fn mesures(&self) -> Mesures {
+        self.mesures.lock().map(|m| m.clone()).unwrap_or_default()
     }
 }
 
@@ -418,16 +465,27 @@ pub fn tuile_carte(d: &Donnees, cle: Cle, memoire: &Memoire) -> (Vec<f32>, Vec<u
 }
 
 fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
+    // Le chronomètre des étapes, pour une génération (`Memoire::mesures`)
+    let t0 = std::cell::Cell::new(std::time::Instant::now());
+    let noter = |nom: &'static str| {
+        if let Some(m) = memoire {
+            m.noter(nom, t0.get().elapsed().as_secs_f64());
+        }
+        t0.set(std::time::Instant::now());
+    };
     if !crate::chaussee::pour(d, cle) {
         let (s, i, p, _) = mq::fabriquer_avec_defonce(d, cle);
+        noter("tuile de la Maquette (pas de chaussée)");
         return (s, i, p);
     }
     let _t = crate::suivi::tache("matérialisation (tuile)");
     let r = d.reseau();
+    noter("réseau nivelé (une fois)");
     let b = crate::carte::boite_tuile(d, cle);
     let def = mq::defonce(d, cle);
     let rem = mq::remblai_morceaux(d, cle);
     let epa = mq::epaulement_morceaux(d, cle);
+    noter("volumes des quais et des lits");
     let terre = |p: [f32; 2]| d.lieu.relief(p[0] as f64, p[1] as f64) as f32;
     let (mut remblais, mut defonces) = (Vec::new(), Vec::new());
     for passage in [Passage::Sol, Passage::Pont, Passage::Tunnel] {
@@ -448,6 +506,7 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         remblais.push(rem.en(mq::matiere::REMBLAI));
         defonces.push(chaussee(dalle(c, w, h + DEFONCE_HAUT, |_| h - DEFONCE_SOUS)));
     }
+    noter("rubans et dalles des routes");
     // Les bâtiments qui touchent la tuile, en volumes fermés (`bati_ferme`), enfoncés de
     // `SOUBASSEMENT` : unis avant les routes, dont les défonces (un tunnel) recoupent
     // alors leurs sous-sols
@@ -455,23 +514,52 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         let _t = crate::suivi::tache("bâtiments");
         d.batiments_dans(b).into_iter().filter_map(|k| batiment(d, k, memoire)).collect()
     };
+    noter("volumes des bâtiments");
     let socle = mq::socle(d);
     let boite = pave([b[0], socle - 50.0, b[1]], [b[2], 2000.0, b[3]]);
     // Comme la Maquette (remblai des quais, épaulement, défonce des lits), puis les
     // remblais des voies unis, puis leurs défonces ôtées
-    let mut etapes: Vec<(Op, &Forme)> = rem.iter().map(|m| (Op::Union, m)).collect();
-    etapes.extend(epa.iter().map(|m| (Op::Difference, m)));
-    etapes.push((Op::Difference, &def));
-    etapes.extend(batiments.iter().map(|f| (Op::Union, &**f)));
-    etapes.extend(remblais.iter().filter(|f| !f.vide()).map(|f| (Op::Union, f)));
-    etapes.extend(defonces.iter().filter(|f| !f.vide()).map(|f| (Op::Difference, f)));
-    etapes.push((Op::Intersection, &boite));
+    // Les quais une à une (unions et différences mêlées) ; bâtiments, remblais et
+    // défonces des routes unis d'abord entre eux en arbre, puis appliqués d'un coup
+    // (`booleens::enchainer_familles`)
+    use crate::booleens::{Famille, Temps};
+    let mut familles: Vec<Famille> = rem.iter().map(|m| Famille { op: Op::Union, formes: vec![m], arbre: false }).collect();
+    familles.extend(epa.iter().map(|m| Famille { op: Op::Difference, formes: vec![m], arbre: false }));
+    familles.push(Famille { op: Op::Difference, formes: vec![&def], arbre: false });
+    let n_quais = familles.len();
+    familles.push(Famille { op: Op::Union, formes: batiments.iter().map(|f| &**f).collect(), arbre: true });
+    familles.push(Famille { op: Op::Union, formes: remblais.iter().filter(|f| !f.vide()).collect(), arbre: true });
+    familles.push(Famille { op: Op::Difference, formes: defonces.iter().filter(|f| !f.vide()).collect(), arbre: true });
+    familles.push(Famille { op: Op::Intersection, formes: vec![&boite], arbre: false });
+    let simple = batiments.is_empty() && remblais.iter().all(|f| f.vide()) && rem.iter().all(|f| f.vide()) && epa.iter().all(|f| f.vide()) && def.vide();
+    if let Some(m) = memoire {
+        if let Ok(mut m) = m.mesures.lock() {
+            m.tuiles += 1;
+            m.simples += simple as u32;
+        }
+    }
     let solide = mq::solide(d, cle);
-    let f = match crate::booleens::enchainer(&solide, &etapes) {
+    noter("terrain (solide de la tuile)");
+    let f = match crate::booleens::enchainer_familles(&solide, &familles, |t, s| {
+        if let Some(m) = memoire {
+            let famille = |k: usize| match k.checked_sub(n_quais) {
+                None => 0,
+                Some(j) => j + 1,
+            };
+            let nom = match t {
+                Temps::Conversions => "booléens : conversions",
+                Temps::Regroupement(k) => ["booléens : quais et lits", "booléens : bâtiments, unis entre eux", "booléens : remblais des routes, unis entre eux", "booléens : défonces des routes, unies entre elles", "booléens : découpe à la tuile"][famille(k).min(4)],
+                Temps::Application(k) => ["booléens : quais et lits", "booléens : bâtiments, union à la tuile", "booléens : remblais des routes, union à la tuile", "booléens : défonces des routes, différence à la tuile", "booléens : découpe à la tuile"][famille(k).min(4)],
+            };
+            m.noter(nom, s);
+        }
+    }) {
         Ok((f, _)) => f,
         Err(_) => solide,
     };
+    t0.set(std::time::Instant::now());
     let (mut v, mut ind) = mq::habiller(d, &f, b);
+    noter("habillage (maillage de la forme)");
     for g in defonces.iter().filter(|_| defonces_a_part) {
         let Ok(g) = crate::booleens::operation(g, &boite, Op::Intersection) else { continue };
         let (dv, di, _) = mq::maillage_defonce(&g);
@@ -479,5 +567,7 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         v.extend_from_slice(&dv);
         ind.extend(di.iter().map(|k| k + base));
     }
-    (v, ind, mq::texture(d, b))
+    let tex = mq::texture(d, b);
+    noter("texture du sol");
+    (v, ind, tex)
 }
