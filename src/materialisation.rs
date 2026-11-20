@@ -10,6 +10,9 @@
 //! volumes fermés enfoncés de `SOUBASSEMENT` sous le terrain (0.126) : la défonce d'un
 //! tunnel recoupe leurs sous-sols. Ils sont en béton clair, en attendant leur matière.
 //!
+//! Les tronçons d'une même rue sont enchaînés à travers les nœuds qui ne relient
+//! qu'eux deux (coupures d'OSM, entrées des ponts et des tunnels) : un seul ruban, un
+//! seul lissage, le passage gardé point par point (0.138, `champ_voirie::Chaine`).
 //! Chaque volume est un ruban le long du tracé de la route (`ruban`) : une section
 //! horizontale en travers à chaque point du tracé, les sections reliées. Aucun triangle
 //! ne relie deux routes : la chaussée est plate en travers par construction (0.120 ;
@@ -92,9 +95,24 @@ fn chaussee(f: Forme) -> Forme {
 /// a des écarts de quelques dizaines de centimètres d'un point à l'autre.
 const LISSAGE: f32 = 10.0;
 
-/// Un point d'un tracé prêt pour un ruban : x, z, la hauteur de son axe et la pente
-/// en travers (gx, gz) : un bord à `o` de l'axe est à `h + g·o`.
-pub(crate) type Pt = [f32; 5];
+/// Un point d'un tracé prêt pour un ruban : x, z, la hauteur de son axe, la pente en
+/// travers (gx, gz) : un bord à `o` de l'axe est à `h + g·o` ; enfin son passage
+/// (`code_passage` : 0 au sol, 1 en pont, 2 en tunnel).
+pub(crate) type Pt = [f32; 6];
+
+/// Le code d'un passage dans un `Pt`.
+pub(crate) fn code_passage(p: Passage) -> f32 {
+    match p {
+        Passage::Sol => 0.0,
+        Passage::Pont => 1.0,
+        Passage::Tunnel => 2.0,
+    }
+}
+
+/// Un point est-il au sol ?
+pub(crate) fn au_sol(p: &Pt) -> bool {
+    p[5] < 0.5
+}
 
 /// La hauteur d'un point à `o` (x, z) de l'axe d'un point de tracé.
 fn hauteur_a(p: &Pt, o: [f32; 2]) -> f32 {
@@ -206,7 +224,7 @@ pub(crate) fn plan(r: &Reseau, n: usize) -> Option<Plan> {
 /// toutes les routes d'un carrefour s'y recouvrent sans marche, en long comme en
 /// travers ; elle rejoint son profil lissé sur les `LISSAGE` mètres suivants. Des
 /// points sont ajoutés aux limites des parties posées.
-pub(crate) fn lisser(p: &[[f32; 3]], pa: Option<Plan>, pb: Option<Plan>) -> Vec<Pt> {
+pub(crate) fn lisser(p: &[[f32; 3]], codes: &[f32], pa: Option<Plan>, pb: Option<Plan>) -> Vec<Pt> {
     let abscisses = |p: &[[f32; 3]]| {
         let mut s = vec![0.0f32; p.len()];
         for i in 1..p.len() {
@@ -225,7 +243,10 @@ pub(crate) fn lisser(p: &[[f32; 3]], pa: Option<Plan>, pb: Option<Plan>) -> Vec<
     let lisse: Vec<f32> = (0..p.len())
         .map(|i| {
             let (mut somme, mut poids) = (0.0, 0.0);
-            for j in 0..p.len() {
+            // Seulement les points à moins de LISSAGE (les abscisses croissent)
+            let j0 = s0.partition_point(|&x| x <= s0[i] - LISSAGE);
+            let j1 = s0.partition_point(|&x| x < s0[i] + LISSAGE);
+            for j in j0..j1.max(j0 + 1).min(p.len()) {
                 let w = (1.0 - (s0[j] - s0[i]).abs() / LISSAGE).max(0.0);
                 somme += w * p[j][2];
                 poids += w;
@@ -234,7 +255,7 @@ pub(crate) fn lisser(p: &[[f32; 3]], pa: Option<Plan>, pb: Option<Plan>) -> Vec<
         })
         .collect();
     // Les points, avec ceux des limites des parties posées
-    let mut q: Vec<([f32; 3], f32)> = Vec::with_capacity(p.len() + 4);
+    let mut q: Vec<([f32; 3], f32, f32)> = Vec::with_capacity(p.len() + 4);
     for i in 0..p.len() {
         if i > 0 {
             let mut coupes = [ra, ra + LISSAGE, long - rb - LISSAGE, long - rb];
@@ -243,14 +264,14 @@ pub(crate) fn lisser(p: &[[f32; 3]], pa: Option<Plan>, pb: Option<Plan>) -> Vec<
                 if c > s0[i - 1] + 0.05 && c < s0[i] - 0.05 {
                     let t = (c - s0[i - 1]) / (s0[i] - s0[i - 1]);
                     let h = lisse[i - 1] + t * (lisse[i] - lisse[i - 1]);
-                    q.push(([p[i - 1][0] + t * (p[i][0] - p[i - 1][0]), p[i - 1][1] + t * (p[i][1] - p[i - 1][1]), h], c));
+                    q.push(([p[i - 1][0] + t * (p[i][0] - p[i - 1][0]), p[i - 1][1] + t * (p[i][1] - p[i - 1][1]), h], c, codes[i - 1].max(codes[i])));
                 }
             }
         }
-        q.push(([p[i][0], p[i][1], lisse[i]], s0[i]));
+        q.push(([p[i][0], p[i][1], lisse[i]], s0[i], codes[i]));
     }
     q.into_iter()
-        .map(|(x, s)| {
+        .map(|(x, s, code)| {
             let (ha, hb) = (pa.h(x[0], x[1]), pb.h(x[0], x[1]));
             let (h, g) = if ra + rb >= long {
                 // Trop courte : d'un plan à l'autre
@@ -267,7 +288,7 @@ pub(crate) fn lisser(p: &[[f32; 3]], pa: Option<Plan>, pb: Option<Plan>) -> Vec<
                 let (f, hn, gn) = if s - ra < long - rb - s { (fa, ha, pa.g) } else { (fb, hb, pb.g) };
                 (hn * (1.0 - f) + f * x[2], [gn[0] * (1.0 - f), gn[1] * (1.0 - f)])
             };
-            [x[0], x[1], h, g[0], g[1]]
+            [x[0], x[1], h, g[0], g[1], code]
         })
         .collect()
 }
@@ -317,7 +338,9 @@ fn reechantillonner(p: &[Pt], pas: f32) -> Vec<Pt> {
         let n = (d / pas).ceil().max(1.0) as usize;
         for k in 1..=n {
             let t = k as f32 / n as f32;
-            v.push(std::array::from_fn(|c| s[0][c] + t * (s[1][c] - s[0][c])));
+            let mut q: Pt = std::array::from_fn(|c| s[0][c] + t * (s[1][c] - s[0][c]));
+            q[5] = if k == n { s[1][5] } else { s[0][5].max(s[1][5]) };
+            v.push(q);
         }
     }
     v
@@ -332,18 +355,22 @@ const PAS_RUBAN: f32 = 2.0;
 /// sinon la pente du point (`Pt`). La section va de `bas(gauche, droite, axe,
 /// [h gauche, h axe, h droite])` à `haut(h)` de chacun ; les deux bouts sont
 /// prolongés de `w` (ils couvrent le carrefour).
-fn ruban(p: &[Pt], w: f32, champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3]) -> [f32; 3]) -> Forme {
+fn ruban(p: &[Pt], w: f32, champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
     let n = p.len();
     let dir = |a: Pt, b: Pt| {
         let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
         [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
     };
-    let hauteur = |q: &Pt, o: [f32; 2]| champ.and_then(|c| c.h(o[0], o[1])).unwrap_or_else(|| hauteur_a(q, o));
+    // Au sol, le champ ; en pont ou en tunnel, le profil du point
+    let hauteur = |q: &Pt, o: [f32; 2]| {
+        let propre = hauteur_a(q, o);
+        champ.filter(|_| au_sol(q)).and_then(|c| c.h(o[0], o[1], propre)).unwrap_or(propre)
+    };
     // Les points, bouts prolongés (sur la même pente)
     let (d0, d1) = (dir(p[0], p[1]), dir(p[n - 2], p[n - 1]));
     let prolonge = |a: &Pt, d: [f32; 2]| {
         let o = [a[0] + d[0], a[1] + d[1]];
-        [o[0], o[1], hauteur_a(a, o), a[3], a[4]]
+        [o[0], o[1], hauteur_a(a, o), a[3], a[4], a[5]]
     };
     let mut q: Vec<Pt> = Vec::with_capacity(n + 2);
     q.push(prolonge(&p[0], [-d0[0] * w, -d0[1] * w]));
@@ -365,7 +392,7 @@ fn ruban(p: &[Pt], w: f32, champ: Option<&crate::champ_voirie::Champ>, haut: imp
         let (nx, nz) = (-t[1] * w / c, t[0] * w / c);
         let (g, m, d) = ([q[i][0] + nx, q[i][1] + nz], [q[i][0], q[i][1]], [q[i][0] - nx, q[i][1] - nz]);
         let hs = [hauteur(&q[i], g), hauteur(&q[i], m), hauteur(&q[i], d)];
-        let bs = bas(g, d, m, hs);
+        let bs = bas(g, d, m, hs, au_sol(&q[i]));
         // Bas : gauche, axe, droite ; haut : droite, axe, gauche
         f.sommets.push([g[0], bs[0], g[1]]);
         f.sommets.push([m[0], bs[1], m[1]]);
@@ -437,6 +464,9 @@ fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
         if p[0] < b[0] - marge || p[0] > b[2] + marge || p[1] < b[1] - marge || p[1] > b[3] + marge {
             continue;
         }
+        if crate::champ_voirie::passage_simple(r, k).is_some() {
+            continue;
+        }
         let Some(pl) = plan(r, k) else { continue };
         let routes: Vec<_> = n.aretes.iter().map(|&k| &r.aretes[k]).filter(|a| a.genre != sage_reel::PIETONNE).collect();
         let w = routes.iter().map(|a| (a.largeur * 0.5).max(1.0)).fold(0.0, f32::max);
@@ -445,26 +475,19 @@ fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
     v
 }
 
-/// Les morceaux du tracé lissé de chaque route de `passage` qui touchent la boîte `b`
-/// (marge comprise), avec leur demi-largeur.
-fn traces(r: &Reseau, b: [f32; 4], passage: Passage, memoire: Option<&Memoire>) -> Vec<(Vec<Pt>, f32)> {
+/// Les morceaux des chaînes de voies (`champ_voirie::Chaine` : les tronçons d'une
+/// même rue enchaînés à travers les nœuds de passage, sol, pont et tunnel compris) qui
+/// touchent la boîte `b` (marge comprise), avec leur demi-largeur.
+fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Vec<Pt>, f32)> {
     let marge = 10.0;
     let mut v = Vec::new();
-    for (k, a) in r.aretes.iter().enumerate().filter(|(_, a)| a.passage == passage && a.genre != sage_reel::PIETONNE) {
-        let w = (a.largeur * 0.5).max(1.0);
+    for c in champ.chaines_dans(b, marge) {
+        let w = c.w;
         let m = marge + 2.0 * w;
         let dedans = |p: &[f32], q: &[f32]| p[0].max(q[0]) >= b[0] - m && p[0].min(q[0]) <= b[2] + m && p[1].max(q[1]) >= b[1] - m && p[1].min(q[1]) <= b[3] + m;
-        if !a.points.iter().any(|p| dedans(p, p)) && !a.points.windows(2).any(|s| dedans(&s[0], &s[1])) {
-            continue;
-        }
-        let lisse = || lisser(&a.points, plan(r, a.a), plan(r, a.b));
-        let pts: Arc<Vec<Pt>> = match memoire.and_then(|m| m.traces.lock().ok()) {
-            Some(mut t) => t.entry(k).or_insert_with(|| Arc::new(lisse())).clone(),
-            None => Arc::new(lisse()),
-        };
         // Les suites de segments qui touchent la boîte
         let mut cur: Vec<Pt> = Vec::new();
-        for s in pts.windows(2) {
+        for s in c.points.windows(2) {
             if dedans(&s[0], &s[1]) {
                 if cur.is_empty() {
                     cur.push(s[0]);
@@ -494,7 +517,6 @@ pub struct Memoire {
     /// celles faites ailleurs, par le renfort).
     touches: Mutex<HashMap<u32, u32>>,
     /// Par arête du réseau : son tracé lissé.
-    traces: Mutex<HashMap<usize, Arc<Vec<Pt>>>>,
     /// Le temps passé par étape.
     mesures: Mutex<Mesures>,
 }
@@ -646,29 +668,28 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     let champ = d.champ_voirie();
     noter("champ de hauteur de la voirie (une fois)");
     let (mut remblais, mut defonces) = (Vec::new(), Vec::new());
-    for passage in [Passage::Sol, Passage::Pont, Passage::Tunnel] {
-        // Au sol, les rubans sont posés sur le champ de la voirie, une section tous
-        // les PAS_RUBAN mètres ; les ponts et les tunnels gardent leur profil
-        let sol = passage == Passage::Sol;
-        let ch = if sol { Some(&*champ) } else { None };
-        for (t, w) in traces(&r, b, passage, memoire) {
-            let t = if sol { reechantillonner(&t, PAS_RUBAN) } else { t };
-            let rem = if sol {
-                ruban(&t, w, ch, |h| h, |g, d, c, hs| {
-                    let m = terre(g).min(terre(c)).min(terre(d)).min(hs[0]).min(hs[1]).min(hs[2]) - SOUS;
-                    [m; 3]
-                })
+    // Les rubans des chaînes de voies : au sol posés sur le champ de la voirie, une
+    // section tous les PAS_RUBAN mètres ; en pont et en tunnel, leur profil et une dalle
+    // de OUVRAGE mètres dessous
+    for (t, w) in traces(&champ, b) {
+        let t = reechantillonner(&t, PAS_RUBAN);
+        let rem = ruban(&t, w, Some(&*champ), |h| h, |g, d, c, hs, sol| {
+            if sol {
+                [terre(g).min(terre(c)).min(terre(d)).min(hs[0]).min(hs[1]).min(hs[2]) - SOUS; 3]
             } else {
-                ruban(&t, w, ch, |h| h, |_, _, _, hs| hs.map(|h| h - OUVRAGE))
-            };
-            remblais.push(rem.en(mq::matiere::REMBLAI));
-            defonces.push(chaussee(ruban(&t, w, ch, |h| h + DEFONCE_HAUT, |_, _, _, hs| hs.map(|h| h - DEFONCE_SOUS))));
-        }
+                hs.map(|h| h - OUVRAGE)
+            }
+        });
+        remblais.push(rem.en(mq::matiere::REMBLAI));
+        defonces.push(chaussee(ruban(&t, w, Some(&*champ), |h| h + DEFONCE_HAUT, |_, _, _, hs, _| hs.map(|h| h - DEFONCE_SOUS))));
     }
     // Les dalles des carrefours : elles bouchent les coins entre les rubans
     for (pl, w, sol) in carrefours(&r, b) {
         let c = [pl.c[0], pl.c[1]];
-        let h = |q: [f32; 2]| if sol { champ.h(q[0], q[1]) } else { None }.unwrap_or_else(|| pl.h(q[0], q[1]));
+        let h = |q: [f32; 2]| {
+            let propre = pl.h(q[0], q[1]);
+            if sol { champ.h(q[0], q[1], propre) } else { None }.unwrap_or(propre)
+        };
         let rem = if sol { dalle(c, w, h, |q| terre(q).min(terre(c)).min(h(q)) - SOUS) } else { dalle(c, w, h, |q| h(q) - OUVRAGE) };
         remblais.push(rem.en(mq::matiere::REMBLAI));
         defonces.push(chaussee(dalle(c, w, |q| h(q) + DEFONCE_HAUT, |q| h(q) - DEFONCE_SOUS)));
