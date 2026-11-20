@@ -24,6 +24,7 @@ pub mod materialisation;
 pub mod remblais_voies;
 pub mod relief3d;
 pub mod bati_ferme;
+pub mod generer_carte;
 pub mod booleens;
 pub mod modifieurs;
 pub mod voirie3d;

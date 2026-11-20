@@ -1740,6 +1740,33 @@ impl Lieux {
                     if cx.button(&mut b, sub_id(base, 672), "Recentrer sur le point visé") {
                         self.zone_centre = self.trois_d.as_ref().map(|r| [r.camera.cible[0], r.camera.cible[2]]);
                     }
+                    // « Générer une map » : la zone écrite en carte (`sage-carte`) dans
+                    // Flow/cartes, pour WhiteRoom et S.A.G.E.
+                    {
+                        let zone = self.zone_centre.map(|centre| crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon });
+                        let lieu = self.chemin.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "lieu".into());
+                        let etat = crate::generer_carte::etat();
+                        let tourne = etat.as_ref().is_some_and(|e| !e.fini);
+                        if tourne {
+                            if cx.button(&mut b, sub_id(base, 675), "Arrêter la génération") {
+                                crate::generer_carte::arreter();
+                            }
+                        } else if let (Some(z), Some(flow)) = (zone, c.dossier.clone()) {
+                            if cx.button(&mut b, sub_id(base, 674), "Générer une map") {
+                                let nom = crate::generer_carte::nom_par_defaut(&lieu, z);
+                                crate::generer_carte::lancer(carte.donnees.clone(), z, &flow, lieu.clone(), nom);
+                            }
+                        }
+                        if let Some(e) = etat {
+                            let lieu_carte = format!("Flow/{}/{}", crate::generer_carte::DOSSIER, e.nom);
+                            let texte = match (&e.erreur, e.fini) {
+                                (Some(m), _) => format!("Génération {m} : {} tuiles sur {} dans {lieu_carte} (relancer reprend où elle en était).", e.faites, e.total),
+                                (None, true) => format!("Carte écrite dans {lieu_carte} : {} tuiles, {} triangles, en {:.0} s{}.", e.total, e.triangles, e.duree, if e.reprises > 0 { format!(" ({} reprises)", e.reprises) } else { String::new() }),
+                                (None, false) => format!("Génération de {lieu_carte} : {} tuiles sur {}, {} triangles…", e.faites, e.total, e.triangles),
+                            };
+                            cx.paragraph(&mut b, &texte);
+                        }
+                    }
                     // Les bâtiments en volumes fermés, avant de les unir au terrain
                     cx.toggle(&mut b, sub_id(base, 673), "Bâtiments (volumes fermés)", &mut self.bati_mat);
                     if self.bati_mat {
@@ -2540,7 +2567,7 @@ impl Contexte for Lieux {
     }
 
     fn anime(&self, _c: &Commun) -> bool {
-        (self.maquette3d && self.suivi3d && self.trois_d.is_some() && crate::suivi::occupe()) || (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
+        crate::generer_carte::en_cours() || (self.maquette3d && self.suivi3d && self.trois_d.is_some() && crate::suivi::occupe()) || (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {

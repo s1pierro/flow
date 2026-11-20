@@ -1,6 +1,6 @@
 [package]
 name = "flow"
-version = "0.126.0"
+version = "0.127.0"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0"
 
@@ -17,6 +17,8 @@ i_triangle = "0.51"
 sage-reel = { path = "../sage/modules/sage-reel" }
 # Les matières (textures répétables), issues de Texturine : partagées avec S.A.G.E.
 sage-matieres = { path = "../sage/modules/sage-matieres" }
+# Les cartes matérialisées (« Générer une map ») : lues par WhiteRoom et S.A.G.E.
+sage-carte = { path = "../sage/modules/sage-carte" }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
