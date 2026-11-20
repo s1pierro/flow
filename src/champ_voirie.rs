@@ -46,6 +46,10 @@ pub struct Chaine {
     pub w: f32,
     poids: f32,
     boite: [f32; 4],
+    /// Le tracé des rubans : `points` coupé aux bouches des carrefours simples
+    /// (`carrefours`), et ces bouches (début, fin).
+    pub trace: Vec<Pt>,
+    pub bouches: [Option<crate::carrefours::Bouche>; 2],
 }
 
 pub struct Champ {
@@ -55,6 +59,9 @@ pub struct Champ {
     index: HashMap<(i32, i32), Vec<(u32, u32)>>,
     /// Les chaînes dont la boîte touche chaque grande case (`CASE_CHAINES`).
     chaines: HashMap<(i32, i32), Vec<u32>>,
+    /// Les carrefours simples, d'une seule pièce (`carrefours`).
+    carrefours: Vec<crate::carrefours::Carrefour>,
+    simples: std::collections::HashSet<usize>,
 }
 
 /// Le côté (m) des cases de l'index des chaînes.
@@ -136,7 +143,9 @@ impl Champ {
     /// Les chaînes de voies du réseau nivelé (sans les piétonnes), lissées.
     pub fn new(r: &Reseau) -> Champ {
         let mut voies = Vec::new();
+        let mut bouts = Vec::new();
         for (suite, debut, fin) in enchainer(r) {
+            bouts.push((debut, fin));
             let (mut pts, mut codes): (Vec<[f32; 3]>, Vec<f32>) = (Vec::new(), Vec::new());
             let (mut w, mut pd) = (0.0f32, 0.0f32);
             for &(k, endroit) in &suite {
@@ -159,8 +168,15 @@ impl Champ {
             for p in &points {
                 boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
             }
-            voies.push(Chaine { points, w, poids: pd, boite });
+            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None] });
         }
+        // Les carrefours simples : les chaînes coupées à leurs bouches
+        let (carrefours, coupes) = crate::carrefours::construire(r, &voies, &bouts);
+        for (v, c) in voies.iter_mut().zip(&coupes) {
+            v.trace = crate::carrefours::couper(&v.points, c);
+            v.bouches = [c[0].map(|x| x.1), c[1].map(|x| x.1)];
+        }
+        let simples = carrefours.iter().map(|c| c.noeud).collect();
         let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
         for (k, v) in voies.iter().enumerate() {
             // Les bouts comptent jusqu'à leur prolongement (une demi-largeur), frange
@@ -190,7 +206,17 @@ impl Champ {
                 }
             }
         }
-        Champ { voies, index, chaines }
+        Champ { voies, index, chaines, carrefours, simples }
+    }
+
+    /// Le nœud `n` est-il un carrefour simple ?
+    pub fn simple(&self, n: usize) -> bool {
+        self.simples.contains(&n)
+    }
+
+    /// Les carrefours simples dont le contour (élargi de `marge`) touche `b`.
+    pub fn carrefours_dans(&self, b: [f32; 4], marge: f32) -> Vec<&crate::carrefours::Carrefour> {
+        self.carrefours.iter().filter(|c| c.boite[2] >= b[0] - marge && c.boite[0] <= b[2] + marge && c.boite[3] >= b[1] - marge && c.boite[1] <= b[3] + marge).collect()
     }
 
     /// Les chaînes dont la boîte (élargie de `marge` et de leur largeur) touche `b`.

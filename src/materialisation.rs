@@ -30,6 +30,7 @@ use crate::carte::{Cle, Donnees};
 use crate::maquette as mq;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use crate::carrefours::{Bouche, Carrefour};
 use sage_reel::reseau::{Passage, Reseau};
 
 /// Des volumes disjoints en une seule forme (plusieurs coques).
@@ -119,17 +120,24 @@ fn hauteur_a(p: &Pt, o: [f32; 2]) -> f32 {
     p[2] + p[3] * (o[0] - p[0]) + p[4] * (o[1] - p[1])
 }
 
+/// La hauteur de la voirie à `o` (x, z) lue depuis le point de tracé `q` : au sol, le
+/// champ de la voirie ; en pont ou en tunnel (ou sans champ), le profil du point.
+pub(crate) fn hauteur_voirie(champ: Option<&crate::champ_voirie::Champ>, q: &Pt, o: [f32; 2]) -> f32 {
+    let propre = hauteur_a(q, o);
+    champ.filter(|_| au_sol(q)).and_then(|c| c.h(o[0], o[1], propre)).unwrap_or(propre)
+}
+
 /// Le plan d'un carrefour : il passe par le nœud `c` avec la pente `g` (celle de la
 /// route principale, nulle en travers d'elle) ; les routes y sont posées sur `rayon`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Plan {
-    c: [f32; 3],
-    g: [f32; 2],
-    rayon: f32,
+    pub(crate) c: [f32; 3],
+    pub(crate) g: [f32; 2],
+    pub(crate) rayon: f32,
 }
 
 impl Plan {
-    fn h(&self, x: f32, z: f32) -> f32 {
+    pub(crate) fn h(&self, x: f32, z: f32) -> f32 {
         self.c[2] + self.g[0] * (x - self.c[0]) + self.g[1] * (z - self.c[1])
     }
 }
@@ -338,8 +346,13 @@ fn reechantillonner(p: &[Pt], pas: f32) -> Vec<Pt> {
         let n = (d / pas).ceil().max(1.0) as usize;
         for k in 1..=n {
             let t = k as f32 / n as f32;
+            // Le dernier point tel quel (une bouche de carrefour y est posée au bit près)
+            if k == n {
+                v.push(s[1]);
+                continue;
+            }
             let mut q: Pt = std::array::from_fn(|c| s[0][c] + t * (s[1][c] - s[0][c]));
-            q[5] = if k == n { s[1][5] } else { s[0][5].max(s[1][5]) };
+            q[5] = s[0][5].max(s[1][5]);
             v.push(q);
         }
     }
@@ -354,18 +367,16 @@ const PAS_RUBAN: f32 = 2.0;
 /// comme en bas. Leurs hauteurs : le champ de la voirie (`champ`) s'il y en a,
 /// sinon la pente du point (`Pt`). La section va de `bas(gauche, droite, axe,
 /// [h gauche, h axe, h droite])` à `haut(h)` de chacun ; les deux bouts sont
-/// prolongés de `w` (ils couvrent le carrefour).
-fn ruban(p: &[Pt], w: f32, champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
+/// prolongés de `w` (ils couvrent le carrefour), sauf ceux arrêtés à la bouche d'un
+/// carrefour simple (`bouts`) : leur section est celle de la bouche.
+fn ruban(p: &[Pt], w: f32, bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
     let n = p.len();
     let dir = |a: Pt, b: Pt| {
         let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
         [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
     };
     // Au sol, le champ ; en pont ou en tunnel, le profil du point
-    let hauteur = |q: &Pt, o: [f32; 2]| {
-        let propre = hauteur_a(q, o);
-        champ.filter(|_| au_sol(q)).and_then(|c| c.h(o[0], o[1], propre)).unwrap_or(propre)
-    };
+    let hauteur = |q: &Pt, o: [f32; 2]| hauteur_voirie(champ, q, o);
     // Les points, bouts prolongés (sur la même pente)
     let (d0, d1) = (dir(p[0], p[1]), dir(p[n - 2], p[n - 1]));
     let prolonge = |a: &Pt, d: [f32; 2]| {
@@ -373,11 +384,28 @@ fn ruban(p: &[Pt], w: f32, champ: Option<&crate::champ_voirie::Champ>, haut: imp
         [o[0], o[1], hauteur_a(a, o), a[3], a[4], a[5]]
     };
     let mut q: Vec<Pt> = Vec::with_capacity(n + 2);
-    q.push(prolonge(&p[0], [-d0[0] * w, -d0[1] * w]));
+    if bouts[0].is_none() {
+        q.push(prolonge(&p[0], [-d0[0] * w, -d0[1] * w]));
+    }
     q.extend_from_slice(p);
-    q.push(prolonge(&p[n - 1], [d1[0] * w, d1[1] * w]));
+    if bouts[1].is_none() {
+        q.push(prolonge(&p[n - 1], [d1[0] * w, d1[1] * w]));
+    }
     let mut f = Forme::default();
     for i in 0..q.len() {
+        // La section d'une bouche : celle du contour du carrefour
+        let bouche = if i == 0 { bouts[0] } else if i + 1 == q.len() { bouts[1] } else { None };
+        if let Some(b) = bouche {
+            let hs = [hauteur(&b.q, b.g), hauteur(&b.q, b.m), hauteur(&b.q, b.d)];
+            let bs = bas(b.g, b.d, b.m, hs, true);
+            f.sommets.push([b.g[0], bs[0], b.g[1]]);
+            f.sommets.push([b.m[0], bs[1], b.m[1]]);
+            f.sommets.push([b.d[0], bs[2], b.d[1]]);
+            f.sommets.push([b.d[0], haut(hs[2]), b.d[1]]);
+            f.sommets.push([b.m[0], haut(hs[1]), b.m[1]]);
+            f.sommets.push([b.g[0], haut(hs[0]), b.g[1]]);
+            continue;
+        }
         let a = if i > 0 { dir(q[i - 1], q[i]) } else { dir(q[0], q[1]) };
         let b = if i + 1 < q.len() { dir(q[i], q[i + 1]) } else { a };
         let mut t = [a[0] + b[0], a[1] + b[1]];
@@ -456,7 +484,7 @@ fn dalle(c: [f32; 2], w: f32, haut: impl Fn([f32; 2]) -> f32, bas: impl Fn([f32;
 /// Les carrefours près de la boîte `b` : les nœuds où se rejoignent au moins deux
 /// routes, avec leur plan, la plus grande demi-largeur et s'il y arrive une route au
 /// sol.
-fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
+fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
     let marge = 20.0;
     let mut v = Vec::new();
     for (k, n) in r.noeuds.iter().enumerate() {
@@ -464,7 +492,7 @@ fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
         if p[0] < b[0] - marge || p[0] > b[2] + marge || p[1] < b[1] - marge || p[1] > b[3] + marge {
             continue;
         }
-        if crate::champ_voirie::passage_simple(r, k).is_some() {
+        if crate::champ_voirie::passage_simple(r, k).is_some() || champ.simple(k) {
             continue;
         }
         let Some(pl) = plan(r, k) else { continue };
@@ -477,31 +505,368 @@ fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
 
 /// Les morceaux des chaînes de voies (`champ_voirie::Chaine` : les tronçons d'une
 /// même rue enchaînés à travers les nœuds de passage, sol, pont et tunnel compris) qui
-/// touchent la boîte `b` (marge comprise), avec leur demi-largeur.
-fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Vec<Pt>, f32)> {
+/// touchent la boîte `b` (marge comprise), avec leur demi-largeur et, à leurs bouts, la
+/// bouche d'un carrefour simple où ils s'arrêtent.
+fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Vec<Pt>, f32, [Option<Bouche>; 2])> {
     let marge = 10.0;
     let mut v = Vec::new();
     for c in champ.chaines_dans(b, marge) {
         let w = c.w;
         let m = marge + 2.0 * w;
+        let pts = &c.trace;
         let dedans = |p: &[f32], q: &[f32]| p[0].max(q[0]) >= b[0] - m && p[0].min(q[0]) <= b[2] + m && p[1].max(q[1]) >= b[1] - m && p[1].min(q[1]) <= b[3] + m;
+        // Les morceaux d'une suite, la bouche gardée au bout de la chaîne
+        let mut pousser = |cur: Vec<Pt>, debut: bool, fin: bool| {
+            let ms = morceaux(&cur);
+            let n = ms.len();
+            for (i, p) in ms.into_iter().enumerate() {
+                let bd = if debut && i == 0 { c.bouches[0] } else { None };
+                let bf = if fin && i + 1 == n { c.bouches[1] } else { None };
+                v.push((p, w, [bd, bf]));
+            }
+        };
         // Les suites de segments qui touchent la boîte
         let mut cur: Vec<Pt> = Vec::new();
-        for s in c.points.windows(2) {
+        let mut debut = false;
+        for (i, s) in pts.windows(2).enumerate() {
             if dedans(&s[0], &s[1]) {
                 if cur.is_empty() {
                     cur.push(s[0]);
+                    debut = i == 0;
                 }
                 cur.push(s[1]);
             } else if !cur.is_empty() {
-                v.extend(morceaux(&std::mem::take(&mut cur)).into_iter().map(|c| (c, w)));
+                pousser(std::mem::take(&mut cur), debut, false);
             }
         }
         if !cur.is_empty() {
-            v.extend(morceaux(&cur).into_iter().map(|c| (c, w)));
+            pousser(cur, debut, true);
         }
     }
     v
+}
+
+/// Les plaques de carrefour maillées en anneaux faute de Delaunay (pour le diagnostic).
+pub static PLAQUES_REPLI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Un maillage plan : les sommets (x, z), les triangles (sens direct) et, pour chaque
+/// point du contour, son sommet.
+type Maillage = (Vec<[f32; 2]>, Vec<[u32; 3]>, Vec<u32>);
+
+/// Le contour (sens direct) triangulé par Delaunay avec des points intérieurs tous les
+/// `carrefours::PAS` mètres (`i_triangle`) ; les points du contour gardés au bit près.
+/// Rien si un point du contour s'est perdu ou si l'aire n'y est pas.
+fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
+    use i_triangle::float::triangulatable::Triangulatable;
+    let pas = crate::carrefours::PAS;
+    let nc = contour.len();
+    let mut boite = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for p in contour {
+        boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
+    }
+    let dedans = |p: [f32; 2]| {
+        let mut d = false;
+        for i in 0..nc {
+            let (a, b) = (contour[i], contour[(i + 1) % nc]);
+            if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+                d = !d;
+            }
+        }
+        d
+    };
+    let loin = |p: [f32; 2]| {
+        (0..nc).all(|i| {
+            let (a, b) = (contour[i], contour[(i + 1) % nc]);
+            let (ux, uz) = (b[0] - a[0], b[1] - a[1]);
+            let l2 = (ux * ux + uz * uz).max(1e-12);
+            let t = (((p[0] - a[0]) * ux + (p[1] - a[1]) * uz) / l2).clamp(0.0, 1.0);
+            (p[0] - a[0] - t * ux).hypot(p[1] - a[1] - t * uz) > 0.6 * pas
+        })
+    };
+    // Une grille en quinconce (des triangles presque équilatéraux)
+    let mut steiner: Vec<[f32; 2]> = Vec::new();
+    let dz = pas * 0.866;
+    let mut j = 0;
+    let mut z = boite[1] + dz * 0.5;
+    while z < boite[3] {
+        let mut x = boite[0] + if j % 2 == 0 { pas * 0.5 } else { pas };
+        while x < boite[2] {
+            let p = [x, z];
+            if dedans(p) && loin(p) {
+                steiner.push(p);
+            }
+            x += pas;
+        }
+        z += dz;
+        j += 1;
+    }
+    let forme: Vec<Vec<[f64; 2]>> = vec![contour.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()];
+    let st: Vec<[f64; 2]> = steiner.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
+    let d = forme.triangulate_with_steiner_points(&st).into_delaunay();
+    let pts: Vec<[f64; 2]> = d.points();
+    let ind: Vec<u32> = d.triangle_indices::<u32>();
+    let diag = std::env::var_os("FLOW_DIAG").is_some();
+    if diag {
+        eprintln!("delaunay : contour {nc}, steiner {}, rendus {}, triangles {}", steiner.len(), pts.len(), ind.len() / 3);
+    }
+    if pts.len() < 3 || ind.len() < 3 {
+        return None;
+    }
+    // Chaque point rendu ramené à son point d'origine (la triangulation passe par des
+    // entiers)
+    let case = |p: [f32; 2]| ((p[0] / 0.5).floor() as i32, (p[1] / 0.5).floor() as i32);
+    let mut grille: HashMap<(i32, i32), Vec<(usize, [f32; 2])>> = HashMap::new();
+    for (k, &p) in contour.iter().chain(steiner.iter()).enumerate() {
+        grille.entry(case(p)).or_default().push((k, p));
+    }
+    let mut xz = Vec::with_capacity(pts.len());
+    let mut ext = vec![u32::MAX; nc];
+    for (i, q) in pts.iter().enumerate() {
+        let q = [q[0] as f32, q[1] as f32];
+        let (cx, cz) = case(q);
+        let mut meilleur: Option<(f32, usize, [f32; 2])> = None;
+        for a in cx - 1..=cx + 1 {
+            for b in cz - 1..=cz + 1 {
+                for &(k, p) in grille.get(&(a, b)).into_iter().flatten() {
+                    let e = (p[0] - q[0]).hypot(p[1] - q[1]);
+                    if e < 0.01 && meilleur.is_none_or(|m| e < m.0) {
+                        meilleur = Some((e, k, p));
+                    }
+                }
+            }
+        }
+        match meilleur {
+            Some((_, k, p)) => {
+                if k < nc {
+                    if ext[k] != u32::MAX {
+                        if diag {
+                            eprintln!("  point du contour {k} rendu deux fois");
+                        }
+                        return None;
+                    }
+                    ext[k] = i as u32;
+                }
+                xz.push(p);
+            }
+            None => xz.push(q),
+        }
+    }
+    // Les points alignés ôtés par la triangulation (le milieu d'une bouche, les points
+    // d'un côté droit recoupé) : remis par suites, en éventail dans le triangle posé
+    // sur le côté qui joint leurs voisins gardés
+    let mut ind = ind;
+    let Some(depart) = (0..nc).find(|&k| ext[k] != u32::MAX) else { return None };
+    let mut k = 0;
+    while k < nc {
+        let i = (depart + k) % nc;
+        if ext[i] != u32::MAX {
+            k += 1;
+            continue;
+        }
+        // La suite des perdus i.., entre a (gardé, avant) et b (gardé, après)
+        let mut suite = Vec::new();
+        while k < nc && ext[(depart + k) % nc] == u32::MAX {
+            suite.push((depart + k) % nc);
+            k += 1;
+        }
+        let (a, b) = (ext[(suite[0] + nc - 1) % nc], ext[(suite[suite.len() - 1] + 1) % nc]);
+        let cote = |tr: &[u32]| (0..3).find(|&e| {
+            let (u, v) = (tr[e], tr[(e + 1) % 3]);
+            (u == a && v == b) || (u == b && v == a)
+        });
+        let Some(t) = (0..ind.len() / 3).find(|&t| cote(&ind[3 * t..3 * t + 3]).is_some()) else {
+            if diag {
+                eprintln!("  points du contour {suite:?} perdus, sans côté où les remettre");
+            }
+            return None;
+        };
+        let tr = [ind[3 * t], ind[3 * t + 1], ind[3 * t + 2]];
+        let e = cote(&tr).unwrap();
+        let (u, v, w) = (tr[e], tr[(e + 1) % 3], tr[(e + 2) % 3]);
+        // Les nouveaux sommets dans le sens de u vers v
+        let mut nouveaux: Vec<u32> = suite
+            .iter()
+            .map(|&j| {
+                xz.push(contour[j]);
+                ext[j] = (xz.len() - 1) as u32;
+                ext[j]
+            })
+            .collect();
+        if u == b {
+            nouveaux.reverse();
+        }
+        let mut chaine = vec![u];
+        chaine.extend(nouveaux);
+        chaine.push(v);
+        ind[3 * t..3 * t + 3].copy_from_slice(&[chaine[0], chaine[1], w]);
+        for p in chaine[1..].windows(2) {
+            ind.extend_from_slice(&[p[0], p[1], w]);
+        }
+    }
+    // Les triangles, en sens direct ; l'aire doit être celle du contour
+    let aire = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| 0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+    let mut tris = Vec::with_capacity(ind.len() / 3);
+    let mut somme = 0.0f32;
+    for t in ind.chunks(3) {
+        let (mut a, b, mut c) = (t[0], t[1], t[2]);
+        let s = aire(xz[a as usize], xz[b as usize], xz[c as usize]);
+        if s < 0.0 {
+            std::mem::swap(&mut a, &mut c);
+        }
+        somme += s.abs();
+        tris.push([a, b, c]);
+    }
+    let mut cible = 0.0f32;
+    for i in 0..nc {
+        let (a, b) = (contour[i], contour[(i + 1) % nc]);
+        cible += 0.5 * (a[0] * b[1] - b[0] * a[1]);
+    }
+    if cible <= 0.0 || (somme - cible).abs() > 0.01 * cible {
+        if diag {
+            eprintln!("  aire {somme} au lieu de {cible}");
+        }
+        return None;
+    }
+    Some((xz, tris, ext))
+}
+
+/// Le contour maillé en anneaux autour du nœud `c` (un anneau tous les
+/// `carrefours::PAS` mètres, chacun recoupé au même pas) : le repli de
+/// `maillage_delaunay`.
+fn maillage_anneaux(c: [f32; 2], contour: &[[f32; 2]]) -> Maillage {
+    use std::f32::consts::TAU;
+    let nc = contour.len();
+    // Les anneaux : du nœud (centre) au contour
+    let rmax = contour.iter().map(|p| (p[0] - c[0]).hypot(p[1] - c[1])).fold(0.0, f32::max);
+    let k_anneaux = ((rmax / crate::carrefours::PAS).ceil() as usize).max(1);
+    let a0 = (contour[0][1] - c[1]).atan2(contour[0][0] - c[0]);
+    let angle = |p: [f32; 2]| ((p[1] - c[1]).atan2(p[0] - c[0]) - a0).rem_euclid(TAU);
+    let mut anneaux: Vec<Vec<[f32; 2]>> = Vec::with_capacity(k_anneaux);
+    for r in 1..k_anneaux {
+        let f = r as f32 / k_anneaux as f32;
+        let pts: Vec<[f32; 2]> = contour.iter().map(|p| [c[0] + f * (p[0] - c[0]), c[1] + f * (p[1] - c[1])]).collect();
+        let mut s = vec![0.0f32; nc + 1];
+        for i in 0..nc {
+            let (p, q) = (pts[i], pts[(i + 1) % nc]);
+            s[i + 1] = s[i] + (q[0] - p[0]).hypot(q[1] - p[1]);
+        }
+        let n = ((s[nc] / crate::carrefours::PAS).ceil() as usize).clamp(3, nc);
+        let mut a = Vec::with_capacity(n);
+        let mut j = 0;
+        for k in 0..n {
+            let x = s[nc] * k as f32 / n as f32;
+            while j + 1 < nc && s[j + 1] <= x {
+                j += 1;
+            }
+            let (p, q) = (pts[j], pts[(j + 1) % nc]);
+            let t = ((x - s[j]) / (s[j + 1] - s[j]).max(1e-9)).clamp(0.0, 1.0);
+            a.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]);
+        }
+        anneaux.push(a);
+    }
+    anneaux.push(contour.to_vec());
+    let mut xz: Vec<[f32; 2]> = vec![c];
+    let mut debuts = Vec::with_capacity(anneaux.len());
+    for a in &anneaux {
+        debuts.push(xz.len() as u32);
+        xz.extend_from_slice(a);
+    }
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    let mut tri = |a: u32, b: u32, c: u32| tris.push([a, b, c]);
+    let n1 = anneaux[0].len() as u32;
+    for k in 0..n1 {
+        tri(0, debuts[0] + k, debuts[0] + (k + 1) % n1);
+    }
+    for r in 0..anneaux.len() - 1 {
+        let (a, b) = (&anneaux[r], &anneaux[r + 1]);
+        let (na, nb) = (a.len(), b.len());
+        let (da, db) = (debuts[r], debuts[r + 1]);
+        let ang = |v: &Vec<[f32; 2]>, i: usize| if i == 0 { 0.0 } else if i >= v.len() { TAU } else { angle(v[i]) };
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < na || j < nb {
+            let avance_a = j >= nb || (i < na && ang(a, i + 1) <= ang(b, j + 1));
+            if avance_a {
+                tri(da + (i % na) as u32, db + (j % nb) as u32, da + ((i + 1) % na) as u32);
+                i += 1;
+            } else {
+                tri(da + (i % na) as u32, db + (j % nb) as u32, db + ((j + 1) % nb) as u32);
+                j += 1;
+            }
+        }
+    }
+    let e = *debuts.last().unwrap();
+    (xz, tris, (0..nc as u32).map(|k| e + k).collect())
+}
+
+/// La plaque d'un carrefour simple : son contour maillé (`maillage_delaunay`), de
+/// `bas_libre(point, h)` à `haut(h)`, h la hauteur du champ de la voirie (le plan du
+/// carrefour à défaut). Aux bouches, la section du ruban au bit près (mêmes sommets,
+/// mêmes hauteurs par `bas`, mêmes triangles) : plaque et ruban se touchent par une
+/// face commune.
+fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3], bas_libre: impl Fn([f32; 2], f32) -> f32) -> Forme {
+    let c = car.c;
+    let contour = &car.contour;
+    let nc = contour.len();
+    // Les hauteurs et dessous imposés aux bouches : (h, dessous)
+    let mut impose: HashMap<usize, (f32, f32)> = HashMap::new();
+    for &(k, b) in &car.bouches {
+        let hs = [hauteur_voirie(Some(champ), &b.q, b.g), hauteur_voirie(Some(champ), &b.q, b.m), hauteur_voirie(Some(champ), &b.q, b.d)];
+        let bs = bas(b.g, b.d, b.m, hs, true);
+        let (ig, id) = if contour[k] == b.g { (k, k + 2) } else { (k + 2, k) };
+        impose.insert(ig, (hs[0], bs[0]));
+        impose.insert(k + 1, (hs[1], bs[1]));
+        impose.insert(id, (hs[2], bs[2]));
+    }
+    // Le maillage du dessus : Delaunay du contour et de points intérieurs, les anneaux
+    // autour du nœud à défaut
+    let (xz, tris, ext) = maillage_delaunay(contour).unwrap_or_else(|| {
+        PLAQUES_REPLI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        maillage_anneaux(c, contour)
+    });
+    let nv = xz.len() as u32;
+    let sur_contour: HashMap<u32, usize> = ext.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let mut f = Forme::default();
+    let mut dessous = Vec::with_capacity(xz.len());
+    for (i, &p) in xz.iter().enumerate() {
+        let (h, b) = match sur_contour.get(&(i as u32)).and_then(|k| impose.get(k)) {
+            Some(&e) => e,
+            None => {
+                let propre = car.plan.h(p[0], p[1]);
+                let h = champ.h(p[0], p[1], propre).unwrap_or(propre);
+                (h, bas_libre(p, h))
+            }
+        };
+        f.sommets.push([p[0], haut(h), p[1]]);
+        dessous.push([p[0], b, p[1]]);
+    }
+    f.sommets.extend(dessous);
+    // Les triangles du dessus (sens direct en x, z) et du dessous (retournés)
+    for [a, b, c] in tris {
+        f.faces.push(vec![a, b, c]);
+        f.faces.push(vec![c + nv, b + nv, a + nv]);
+    }
+    // Les murs du contour : aux bouches, en éventail depuis le bas de l'axe, comme le
+    // bout du ruban ; ailleurs, un quadrilatère par côté
+    let bouche_de = |k: usize| car.bouches.iter().find(|&&(b, _)| k == b || k == b + 1).map(|&(b, _)| b);
+    for k in 0..nc {
+        let (u, v) = (ext[k], ext[(k + 1) % nc]);
+        match bouche_de(k) {
+            Some(b) if b == k => {
+                let (a, q, z) = (ext[b], ext[b + 1], ext[b + 2]);
+                let (a2, q2, z2) = (a + nv, q + nv, z + nv);
+                f.faces.push(vec![q2, z2, z]);
+                f.faces.push(vec![q2, z, q]);
+                f.faces.push(vec![q2, q, a]);
+                f.faces.push(vec![q2, a, a2]);
+            }
+            Some(_) => {}
+            None => f.faces.push(vec![v, u, u + nv, v + nv]),
+        }
+    }
+    if f.volume() < 0.0 {
+        f.faces.iter_mut().for_each(|p| p.reverse());
+    }
+    f
 }
 
 /// Ce qu'une génération de carte (`generer_carte`) garde d'une tuile à l'autre : les
@@ -671,20 +1036,28 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     // Les rubans des chaînes de voies : au sol posés sur le champ de la voirie, une
     // section tous les PAS_RUBAN mètres ; en pont et en tunnel, leur profil et une dalle
     // de OUVRAGE mètres dessous
-    for (t, w) in traces(&champ, b) {
+    let bas_remblai = |g: [f32; 2], d: [f32; 2], c: [f32; 2], hs: [f32; 3], sol: bool| {
+        if sol {
+            [terre(g).min(terre(c)).min(terre(d)).min(hs[0]).min(hs[1]).min(hs[2]) - SOUS; 3]
+        } else {
+            hs.map(|h| h - OUVRAGE)
+        }
+    };
+    let bas_defonce = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS);
+    for (t, w, bouts) in traces(&champ, b) {
         let t = reechantillonner(&t, PAS_RUBAN);
-        let rem = ruban(&t, w, Some(&*champ), |h| h, |g, d, c, hs, sol| {
-            if sol {
-                [terre(g).min(terre(c)).min(terre(d)).min(hs[0]).min(hs[1]).min(hs[2]) - SOUS; 3]
-            } else {
-                hs.map(|h| h - OUVRAGE)
-            }
-        });
+        let bouts = [bouts[0].as_ref(), bouts[1].as_ref()];
+        let rem = ruban(&t, w, bouts, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
-        defonces.push(chaussee(ruban(&t, w, Some(&*champ), |h| h + DEFONCE_HAUT, |_, _, _, hs, _| hs.map(|h| h - DEFONCE_SOUS))));
+        defonces.push(chaussee(ruban(&t, w, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce)));
+    }
+    // Les carrefours simples : une plaque chacun
+    for car in champ.carrefours_dans(b, 10.0) {
+        remblais.push(plaque(car, &champ, |h| h, bas_remblai, |p, h| terre(p).min(h) - SOUS).en(mq::matiere::REMBLAI));
+        defonces.push(chaussee(plaque(car, &champ, |h| h + DEFONCE_HAUT, bas_defonce, |_, h| h - DEFONCE_SOUS)));
     }
     // Les dalles des carrefours : elles bouchent les coins entre les rubans
-    for (pl, w, sol) in carrefours(&r, b) {
+    for (pl, w, sol) in carrefours(&r, &champ, b) {
         let c = [pl.c[0], pl.c[1]];
         let h = |q: [f32; 2]| {
             let propre = pl.h(q[0], q[1]);
