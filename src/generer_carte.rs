@@ -1,5 +1,7 @@
-//! « Générer une map » : la zone de la Matérialisation écrite sur le disque en carte
-//! (`sage-carte`), pour WhiteRoom et S.A.G.E. Chaque tuile est matérialisée
+//! Les cartes : la zone de la Matérialisation, ou le lieu entier, écrits sur le disque
+//! en carte (`sage-carte`), pour WhiteRoom et S.A.G.E. Lancé depuis la section Cartes du
+//! panneau Voir, sans la vue Matérialisation : les tuiles sont faites une à une dans un
+//! fil, sans limite de nombre (rien n'est gardé en mémoire). Chaque tuile est matérialisée
 //! (`materialisation::tuile`), débarrassée de ce qui ne sert qu'à Flow (les volumes de
 //! défonce montrés à part, les murs sur les bords de la tuile et son dessous, pour qu'une
 //! roue ne bute pas d'une tuile à l'autre), rangée en une primitive par matière et
@@ -52,6 +54,18 @@ pub fn arreter() {
     ARRET.store(true, Ordering::Relaxed);
 }
 
+/// La zone qui couvre tout le lieu : son milieu, la demi-diagonale.
+pub fn zone_entiere(d: &Donnees) -> ZoneFine {
+    let [x0, z0, x1, z1] = d.lieu.etendue();
+    let centre = [((x0 + x1) / 2.0) as f32, ((z0 + z1) / 2.0) as f32];
+    ZoneFine { centre, rayon: ((x1 - x0).hypot(z1 - z0) / 2.0) as f32 + 1.0 }
+}
+
+/// Le nom de la carte du lieu entier.
+pub fn nom_entiere(lieu: &str) -> String {
+    format!("{lieu}-entier").replace(' ', "_")
+}
+
 /// Le nom d'une carte de la zone : lieu, rayon et centre.
 pub fn nom_par_defaut(lieu: &str, z: ZoneFine) -> String {
     format!("{lieu}-{:.0}m-{:.0}-{:.0}", z.rayon, z.centre[0], z.centre[1]).replace(' ', "_")
@@ -95,8 +109,8 @@ fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
 }
 
 /// La tuile `cle` en tuile de carte (rien si elle est vide).
-fn tuile(d: &Donnees, cle: Cle) -> Option<sage_carte::Tuile> {
-    let (v, ind, px) = crate::materialisation::tuile(d, cle);
+fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Memoire) -> Option<sage_carte::Tuile> {
+    let (v, ind, px) = crate::materialisation::tuile_carte(d, cle, memoire);
     let b = boite_tuile(d, cle);
     let socle = mq::socle(d);
     let origine = [b[0], 0.0, b[1]];
@@ -172,18 +186,19 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
         let r = (|| -> Result<(), String> {
             std::fs::create_dir_all(dossier.join(sage_carte::TUILES)).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(dossier.join(sage_carte::MATIERES)).map_err(|e| e.to_string())?;
-            let (cles, carte0) = {
+            let (cles, carte0, memoire) = {
                 let d = donnees.read().map_err(|_| "données inaccessibles")?;
                 let cles = tuiles_zone(&d, z);
+                // Bâtiments montés et tracés lissés une fois pour toute la génération
+                // (les tuiles déjà écrites, reprises, ne comptent pas)
+                let a_faire: Vec<Cle> = cles.iter().copied().filter(|&k| !dossier.join(sage_carte::nom_tuile(k)).exists()).collect();
+                let memoire = crate::materialisation::Memoire::pour(&d, &a_faire);
                 let (_, _, c) = d.monde();
                 let cote = c / (1u32 << crate::relief3d::niveau_fin(&d)) as f32;
                 let h = d.lieu.relief(z.centre[0] as f64, z.centre[1] as f64) as f32;
                 let carte = sage_carte::Carte { nom: nom.clone(), lieu: lieu.clone(), lat: d.lieu.lat, lon: d.lieu.lon, centre: z.centre, rayon: z.rayon, cote, depart: [z.centre[0], h + 2.0, z.centre[1]], matieres: matieres(&matieres_flow), tuiles: Vec::new() };
-                (cles, carte)
+                (cles, carte, memoire)
             };
-            if cles.len() > crate::relief3d::ZONE_MAX {
-                return Err(format!("trop de tuiles ({}, au plus {})", cles.len(), crate::relief3d::ZONE_MAX));
-            }
             maj(&|e| e.total = cles.len());
             // Les matières : réglages et images copiés
             for m in &carte0.matieres {
@@ -218,7 +233,7 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                 let t = {
                     let d = donnees.read().map_err(|_| "données inaccessibles")?;
                     let _s = crate::suivi::tache("carte (tuile)");
-                    tuile(&d, cle)
+                    tuile(&d, cle, &memoire)
                 };
                 if let Some(t) = t {
                     let en = entree(&t, b);

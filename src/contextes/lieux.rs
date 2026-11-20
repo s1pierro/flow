@@ -1437,6 +1437,19 @@ impl Lieux {
         carte.dessiner(cx, zone, &vue);
         cx.clip(Some(zone));
         let accent = cx.couleurs().accent;
+        // Le cercle de la zone des cartes (et de la Matérialisation)
+        if self.outil == VOIR {
+            if let Some(c) = self.zone_centre {
+                let n = 96;
+                let p = |k: usize| {
+                    let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                    vue.ecran(zone, c[0] + self.zone_rayon * a.cos(), c[1] + self.zone_rayon * a.sin())
+                };
+                for k in 0..n {
+                    cx.dl.line(p(k), p(k + 1), 2.0 * d, accent);
+                }
+            }
+        }
         // Ce qui est choisi
         if let Ok(dn) = carte.donnees.read() {
             match self.choix {
@@ -1740,33 +1753,6 @@ impl Lieux {
                     if cx.button(&mut b, sub_id(base, 672), "Recentrer sur le point visé") {
                         self.zone_centre = self.trois_d.as_ref().map(|r| [r.camera.cible[0], r.camera.cible[2]]);
                     }
-                    // « Générer une map » : la zone écrite en carte (`sage-carte`) dans
-                    // Flow/cartes, pour WhiteRoom et S.A.G.E.
-                    {
-                        let zone = self.zone_centre.map(|centre| crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon });
-                        let lieu = self.chemin.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "lieu".into());
-                        let etat = crate::generer_carte::etat();
-                        let tourne = etat.as_ref().is_some_and(|e| !e.fini);
-                        if tourne {
-                            if cx.button(&mut b, sub_id(base, 675), "Arrêter la génération") {
-                                crate::generer_carte::arreter();
-                            }
-                        } else if let (Some(z), Some(flow)) = (zone, c.dossier.clone()) {
-                            if cx.button(&mut b, sub_id(base, 674), "Générer une map") {
-                                let nom = crate::generer_carte::nom_par_defaut(&lieu, z);
-                                crate::generer_carte::lancer(carte.donnees.clone(), z, &flow, lieu.clone(), nom);
-                            }
-                        }
-                        if let Some(e) = etat {
-                            let lieu_carte = format!("Flow/{}/{}", crate::generer_carte::DOSSIER, e.nom);
-                            let texte = match (&e.erreur, e.fini) {
-                                (Some(m), _) => format!("Génération {m} : {} tuiles sur {} dans {lieu_carte} (relancer reprend où elle en était).", e.faites, e.total),
-                                (None, true) => format!("Carte écrite dans {lieu_carte} : {} tuiles, {} triangles, en {:.0} s{}.", e.total, e.triangles, e.duree, if e.reprises > 0 { format!(" ({} reprises)", e.reprises) } else { String::new() }),
-                                (None, false) => format!("Génération de {lieu_carte} : {} tuiles sur {}, {} triangles…", e.faites, e.total, e.triangles),
-                            };
-                            cx.paragraph(&mut b, &texte);
-                        }
-                    }
                     // Les bâtiments en volumes fermés, avant de les unir au terrain
                     cx.toggle(&mut b, sub_id(base, 673), "Bâtiments (volumes fermés)", &mut self.bati_mat);
                     if self.bati_mat {
@@ -1806,6 +1792,10 @@ impl Lieux {
                     }
                     carte.tout_retoucher();
                 }
+                // Les cartes pour WhiteRoom et S.A.G.E. (`sage-carte`) : la zone ou le lieu
+                // entier matérialisés tuile par tuile dans un fil et écrits dans
+                // Flow/cartes, sans passer par la vue Matérialisation
+                self.panneau_cartes(cx, &mut b, base, c.dossier.clone());
                 cx.section(&mut b, "Sources");
                 cx.paragraph(&mut b, "Relief © IGN · eau, routes, transports, bâtiments, sol © les contributeurs OpenStreetMap (ODbL). Un lieu généré en est dérivé : ne le publiez pas.");
             }
@@ -1861,6 +1851,75 @@ impl Lieux {
 
     /// La sélection de tuiles de la maquette : ne voir qu'elle, son résumé (surface,
     /// éléments du lieu touchés, maillages), la liste de ses tuiles.
+    /// Le point visé : la cible de la caméra en 3D, le milieu de la carte en 2D.
+    fn point_vise(&self) -> Option<[f32; 2]> {
+        match (&self.trois_d, &self.vue) {
+            (Some(r), _) => Some([r.camera.cible[0], r.camera.cible[2]]),
+            (None, Some(v)) => Some([v.cx as f32, v.cz as f32]),
+            _ => None,
+        }
+    }
+
+    /// La section « Cartes » : générer sur le disque la carte de la zone (disque de la
+    /// Matérialisation) ou du lieu entier.
+    fn panneau_cartes(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, base: Id, flow: Option<std::path::PathBuf>) {
+        let Some(carte) = &self.carte else { return };
+        let donnees = carte.donnees.clone();
+        cx.section(b, "Cartes (WhiteRoom, S.A.G.E.)");
+        // Rayon et centre sont ceux de la Matérialisation ; réglés ici quand elle n'est
+        // pas ouverte (le cercle de la zone est tracé sur la carte)
+        let materialisation = self.trois_d.is_some() && self.maquette3d && self.materialisation3d;
+        if !materialisation {
+            cx.slider(b, sub_id(base, 676), "Rayon", &format!("{:.0} m", self.zone_rayon), &mut self.zone_rayon, 50.0, 1500.0);
+            self.zone_rayon = (self.zone_rayon / 25.0).round() * 25.0;
+            if cx.button(b, sub_id(base, 677), "Centrer la zone sur le point visé") {
+                self.zone_centre = self.point_vise();
+            }
+        }
+        // En 2D, la zone se pose au milieu de la carte (son cercle paraît)
+        if self.zone_centre.is_none() && self.trois_d.is_none() {
+            self.zone_centre = self.point_vise();
+        }
+        let centre = self.zone_centre.or_else(|| self.point_vise());
+        let lieu = self.chemin.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "lieu".into());
+        let (zone, entiere, n_zone, n_tout, cote) = {
+            let Ok(d) = donnees.read() else { return };
+            let zone = centre.map(|centre| crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon });
+            let entiere = crate::generer_carte::zone_entiere(&d);
+            let n_zone = zone.map_or(0, |z| crate::relief3d::tuiles_zone(&d, z).len());
+            let n_tout = crate::relief3d::tuiles_zone(&d, entiere).len();
+            let (_, _, c) = d.monde();
+            (zone, entiere, n_zone, n_tout, c / (1u32 << crate::relief3d::niveau_fin(&d)) as f32)
+        };
+        let etat = crate::generer_carte::etat();
+        if etat.as_ref().is_some_and(|e| !e.fini) {
+            if cx.button(b, sub_id(base, 675), "Arrêter la génération") {
+                crate::generer_carte::arreter();
+            }
+        } else if let Some(flow) = flow {
+            cx.paragraph(b, &format!("Tuiles de {cote:.0} m : {} dans la zone ({:.0} m autour de {}), {} pour toute la carte. Une génération arrêtée reprend où elle en était.", n_zone, self.zone_rayon, centre.map_or("—".into(), |c| format!("{:.0} ; {:.0}", c[0], c[1])), n_tout));
+            if let Some(z) = zone {
+                if cx.button(b, sub_id(base, 674), "Générer la zone") {
+                    let nom = crate::generer_carte::nom_par_defaut(&lieu, z);
+                    crate::generer_carte::lancer(donnees.clone(), z, &flow, lieu.clone(), nom);
+                }
+            }
+            if cx.button(b, sub_id(base, 678), "Générer toute la carte") {
+                let nom = crate::generer_carte::nom_entiere(&lieu);
+                crate::generer_carte::lancer(donnees.clone(), entiere, &flow, lieu.clone(), nom);
+            }
+        }
+        if let Some(e) = etat {
+            let lieu_carte = format!("Flow/{}/{}", crate::generer_carte::DOSSIER, e.nom);
+            let texte = match (&e.erreur, e.fini) {
+                (Some(m), _) => format!("Génération {m} : {} tuiles sur {} dans {lieu_carte} (relancer reprend où elle en était).", e.faites, e.total),
+                (None, true) => format!("Carte écrite dans {lieu_carte} : {} tuiles, {} triangles, en {:.0} s{}.", e.total, e.triangles, e.duree, if e.reprises > 0 { format!(" ({} reprises)", e.reprises) } else { String::new() }),
+                (None, false) => format!("Génération de {lieu_carte} : {} tuiles sur {}, {} triangles…", e.faites, e.total, e.triangles),
+            };
+            cx.paragraph(b, &texte);
+        }
+    }
+
     fn panneau_selection(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, base: Id) {
         let en_maquette = self.trois_d.is_some() && self.maquette3d;
         if !en_maquette {

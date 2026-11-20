@@ -24,6 +24,8 @@
 use crate::booleens::{Forme, Op};
 use crate::carte::{Cle, Donnees};
 use crate::maquette as mq;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use sage_reel::reseau::{Passage, Reseau};
 
 /// Des volumes disjoints en une seule forme (plusieurs coques).
@@ -308,17 +310,21 @@ fn carrefours(r: &Reseau, b: [f32; 4]) -> Vec<([f32; 3], f32, bool)> {
 
 /// Les morceaux du tracé lissé de chaque route de `passage` qui touchent la boîte `b`
 /// (marge comprise), avec leur demi-largeur.
-fn traces(r: &Reseau, b: [f32; 4], passage: Passage) -> Vec<(Vec<[f32; 3]>, f32)> {
+fn traces(r: &Reseau, b: [f32; 4], passage: Passage, memoire: Option<&Memoire>) -> Vec<(Vec<[f32; 3]>, f32)> {
     let marge = 10.0;
     let mut v = Vec::new();
-    for a in r.aretes.iter().filter(|a| a.passage == passage && a.genre != sage_reel::PIETONNE) {
+    for (k, a) in r.aretes.iter().enumerate().filter(|(_, a)| a.passage == passage && a.genre != sage_reel::PIETONNE) {
         let w = (a.largeur * 0.5).max(1.0);
         let m = marge + 2.0 * w;
         let dedans = |p: [f32; 3], q: [f32; 3]| p[0].max(q[0]) >= b[0] - m && p[0].min(q[0]) <= b[2] + m && p[1].max(q[1]) >= b[1] - m && p[1].min(q[1]) <= b[3] + m;
         if !a.points.iter().any(|p| dedans(*p, *p)) && !a.points.windows(2).any(|s| dedans(s[0], s[1])) {
             continue;
         }
-        let pts = lisser(&a.points, rayon_carrefour(r, a.a), rayon_carrefour(r, a.b));
+        let lisse = || lisser(&a.points, rayon_carrefour(r, a.a), rayon_carrefour(r, a.b));
+        let pts: Arc<Vec<[f32; 3]>> = match memoire.and_then(|m| m.traces.lock().ok()) {
+            Some(mut t) => t.entry(k).or_insert_with(|| Arc::new(lisse())).clone(),
+            None => Arc::new(lisse()),
+        };
         // Les suites de segments qui touchent la boîte
         let mut cur: Vec<[f32; 3]> = Vec::new();
         for s in pts.windows(2) {
@@ -338,9 +344,80 @@ fn traces(r: &Reseau, b: [f32; 4], passage: Passage) -> Vec<(Vec<[f32; 3]>, f32)
     v
 }
 
+/// Ce qu'une génération de carte (`generer_carte`) garde d'une tuile à l'autre : les
+/// volumes fermés des bâtiments (un bâtiment à cheval sur plusieurs tuiles n'est monté
+/// qu'une fois, puis oublié après la dernière tuile qui le touche) et les tracés lissés
+/// des routes.
+#[derive(Default)]
+pub struct Memoire {
+    /// Par bâtiment : son volume (rien s'il est refusé) et les tuiles qui le
+    /// demanderont encore.
+    batiments: Mutex<HashMap<u32, (Option<Arc<Forme>>, u32)>>,
+    /// Les tuiles qui touchent chaque bâtiment, parmi celles de la génération.
+    touches: HashMap<u32, u32>,
+    /// Par arête du réseau : son tracé lissé.
+    traces: Mutex<HashMap<usize, Arc<Vec<[f32; 3]>>>>,
+}
+
+impl Memoire {
+    /// La mémoire d'une génération de ces tuiles.
+    pub fn pour(d: &Donnees, cles: &[Cle]) -> Memoire {
+        let mut touches: HashMap<u32, u32> = HashMap::new();
+        for &cle in cles {
+            if crate::chaussee::pour(d, cle) {
+                for k in d.batiments_dans(crate::carte::boite_tuile(d, cle)) {
+                    *touches.entry(k).or_default() += 1;
+                }
+            }
+        }
+        Memoire { touches, ..Default::default() }
+    }
+
+    /// Les bâtiments en mémoire (pour le suivi).
+    pub fn batiments_gardes(&self) -> usize {
+        self.batiments.lock().map_or(0, |b| b.len())
+    }
+}
+
+/// Le volume fermé du bâtiment `k`, enfoncé de `SOUBASSEMENT` sous le point le plus bas
+/// du terrain sous son contour.
+fn volume_batiment(d: &Donnees, k: u32) -> Option<Forme> {
+    let bt = &d.lieu.batiments[k as usize];
+    if bt.contour.len() < 3 {
+        return None;
+    }
+    let bas = bt.contour.iter().map(|&p| d.lieu.relief(p[0] as f64, p[1] as f64) as f32).fold(f32::MAX, f32::min);
+    let mut bt = bt.clone();
+    bt.pied = bas - SOUBASSEMENT;
+    crate::bati_ferme::volume_accepte(&bt).map(|(f, _)| f.en(mq::matiere::BETON))
+}
+
+/// Le volume du bâtiment `k`, pris dans la mémoire s'il y en a une.
+fn batiment(d: &Donnees, k: u32, memoire: Option<&Memoire>) -> Option<Arc<Forme>> {
+    let Some(m) = memoire else { return volume_batiment(d, k).map(Arc::new) };
+    let Ok(mut b) = m.batiments.lock() else { return volume_batiment(d, k).map(Arc::new) };
+    let e = b.entry(k).or_insert_with(|| (volume_batiment(d, k).map(Arc::new), m.touches.get(&k).copied().unwrap_or(1)));
+    let f = e.0.clone();
+    e.1 = e.1.saturating_sub(1);
+    if e.1 == 0 {
+        b.remove(&k);
+    }
+    f
+}
+
 /// La tuile `cle` matérialisée (sommets, indices, texture) ; hors des tuiles assez
 /// fines pour la chaussée (`chaussee::pour`), celle de la Maquette.
 pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
+    faire(d, cle, true, None)
+}
+
+/// La tuile `cle` pour une carte (`generer_carte`) : sans les volumes de défonce
+/// montrés à part (Flow seul les dessine), avec la mémoire de la génération.
+pub fn tuile_carte(d: &Donnees, cle: Cle, memoire: &Memoire) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
+    faire(d, cle, false, Some(memoire))
+}
+
+fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     if !crate::chaussee::pour(d, cle) {
         let (s, i, p, _) = mq::fabriquer_avec_defonce(d, cle);
         return (s, i, p);
@@ -354,7 +431,7 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     let terre = |p: [f32; 2]| d.lieu.relief(p[0] as f64, p[1] as f64) as f32;
     let (mut remblais, mut defonces) = (Vec::new(), Vec::new());
     for passage in [Passage::Sol, Passage::Pont, Passage::Tunnel] {
-        for (t, w) in traces(&r, b, passage) {
+        for (t, w) in traces(&r, b, passage, memoire) {
             let rem = if passage == Passage::Sol {
                 ruban(&t, w, |h| h, |g, c, d| terre(g).min(terre([c[0], c[1]])).min(terre(d)).min(c[2]) - SOUS)
             } else {
@@ -374,21 +451,9 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     // Les bâtiments qui touchent la tuile, en volumes fermés (`bati_ferme`), enfoncés de
     // `SOUBASSEMENT` : unis avant les routes, dont les défonces (un tunnel) recoupent
     // alors leurs sous-sols
-    let batiments: Vec<Forme> = {
+    let batiments: Vec<Arc<Forme>> = {
         let _t = crate::suivi::tache("bâtiments");
-        d.batiments_dans(b)
-            .into_iter()
-            .filter_map(|k| {
-                let bt = &d.lieu.batiments[k as usize];
-                if bt.contour.len() < 3 {
-                    return None;
-                }
-                let bas = bt.contour.iter().map(|&p| terre(p)).fold(f32::MAX, f32::min);
-                let mut bt = bt.clone();
-                bt.pied = bas - SOUBASSEMENT;
-                crate::bati_ferme::volume_accepte(&bt).map(|(f, _)| f.en(mq::matiere::BETON))
-            })
-            .collect()
+        d.batiments_dans(b).into_iter().filter_map(|k| batiment(d, k, memoire)).collect()
     };
     let socle = mq::socle(d);
     let boite = pave([b[0], socle - 50.0, b[1]], [b[2], 2000.0, b[3]]);
@@ -397,7 +462,7 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
     let mut etapes: Vec<(Op, &Forme)> = rem.iter().map(|m| (Op::Union, m)).collect();
     etapes.extend(epa.iter().map(|m| (Op::Difference, m)));
     etapes.push((Op::Difference, &def));
-    etapes.extend(batiments.iter().map(|f| (Op::Union, f)));
+    etapes.extend(batiments.iter().map(|f| (Op::Union, &**f)));
     etapes.extend(remblais.iter().filter(|f| !f.vide()).map(|f| (Op::Union, f)));
     etapes.extend(defonces.iter().filter(|f| !f.vide()).map(|f| (Op::Difference, f)));
     etapes.push((Op::Intersection, &boite));
@@ -407,7 +472,7 @@ pub fn tuile(d: &Donnees, cle: Cle) -> (Vec<f32>, Vec<u32>, Vec<u8>) {
         Err(_) => solide,
     };
     let (mut v, mut ind) = mq::habiller(d, &f, b);
-    for g in &defonces {
+    for g in defonces.iter().filter(|_| defonces_a_part) {
         let Ok(g) = crate::booleens::operation(g, &boite, Op::Intersection) else { continue };
         let (dv, di, _) = mq::maillage_defonce(&g);
         let base = (v.len() / crate::relief3d::SOMMET) as u32;
