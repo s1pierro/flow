@@ -66,23 +66,31 @@ pub struct Champ {
 
 /// Le côté (m) des cases de l'index des chaînes.
 const CASE_CHAINES: f32 = 64.0;
-/// L'écart de largeur (m) au-delà duquel deux tronçons ne sont pas enchaînés.
+/// L'écart de largeur (m) en deçà duquel deux tronçons s'enchaînent toujours.
 const LARGEUR_ECART: f32 = 0.6;
+/// Au-delà, jusqu'à cet écart (m), ils s'enchaînent si leurs rangs sont voisins (une
+/// même rue qui change de largeur) : la largeur passe de l'une à l'autre en biseau
+/// (0.142 ; avant, deux rubans prolongés et une dalle : marche, éclats).
+const BISEAU_ECART_MAX: f32 = 5.0;
+/// La longueur du biseau (m) par mètre d'écart de largeur.
+const BISEAU_PAR_METRE: f32 = 3.0;
 
 /// Les routes (sans les piétonnes) d'un nœud.
 fn routes(r: &Reseau, n: usize) -> Vec<usize> {
     r.noeuds[n].aretes.iter().copied().filter(|&k| r.aretes[k].genre != sage_reel::PIETONNE).collect()
 }
 
-/// Si le nœud `n` ne relie que deux tronçons de même largeur (une coupure d'OSM,
-/// l'entrée d'un pont ou d'un tunnel) : les deux, qui s'y enchaînent.
+/// Si le nœud `n` ne relie que deux tronçons d'une même rue (une coupure d'OSM,
+/// l'entrée d'un pont ou d'un tunnel, un changement de largeur) : les deux, qui s'y
+/// enchaînent.
 pub fn passage_simple(r: &Reseau, n: usize) -> Option<(usize, usize)> {
     let v = routes(r, n);
     if v.len() != 2 || v[0] == v[1] {
         return None;
     }
     let (a, b) = (&r.aretes[v[0]], &r.aretes[v[1]]);
-    ((a.largeur - b.largeur).abs() < LARGEUR_ECART).then_some((v[0], v[1]))
+    let e = (a.largeur - b.largeur).abs();
+    (e < LARGEUR_ECART || (e <= BISEAU_ECART_MAX && rang(a.genre).abs_diff(rang(b.genre)) <= 1)).then_some((v[0], v[1]))
 }
 
 /// Les chaînes du réseau : (arêtes dans l'ordre, chacune à l'endroit ou non, nœud de
@@ -135,6 +143,67 @@ fn poids(genre: u8) -> f32 {
     }
 }
 
+/// Les largeurs d'une chaîne en biseau à ses changements de largeur (`biseaux` : point
+/// commun, demi-largeur avant, après) : sur `BISEAU_PAR_METRE` mètres par mètre
+/// d'écart, centrés sur le point commun (au plus 45 % des tronçons voisins), des
+/// points ajoutés aux deux bouts du biseau.
+fn biseauter(pts: &mut Vec<[f32; 3]>, codes: &mut Vec<f32>, ws: &mut Vec<f32>, biseaux: &[(usize, f32, f32)]) {
+    let abscisses = |p: &[[f32; 3]]| {
+        let mut s = vec![0.0f32; p.len()];
+        for i in 1..p.len() {
+            s[i] = s[i - 1] + (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+        }
+        s
+    };
+    let s = abscisses(pts);
+    let l = s[s.len() - 1];
+    // Chaque biseau : (centre, demi-longueur, largeur avant, après), borné par les
+    // biseaux voisins et les bouts
+    let mut v: Vec<(f32, f32, f32, f32)> = Vec::new();
+    for (j, &(i, wa, wb)) in biseaux.iter().enumerate() {
+        let avant = if j > 0 { s[i] - s[biseaux[j - 1].0] } else { s[i] };
+        let apres = if j + 1 < biseaux.len() { s[biseaux[j + 1].0] - s[i] } else { l - s[i] };
+        let demi = (BISEAU_PAR_METRE * 2.0 * (wb - wa).abs() / 2.0).min(0.45 * avant).min(0.45 * apres);
+        if demi > 0.05 {
+            v.push((s[i], demi, wa, wb));
+        }
+    }
+    // Les points ajoutés aux bouts des biseaux
+    let mut coupes: Vec<f32> = v.iter().flat_map(|b| [b.0 - b.1, b.0 + b.1]).collect();
+    coupes.sort_by(f32::total_cmp);
+    let (mut p2, mut c2, mut w2) = (Vec::with_capacity(pts.len() + coupes.len()), Vec::with_capacity(pts.len() + coupes.len()), Vec::with_capacity(pts.len() + coupes.len()));
+    let mut k = 0;
+    for i in 0..pts.len() {
+        if i > 0 {
+            while k < coupes.len() && coupes[k] < s[i] {
+                let c = coupes[k];
+                k += 1;
+                if c <= s[i - 1] + 0.05 || c >= s[i] - 0.05 {
+                    continue;
+                }
+                let t = (c - s[i - 1]) / (s[i] - s[i - 1]);
+                p2.push(std::array::from_fn(|q| pts[i - 1][q] + t * (pts[i][q] - pts[i - 1][q])));
+                c2.push(codes[i - 1].max(codes[i]));
+                w2.push(ws[i]);
+            }
+        }
+        p2.push(pts[i]);
+        c2.push(codes[i]);
+        w2.push(ws[i]);
+    }
+    let s2 = abscisses(&p2);
+    for (x, w) in s2.iter().zip(w2.iter_mut()) {
+        for &(c, demi, wa, wb) in &v {
+            if (x - c).abs() < demi {
+                *w = wa + (wb - wa) * (x - (c - demi)) / (2.0 * demi);
+            }
+        }
+    }
+    *pts = p2;
+    *codes = c2;
+    *ws = w2;
+}
+
 fn case(x: f32, z: f32) -> (i32, i32) {
     ((x / CASE).floor() as i32, (z / CASE).floor() as i32)
 }
@@ -146,24 +215,34 @@ impl Champ {
         let mut bouts = Vec::new();
         for (suite, debut, fin) in enchainer(r) {
             bouts.push((debut, fin));
-            let (mut pts, mut codes): (Vec<[f32; 3]>, Vec<f32>) = (Vec::new(), Vec::new());
+            let (mut pts, mut codes, mut ws): (Vec<[f32; 3]>, Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new(), Vec::new());
             let (mut w, mut pd) = (0.0f32, 0.0f32);
+            // Les changements de largeur : (point commun, largeur avant, après)
+            let mut biseaux: Vec<(usize, f32, f32)> = Vec::new();
             for &(k, endroit) in &suite {
                 let a = &r.aretes[k];
                 let c = code_passage(a.passage);
+                let wa = (a.largeur * 0.5).max(1.0);
                 let l: Vec<[f32; 3]> = if endroit { a.points.clone() } else { a.points.iter().rev().copied().collect() };
                 // Le point commun : au sol si l'un des deux l'est (la fin d'une rampe)
                 let saute = usize::from(!pts.is_empty());
                 if saute == 1 {
                     let d = codes.len() - 1;
                     codes[d] = codes[d].min(c);
+                    if (ws[d] - wa).abs() > 1e-3 {
+                        biseaux.push((d, ws[d], wa));
+                    }
                 }
                 pts.extend_from_slice(&l[saute..]);
                 codes.extend(std::iter::repeat_n(c, l.len() - saute));
-                w = w.max((a.largeur * 0.5).max(1.0));
+                ws.extend(std::iter::repeat_n(wa, l.len() - saute));
+                w = w.max(wa);
                 pd = pd.max(poids(a.genre));
             }
-            let points = lisser(&pts, &codes, plan(r, debut), plan(r, fin));
+            if !biseaux.is_empty() {
+                biseauter(&mut pts, &mut codes, &mut ws, &biseaux);
+            }
+            let points = lisser(&pts, &codes, &ws, plan(r, debut), plan(r, fin));
             let mut boite = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
             for p in &points {
                 boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
@@ -248,7 +327,7 @@ impl Champ {
     pub fn h(&self, x: f32, z: f32, niveau: f32) -> Option<f32> {
         let l = self.index.get(&case(x, z))?;
         // Pour chaque voie, son segment le plus proche : (distance, hauteur)
-        let mut proches: Vec<(u32, f32, f32)> = Vec::with_capacity(4);
+        let mut proches: Vec<(u32, f32, f32, f32)> = Vec::with_capacity(4);
         for &(k, i) in l {
             let v = &self.voies[k as usize];
             let n = v.points.len();
@@ -258,30 +337,32 @@ impl Champ {
             let t = if l2 > 1e-12 { (((x - a[0]) * ux + (z - a[1]) * uz) / l2).clamp(0.0, 1.0) } else { 0.0 };
             let p: Pt = std::array::from_fn(|c| a[c] + t * (b[c] - a[c]));
             let mut d = (x - p[0]).hypot(z - p[1]);
+            // La demi-largeur en ce point (en biseau là où la rue change de largeur)
+            let w = p[6];
             // Au-delà d'un bout, le prolongement du ruban (une demi-largeur) compte
             // comme l'emprise : seule la distance en travers compte
             let bout = (i == 0 && t == 0.0) || (i as usize + 2 == n && t == 1.0);
             if bout && l2 > 1e-12 {
                 let ln = l2.sqrt();
                 let long = (((x - p[0]) * ux + (z - p[1]) * uz) / ln).abs();
-                if long <= v.w {
+                if long <= w {
                     d = (((x - a[0]) * uz - (z - a[1]) * ux) / ln).abs();
                 }
             }
-            if d >= v.w + FRANGE {
+            if d >= w + FRANGE {
                 continue;
             }
             let h = p[2] + p[3] * (x - p[0]) + p[4] * (z - p[1]);
             match proches.iter_mut().find(|e| e.0 == k) {
-                Some(e) if d < e.1 => *e = (k, d, h),
+                Some(e) if d - w < e.1 - e.3 => *e = (k, d, h, w),
                 Some(_) => {}
-                None => proches.push((k, d, h)),
+                None => proches.push((k, d, h, w)),
             }
         }
         let (mut s, mut m) = (0.0f32, 0.0f32);
-        for (k, d, h) in proches {
+        for (k, d, h, w) in proches {
             let v = &self.voies[k as usize];
-            let f = if d <= v.w { 1.0 } else { (1.0 - (d - v.w) / FRANGE).powi(2) };
+            let f = if d <= w { 1.0 } else { (1.0 - (d - w) / FRANGE).powi(2) };
             let e = (h - niveau).abs();
             let f = f * if e <= NIVEAU_PLEIN { 1.0 } else { (1.0 - (e - NIVEAU_PLEIN) / (NIVEAU_NUL - NIVEAU_PLEIN)).max(0.0).powi(2) };
             s += f * v.poids * h;

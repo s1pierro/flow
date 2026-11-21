@@ -157,7 +157,8 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
             if l < S_MIN + RESTE {
                 continue 'noeuds;
             }
-            let mut b = Bras { k, debut, pts, s0, u: [1.0, 0.0], w: v.w, ang: 0.0, s: S_MIN };
+            let w = pts[0][6];
+            let mut b = Bras { k, debut, pts, s0, u: [1.0, 0.0], w, ang: 0.0, s: S_MIN };
             let (q, _) = b.a(6.0f32.min(l));
             b.u = norm([q[0] - c[0], q[1] - c[1]]);
             b.ang = b.u[1].atan2(b.u[0]);
@@ -218,7 +219,7 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
             .map(|b| {
                 let (q, d) = b.a(b.s);
                 let o = [q[0], q[1]];
-                (q, d, plus(o, droite(d), b.w), plus(o, gauche(d), b.w))
+                (q, d, plus(o, droite(d), q[6]), plus(o, gauche(d), q[6]))
             })
             .collect();
         // Les sommets : (point, côté de bouche) ; un côté de bouche n'est pas recoupé

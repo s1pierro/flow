@@ -98,8 +98,9 @@ const LISSAGE: f32 = 10.0;
 
 /// Un point d'un tracé prêt pour un ruban : x, z, la hauteur de son axe, la pente en
 /// travers (gx, gz) : un bord à `o` de l'axe est à `h + g·o` ; enfin son passage
-/// (`code_passage` : 0 au sol, 1 en pont, 2 en tunnel).
-pub(crate) type Pt = [f32; 6];
+/// (`code_passage` : 0 au sol, 1 en pont, 2 en tunnel) ; enfin la demi-largeur de la
+/// voie en ce point (0.142 : elle varie en biseau là où la rue change de largeur).
+pub(crate) type Pt = [f32; 7];
 
 /// Le code d'un passage dans un `Pt`.
 pub(crate) fn code_passage(p: Passage) -> f32 {
@@ -232,7 +233,7 @@ pub(crate) fn plan(r: &Reseau, n: usize) -> Option<Plan> {
 /// toutes les routes d'un carrefour s'y recouvrent sans marche, en long comme en
 /// travers ; elle rejoint son profil lissé sur les `LISSAGE` mètres suivants. Des
 /// points sont ajoutés aux limites des parties posées.
-pub(crate) fn lisser(p: &[[f32; 3]], codes: &[f32], pa: Option<Plan>, pb: Option<Plan>) -> Vec<Pt> {
+pub(crate) fn lisser(p: &[[f32; 3]], codes: &[f32], largeurs: &[f32], pa: Option<Plan>, pb: Option<Plan>) -> Vec<Pt> {
     let abscisses = |p: &[[f32; 3]]| {
         let mut s = vec![0.0f32; p.len()];
         for i in 1..p.len() {
@@ -263,7 +264,7 @@ pub(crate) fn lisser(p: &[[f32; 3]], codes: &[f32], pa: Option<Plan>, pb: Option
         })
         .collect();
     // Les points, avec ceux des limites des parties posées
-    let mut q: Vec<([f32; 3], f32, f32)> = Vec::with_capacity(p.len() + 4);
+    let mut q: Vec<([f32; 3], f32, f32, f32)> = Vec::with_capacity(p.len() + 4);
     for i in 0..p.len() {
         if i > 0 {
             let mut coupes = [ra, ra + LISSAGE, long - rb - LISSAGE, long - rb];
@@ -272,14 +273,14 @@ pub(crate) fn lisser(p: &[[f32; 3]], codes: &[f32], pa: Option<Plan>, pb: Option
                 if c > s0[i - 1] + 0.05 && c < s0[i] - 0.05 {
                     let t = (c - s0[i - 1]) / (s0[i] - s0[i - 1]);
                     let h = lisse[i - 1] + t * (lisse[i] - lisse[i - 1]);
-                    q.push(([p[i - 1][0] + t * (p[i][0] - p[i - 1][0]), p[i - 1][1] + t * (p[i][1] - p[i - 1][1]), h], c, codes[i - 1].max(codes[i])));
+                    q.push(([p[i - 1][0] + t * (p[i][0] - p[i - 1][0]), p[i - 1][1] + t * (p[i][1] - p[i - 1][1]), h], c, codes[i - 1].max(codes[i]), largeurs[i - 1] + t * (largeurs[i] - largeurs[i - 1])));
                 }
             }
         }
-        q.push(([p[i][0], p[i][1], lisse[i]], s0[i], codes[i]));
+        q.push(([p[i][0], p[i][1], lisse[i]], s0[i], codes[i], largeurs[i]));
     }
     q.into_iter()
-        .map(|(x, s, code)| {
+        .map(|(x, s, code, w)| {
             let (ha, hb) = (pa.h(x[0], x[1]), pb.h(x[0], x[1]));
             let (h, g) = if ra + rb >= long {
                 // Trop courte : d'un plan à l'autre
@@ -296,7 +297,7 @@ pub(crate) fn lisser(p: &[[f32; 3]], codes: &[f32], pa: Option<Plan>, pb: Option
                 let (f, hn, gn) = if s - ra < long - rb - s { (fa, ha, pa.g) } else { (fb, hb, pb.g) };
                 (hn * (1.0 - f) + f * x[2], [gn[0] * (1.0 - f), gn[1] * (1.0 - f)])
             };
-            [x[0], x[1], h, g[0], g[1], code]
+            [x[0], x[1], h, g[0], g[1], code, w]
         })
         .collect()
 }
@@ -362,14 +363,14 @@ fn reechantillonner(p: &[Pt], pas: f32) -> Vec<Pt> {
 /// L'écart (m) entre deux sections d'un ruban posé sur le champ de la voirie.
 const PAS_RUBAN: f32 = 2.0;
 
-/// Le ruban d'un morceau de tracé de demi-largeur `w` : à chaque point une section en
+/// Le ruban d'un morceau de tracé, de la demi-largeur de chaque point (`Pt`) : à chaque point une section en
 /// travers (bords en onglet) à trois points, bord gauche, axe et bord droit, en haut
 /// comme en bas. Leurs hauteurs : le champ de la voirie (`champ`) s'il y en a,
 /// sinon la pente du point (`Pt`). La section va de `bas(gauche, droite, axe,
 /// [h gauche, h axe, h droite])` à `haut(h)` de chacun ; les deux bouts sont
 /// prolongés de `w` (ils couvrent le carrefour), sauf ceux arrêtés à la bouche d'un
 /// carrefour simple (`bouts`) : leur section est celle de la bouche.
-fn ruban(p: &[Pt], w: f32, bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
+fn ruban(p: &[Pt], bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
     let n = p.len();
     let dir = |a: Pt, b: Pt| {
         let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
@@ -381,14 +382,16 @@ fn ruban(p: &[Pt], w: f32, bouts: [Option<&Bouche>; 2], champ: Option<&crate::ch
     let (d0, d1) = (dir(p[0], p[1]), dir(p[n - 2], p[n - 1]));
     let prolonge = |a: &Pt, d: [f32; 2]| {
         let o = [a[0] + d[0], a[1] + d[1]];
-        [o[0], o[1], hauteur_a(a, o), a[3], a[4], a[5]]
+        [o[0], o[1], hauteur_a(a, o), a[3], a[4], a[5], a[6]]
     };
     let mut q: Vec<Pt> = Vec::with_capacity(n + 2);
     if bouts[0].is_none() {
+        let w = p[0][6];
         q.push(prolonge(&p[0], [-d0[0] * w, -d0[1] * w]));
     }
     q.extend_from_slice(p);
     if bouts[1].is_none() {
+        let w = p[n - 1][6];
         q.push(prolonge(&p[n - 1], [d1[0] * w, d1[1] * w]));
     }
     let mut f = Forme::default();
@@ -417,6 +420,7 @@ fn ruban(p: &[Pt], w: f32, bouts: [Option<&Bouche>; 2], champ: Option<&crate::ch
         }
         // L'onglet : la demi-largeur tenue de part et d'autre du virage
         let c = (t[0] * b[0] + t[1] * b[1]).max(0.5);
+        let w = q[i][6];
         let (nx, nz) = (-t[1] * w / c, t[0] * w / c);
         let (g, m, d) = ([q[i][0] + nx, q[i][1] + nz], [q[i][0], q[i][1]], [q[i][0] - nx, q[i][1] - nz]);
         let hs = [hauteur(&q[i], g), hauteur(&q[i], m), hauteur(&q[i], d)];
@@ -1044,12 +1048,12 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         }
     };
     let bas_defonce = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS);
-    for (t, w, bouts) in traces(&champ, b) {
+    for (t, _, bouts) in traces(&champ, b) {
         let t = reechantillonner(&t, PAS_RUBAN);
         let bouts = [bouts[0].as_ref(), bouts[1].as_ref()];
-        let rem = ruban(&t, w, bouts, Some(&*champ), |h| h, bas_remblai);
+        let rem = ruban(&t, bouts, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
-        defonces.push(chaussee(ruban(&t, w, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce)));
+        defonces.push(chaussee(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce)));
     }
     // Les carrefours simples : une plaque chacun
     for car in champ.carrefours_dans(b, 10.0) {
