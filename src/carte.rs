@@ -266,7 +266,15 @@ impl Donnees {
                 let _t = crate::suivi::tache("nivellement");
                 rs::niveler(&mut r, &c, 50);
             }
-            t.detail(format!("{} nœuds, {} arêtes", r.noeuds.len(), r.aretes.len()));
+            let n = au_sol_les_tunnels_affleurants(&mut r, &self.lieu);
+            // Les tunnels mis au sol gardaient la hauteur d'un tunnel (en tranchée sous le
+            // terrain) : un second nivellement les remet au niveau des rues voisines
+            if n > 0 {
+                let _t = crate::suivi::tache("nivellement (tunnels affleurants au sol)");
+                let c = rs::contraintes(&r, &self.lieu);
+                rs::niveler(&mut r, &c, 50);
+            }
+            t.detail(format!("{} nœuds, {} arêtes, {n} tunnels affleurants mis au sol", r.noeuds.len(), r.aretes.len()));
             Arc::new(r)
         }).clone()
     }
@@ -1409,4 +1417,49 @@ mod tests {
         assert!((m.0 - 100.0).abs() < 1e-3 && (m.1 + 50.0).abs() < 1e-3);
     }
 
+}
+/// La couverture (m de terrain au-dessus) sous laquelle un tunnel n'en est pas un : un
+/// passage couvert, sous un porche, que le nivellement n'a pas pu descendre sous la voie
+/// qu'il croise (il rejoint une rue au sol tout près). Sa défonce, de 3,2 m, ouvrait une
+/// tranchée dans cette voie (0.151).
+const COUVERTURE_MIN: f32 = 2.5;
+
+/// Met au sol les tunnels (d'un portail à l'autre : les arêtes en tunnel liées par leurs
+/// nœuds) dont la couverture n'atteint nulle part `COUVERTURE_MIN` ; rend leur nombre.
+pub fn au_sol_les_tunnels_affleurants(r: &mut sage_reel::reseau::Reseau, l: &Lieu) -> usize {
+    use sage_reel::reseau::Passage;
+    let n = r.aretes.len();
+    let mut chef: Vec<usize> = (0..n).collect();
+    fn racine(c: &mut [usize], mut i: usize) -> usize {
+        while c[i] != i {
+            c[i] = c[c[i]];
+            i = c[i];
+        }
+        i
+    }
+    for no in &r.noeuds {
+        let t: Vec<usize> = no.aretes.iter().copied().filter(|&k| r.aretes[k].passage == Passage::Tunnel).collect();
+        for w in t.windows(2) {
+            let (a, b) = (racine(&mut chef, w[0]), racine(&mut chef, w[1]));
+            chef[a] = b;
+        }
+    }
+    let mut couverture: HashMap<usize, f32> = HashMap::new();
+    for k in 0..n {
+        let a = &r.aretes[k];
+        if a.passage != Passage::Tunnel {
+            continue;
+        }
+        let c = a.points.iter().map(|p| l.relief(p[0] as f64, p[1] as f64) as f32 - p[2]).fold(f32::MIN, f32::max);
+        let e = couverture.entry(racine(&mut chef, k)).or_insert(f32::MIN);
+        *e = e.max(c);
+    }
+    let mut mis = 0;
+    for k in 0..n {
+        if r.aretes[k].passage == Passage::Tunnel && couverture.get(&racine(&mut chef, k)).is_some_and(|&c| c < COUVERTURE_MIN) {
+            r.aretes[k].passage = Passage::Sol;
+            mis += 1;
+        }
+    }
+    mis
 }

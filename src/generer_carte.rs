@@ -351,6 +351,13 @@ pub(crate) fn tuile(d: &Donnees, cle: Cle, memoire: &crate::materialisation::Mem
         if sur_bord || dessous {
             continue;
         }
+        // Les triangles dégénérés (sans surface) : sans normale, ils égarent la
+        // physique (0.151)
+        let (u, w) = ([p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]], [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]]);
+        let c = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+        if c[0] * c[0] + c[1] * c[1] + c[2] * c[2] < 1e-8 {
+            continue;
+        }
         let (k, renum) = par_nom.entry(nom).or_insert_with(|| {
             prims.push(sage_carte::Primitive { matiere: nom.to_string(), ..Default::default() });
             (prims.len() - 1, HashMap::new())

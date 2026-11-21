@@ -2585,7 +2585,7 @@ impl Contexte for Lieux {
         self.chemin.as_deref()
     }
 
-    fn piloter(&mut self, m: &[String], _c: &mut Commun) -> Option<Result<String, String>> {
+    fn piloter(&mut self, m: &[String], c: &mut Commun) -> Option<Result<String, String>> {
         let nombres = || m[1..].iter().map(|s| s.parse::<f32>().map_err(|_| format!("« {s} » n'est pas un nombre"))).collect::<Result<Vec<f32>, String>>();
         let decrire = |c: &Camera| format!("{} {} {} {} {} {}", c.lacet, c.tangage, c.distance, c.cible[0], c.cible[1], c.cible[2]);
         Some(match m[0].as_str() {
@@ -2720,6 +2720,40 @@ impl Contexte for Lieux {
                 _ => Err(format!("outil 0..{}", OUTILS.len() - 1)),
             },
             // La génération de la maquette : « faites total », ou « finie »
+            // Les cartes (WhiteRoom, S.A.G.E.) : « cartes » (l'état), « cartes rayon <m> »,
+            // « cartes centre <x> <z> », « cartes generer [nom] », « cartes arreter »
+            "cartes" => {
+                let nb = |k: usize| m.get(k).and_then(|s| s.parse::<f32>().ok());
+                match m.get(1).map(|s| s.as_str()) {
+                    Some("rayon") => match nb(2) {
+                        Some(r) => self.rayon_cartes = r.clamp(RAYON_CARTES_MIN, RAYON_CARTES_MAX),
+                        None => return Some(Err("cartes rayon <m>".into())),
+                    },
+                    Some("centre") => match (nb(2), nb(3)) {
+                        (Some(x), Some(z)) => self.zone_centre = Some([x, z]),
+                        _ => return Some(Err("cartes centre <x> <z>".into())),
+                    },
+                    Some("arreter") => crate::generer_carte::arreter(),
+                    Some("generer") => {
+                        if crate::generer_carte::en_cours() {
+                            return Some(Err("une génération tourne déjà".into()));
+                        }
+                        let Some(carte) = &self.carte else { return Some(Err("pas de lieu ouvert".into())) };
+                        let Some(flow) = c.dossier.clone() else { return Some(Err("dossier de Flow inconnu".into())) };
+                        let Some(centre) = self.zone_centre.or_else(|| self.point_vise()) else { return Some(Err("pas de centre".into())) };
+                        let z = crate::relief3d::ZoneFine { centre, rayon: self.rayon_cartes };
+                        let lieu = self.chemin.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "lieu".into());
+                        let nom = m.get(2).cloned().unwrap_or_else(|| crate::generer_carte::nom_par_defaut(&lieu, z));
+                        crate::generer_carte::lancer(carte.donnees.clone(), z, &flow, lieu, nom);
+                    }
+                    None => {}
+                    _ => return Some(Err("cartes [rayon <m> | centre <x> <z> | generer [nom] | arreter]".into())),
+                }
+                let etat = crate::generer_carte::etat().map_or("aucune génération".to_string(), |e| {
+                    format!("{} {} : {}/{} tuiles ({} par le renfort, {} reprises), {:.0} s{}", if e.fini { "finie" } else { "en cours" }, e.dossier.display(), e.faites, e.total, e.par_renfort, e.reprises, e.ecoule(), e.erreur.as_ref().map_or(String::new(), |m| format!(" · {m}")))
+                });
+                Ok(format!("rayon {} centre {:?} · {etat}", self.rayon_cartes, self.zone_centre))
+            }
             "generation" => Ok(match self.trois_d.as_ref().and_then(|r| r.generation) {
                 Some((f, t)) => format!("generation {f} {t}"),
                 None => "generation finie".into(),

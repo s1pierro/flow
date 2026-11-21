@@ -360,6 +360,74 @@ fn reechantillonner(p: &[Pt], pas: f32) -> Vec<Pt> {
     v
 }
 
+/// Le rayon des virages d'un tracé, en demi-largeurs de la voie (`arrondir`).
+const ARRONDI: f32 = 1.3;
+/// Le pas angulaire des arcs des virages (degrés), et le virage le plus faible arrondi.
+const ARC_PAS: f32 = 10.0;
+const ARC_MIN: f32 = 8.0;
+
+/// Arrondit les virages d'un tracé en arcs de rayon `ARRONDI` demi-largeurs (moins si
+/// les segments voisins sont trop courts : chaque virage en prend la moitié au plus).
+/// Un coin vif laissait les sections du ruban se croiser côté intérieur (le bord
+/// intérieur repassait derrière lui-même) : le volume retourné y laissait une lame de
+/// terrain sans épaisseur (0.151). Les bouts ne bougent pas (une bouche y est posée).
+fn arrondir(p: &[Pt]) -> Vec<Pt> {
+    let n = p.len();
+    if n < 3 {
+        return p.to_vec();
+    }
+    let lerp = |a: &Pt, b: &Pt, t: f32| -> Pt {
+        let mut q: Pt = std::array::from_fn(|c| a[c] + t * (b[c] - a[c]));
+        q[5] = a[5].max(b[5]);
+        q
+    };
+    let mut v = Vec::with_capacity(n * 3);
+    v.push(p[0]);
+    for i in 1..n - 1 {
+        let (l1, l2) = ((p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]), (p[i + 1][0] - p[i][0]).hypot(p[i + 1][1] - p[i][1]));
+        if l1 < 1e-3 || l2 < 1e-3 {
+            v.push(p[i]);
+            continue;
+        }
+        let a = [(p[i][0] - p[i - 1][0]) / l1, (p[i][1] - p[i - 1][1]) / l1];
+        let b = [(p[i + 1][0] - p[i][0]) / l2, (p[i + 1][1] - p[i][1]) / l2];
+        let phi = (a[0] * b[0] + a[1] * b[1]).clamp(-1.0, 1.0).acos();
+        if phi.to_degrees() < ARC_MIN || phi.to_degrees() > 175.0 {
+            v.push(p[i]);
+            continue;
+        }
+        let tg = (phi / 2.0).tan();
+        let mut r = ARRONDI * p[i][6];
+        let mut t = r * tg;
+        let tmax = 0.5 * l1.min(l2);
+        if t > tmax {
+            t = tmax;
+            r = t / tg;
+        }
+        let debut = lerp(&p[i - 1], &p[i], 1.0 - t / l1);
+        let fin = lerp(&p[i], &p[i + 1], t / l2);
+        // Le centre : du début, vers l'intérieur du virage (la part de b en travers de a)
+        let ab = a[0] * b[0] + a[1] * b[1];
+        let u = [b[0] - a[0] * ab, b[1] - a[1] * ab];
+        let lu = u[0].hypot(u[1]).max(1e-6);
+        let c = [debut[0] + r * u[0] / lu, debut[1] + r * u[1] / lu];
+        let s0 = [debut[0] - c[0], debut[1] - c[1]];
+        let sens = if a[0] * b[1] - a[1] * b[0] > 0.0 { 1.0 } else { -1.0 };
+        let k = (phi.to_degrees() / ARC_PAS).ceil().max(1.0) as usize;
+        for j in 0..=k {
+            let f = j as f32 / k as f32;
+            let th = sens * phi * f;
+            let (co, si) = (th.cos(), th.sin());
+            let mut q = lerp(&debut, &fin, f);
+            q[0] = c[0] + s0[0] * co - s0[1] * si;
+            q[1] = c[1] + s0[0] * si + s0[1] * co;
+            v.push(q);
+        }
+    }
+    v.push(p[n - 1]);
+    v
+}
+
 /// L'écart (m) entre deux sections d'un ruban posé sur le champ de la voirie.
 const PAS_RUBAN: f32 = 2.0;
 
@@ -395,20 +463,44 @@ fn ruban(p: &[Pt], bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voir
         q.push(prolonge(&p[n - 1], [d1[0] * w, d1[1] * w]));
     }
     let mut f = Forme::default();
+    // Une section (gauche, axe, droite) : bas de gauche à droite, haut de droite à
+    // gauche ; `levee` relève le bas
+    let section = |f: &mut Forme, q: &Pt, g: [f32; 2], m: [f32; 2], d: [f32; 2], levee: f32| {
+        let hs = [hauteur(q, g), hauteur(q, m), hauteur(q, d)];
+        let bs = bas(g, d, m, hs, true).map(|b| b + levee);
+        f.sommets.push([g[0], bs[0], g[1]]);
+        f.sommets.push([m[0], bs[1], m[1]]);
+        f.sommets.push([d[0], bs[2], d[1]]);
+        f.sommets.push([d[0], haut(hs[2]), d[1]]);
+        f.sommets.push([m[0], haut(hs[1]), m[1]]);
+        f.sommets.push([g[0], haut(hs[0]), g[1]]);
+    };
+    // Le recouvrement d'une bouche : une section de plus, `RECOUVREMENT` mètres dans le
+    // carrefour, au bas relevé de `LEVEE` (dans le vide de la défonce de la plaque, il
+    // ne se voit pas) : le ruban et la plaque ne se touchent plus face contre face, ce
+    // qui laissait une lame de terrain sans épaisseur à la bouche (0.151)
+    let dedans = |b: &Bouche, voisin: &Pt| {
+        let (ux, uz) = (b.m[0] - voisin[0], b.m[1] - voisin[1]);
+        let l = ux.hypot(uz).max(1e-6);
+        let t = [ux / l * RECOUVREMENT, uz / l * RECOUVREMENT];
+        let pl = |a: [f32; 2]| [a[0] + t[0], a[1] + t[1]];
+        (pl(b.g), pl(b.m), pl(b.d))
+    };
+    let mut sections = 0u32;
+    if let Some(b) = bouts[0] {
+        let (g, m, d) = dedans(b, &q[1]);
+        section(&mut f, &b.q, g, m, d, LEVEE);
+        sections += 1;
+    }
     for i in 0..q.len() {
         // La section d'une bouche : celle du contour du carrefour
         let bouche = if i == 0 { bouts[0] } else if i + 1 == q.len() { bouts[1] } else { None };
         if let Some(b) = bouche {
-            let hs = [hauteur(&b.q, b.g), hauteur(&b.q, b.m), hauteur(&b.q, b.d)];
-            let bs = bas(b.g, b.d, b.m, hs, true);
-            f.sommets.push([b.g[0], bs[0], b.g[1]]);
-            f.sommets.push([b.m[0], bs[1], b.m[1]]);
-            f.sommets.push([b.d[0], bs[2], b.d[1]]);
-            f.sommets.push([b.d[0], haut(hs[2]), b.d[1]]);
-            f.sommets.push([b.m[0], haut(hs[1]), b.m[1]]);
-            f.sommets.push([b.g[0], haut(hs[0]), b.g[1]]);
+            section(&mut f, &b.q, b.g, b.m, b.d, 0.0);
+            sections += 1;
             continue;
         }
+        sections += 1;
         let a = if i > 0 { dir(q[i - 1], q[i]) } else { dir(q[0], q[1]) };
         let b = if i + 1 < q.len() { dir(q[i], q[i + 1]) } else { a };
         let mut t = [a[0] + b[0], a[1] + b[1]];
@@ -433,8 +525,13 @@ fn ruban(p: &[Pt], bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voir
         f.sommets.push([m[0], haut(hs[1]), m[1]]);
         f.sommets.push([g[0], haut(hs[0]), g[1]]);
     }
+    if let Some(b) = bouts[1] {
+        let (g, m, d) = dedans(b, &q[q.len() - 2]);
+        section(&mut f, &b.q, g, m, d, LEVEE);
+        sections += 1;
+    }
     const S: u32 = 6;
-    let m = q.len() as u32;
+    let m = sections;
     for i in 0..m - 1 {
         let (a, b) = (S * i, S * (i + 1));
         for k in 0..S {
@@ -454,6 +551,11 @@ fn ruban(p: &[Pt], bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voir
     }
     f
 }
+
+/// Ce qu'un ruban entre dans le carrefour au-delà de sa bouche (m), et de combien son
+/// bas y est relevé (m) : au-dessus du fond de la défonce de la plaque.
+const RECOUVREMENT: f32 = 0.4;
+const LEVEE: f32 = 0.08;
 
 /// Une dalle de carrefour : un octogone de rayon inscrit `w` centré en `c` (x, z), de
 /// `bas(point)` à `haut(point)` (le champ de la voirie ou le plan du carrefour), aux
@@ -1087,7 +1189,7 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     };
     let bas_defonce = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS);
     for (t, _, bouts) in traces(&champ, b) {
-        let t = reechantillonner(&t, PAS_RUBAN);
+        let t = reechantillonner(&arrondir(&t), PAS_RUBAN);
         let bouts = [bouts[0].as_ref(), bouts[1].as_ref()];
         let rem = ruban(&t, bouts, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
