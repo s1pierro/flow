@@ -660,6 +660,31 @@ pub mod matiere {
     pub const CHAUSSEE: u16 = 7;
     /// Les côtés et le dessus de la défonce des voies : le béton clair.
     pub const BETON: u16 = 8;
+    /// Les murs et toits des bâtiments : huit tons de pierre et de gris clair, de
+    /// `BATI` à `BATI + TONS_BATI - 1` ; chaque bâtiment tire le sien de son numéro.
+    pub const BATI: u16 = 9;
+    pub const TONS_BATI: u16 = 8;
+    /// Les tons des bâtiments (le shader et la carte les reprennent), proches du blanc
+    /// cassé : calcaire, pierre de Caen, sable pâle, pierre grise, gris clair, gris perle,
+    /// gris chaud, ocre très pâle.
+    pub const TEINTES_BATI: [[f32; 3]; TONS_BATI as usize] = [
+        [0.92, 0.90, 0.85],
+        [0.91, 0.88, 0.80],
+        [0.89, 0.86, 0.79],
+        [0.85, 0.84, 0.81],
+        [0.88, 0.88, 0.87],
+        [0.93, 0.93, 0.92],
+        [0.87, 0.85, 0.82],
+        [0.91, 0.87, 0.78],
+    ];
+    /// La matière du bâtiment `k` : un ton tiré au hasard, toujours le même pour lui.
+    pub fn bati(k: u32) -> u16 {
+        let mut h = k.wrapping_mul(0x9E37_79B9);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x85EB_CA6B);
+        h ^= h >> 13;
+        BATI + (h % TONS_BATI as u32) as u16
+    }
     /// Le flottant « matière » d'un sommet qui montre la matière `m` (le shader la
     /// teinte : 5,1 le lit, 5,2 la berge…).
     pub fn sommet(m: u16) -> f32 {

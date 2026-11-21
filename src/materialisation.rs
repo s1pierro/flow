@@ -1019,7 +1019,8 @@ fn volume_batiment(d: &Donnees, k: u32) -> Option<Forme> {
     let bas = bt.contour.iter().map(|&p| d.lieu.relief(p[0] as f64, p[1] as f64) as f32).fold(f32::MAX, f32::min);
     let mut bt = bt.clone();
     bt.pied = bas - SOUBASSEMENT;
-    crate::bati_ferme::volume_accepte(&bt).map(|(f, _)| f.en(mq::matiere::BETON))
+    // Un ton de pierre ou de gris clair par bâtiment, avant de les unir
+    crate::bati_ferme::volume_accepte(&bt).map(|(f, _)| f.en(mq::matiere::bati(k)))
 }
 
 /// Le volume du bâtiment `k`, pris dans la mémoire s'il y en a une.

@@ -170,6 +170,15 @@ void main() {
     else if (k == 5) c = vec3(0.62, 0.38, 0.78);
     else if (k == 7) c = vec3(0.24, 0.24, 0.26);
     else if (k == 8) c = vec3(0.82, 0.81, 0.78);
+    // Les bâtiments (9 à 16) : huit tons de pierre et de gris clair (maquette::matiere::TEINTES_BATI)
+    else if (k == 9) c = vec3(0.92, 0.90, 0.85);
+    else if (k == 10) c = vec3(0.91, 0.88, 0.80);
+    else if (k == 11) c = vec3(0.89, 0.86, 0.79);
+    else if (k == 12) c = vec3(0.85, 0.84, 0.81);
+    else if (k == 13) c = vec3(0.88, 0.88, 0.87);
+    else if (k == 14) c = vec3(0.93, 0.93, 0.92);
+    else if (k == 15) c = vec3(0.87, 0.85, 0.82);
+    else if (k == 16) c = vec3(0.91, 0.87, 0.78);
     else c = vec3(0.95, 0.15, 0.15);
     // Le placage : la couche de la matière, répétée tous les `cote` mètres
     // Le dessus du quai (4) : v_m le long de sa ligne et la distance à elle ; la
@@ -185,6 +194,9 @@ void main() {
     } else if (u_avec_matieres == 1 && k == 8) {
       // Le béton clair des côtés et du dessus de la défonce des voies
       c = texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb;
+    } else if (u_avec_matieres == 1 && k >= 9 && k <= 16) {
+      // Les bâtiments : le grain du béton clair, teinté de leur ton
+      c *= texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb / vec3(0.82, 0.81, 0.78);
     }
   }
   if (u_avec_image == 1 && !volume) {

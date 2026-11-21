@@ -219,9 +219,13 @@ fn nom_matiere(f: f32) -> Option<&'static str> {
         HAUT => "haut",
         CHAUSSEE => "chaussee",
         BETON => "beton",
+        m if (BATI..BATI + TONS_BATI).contains(&m) => NOMS_BATI[(m - BATI) as usize],
         _ => "autre",
     })
 }
+
+/// Les noms des tons des bâtiments dans la carte.
+pub const NOMS_BATI: [&str; mq::matiere::TONS_BATI as usize] = ["bati_0", "bati_1", "bati_2", "bati_3", "bati_4", "bati_5", "bati_6", "bati_7"];
 
 /// Les matières de la carte : nom, texture (dans `Flow/matieres`, copiée), côté.
 fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
@@ -231,6 +235,10 @@ fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
     let mut v = vec![sage_carte::Matiere { nom: "sol".into(), texture: String::new(), cote: 0.0 }, sage_carte::Matiere { nom: sage_carte::EAU.into(), texture: String::new(), cote: 0.0 }];
     for (m, tex) in [("lit", "vase-lit"), ("berge", "taille-quai"), ("remblai", "pierre-quai"), ("quai", "paves-quai"), ("quai_mur", "pierre-quai"), ("chaussee", "bitume"), ("beton", "beton-clair")] {
         v.push(sage_carte::Matiere { nom: m.into(), texture: tex.into(), cote: cote(tex) });
+    }
+    // Les bâtiments : le grain du béton clair, teinté de leur ton
+    for m in NOMS_BATI {
+        v.push(sage_carte::Matiere { nom: m.into(), texture: "beton-clair".into(), cote: cote("beton-clair") });
     }
     v
 }
