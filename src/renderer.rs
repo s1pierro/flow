@@ -814,6 +814,32 @@ impl Renderer {
             (gl.glDepthFunc)(LESS);
             (gl.glLineWidth)(1.0);
         }
+        // Les murs semi-transparents (le contour de la zone d'une carte), en dernier
+        if !t.murs.is_empty() {
+            (gl.glDisable)(POLYGON_OFFSET_FILL);
+            (gl.glUseProgram)(self.terrain_program);
+            let u = &self.u_terrain;
+            (gl.glUniformMatrix4fv)(u[0], 1, 0, t.mvp.as_ptr());
+            (gl.glUniform1i)(u[3], 0);
+            (gl.glUniform4f)(u[1], 0.0, 0.0, 1.0, 1.0);
+            (gl.glUniform1f)(u[7], 0.0);
+            (gl.glEnable)(BLEND);
+            (gl.glBlendFunc)(1, 0x0303);
+            (gl.glDepthMask)(0);
+            for (m, c, a) in &t.murs {
+                if m.indices.is_empty() {
+                    continue;
+                }
+                (gl.glUniform3f)(u[4], c[0], c[1], c[2]);
+                (gl.glUniform1f)(u[8], *a);
+                let (vao, n) = self.tampon_de(m, crate::relief3d::SOMMET as i32);
+                (gl.glBindVertexArray)(vao);
+                (gl.glDrawElements)(TRIANGLES, n, UINT, std::ptr::null());
+            }
+            (gl.glDepthMask)(1);
+            (gl.glUniform1f)(u[7], if t.blanc { 1.0 } else { 0.0 });
+            (gl.glUniform1f)(u[8], 1.0);
+        }
         (gl.glDisable)(DEPTH_TEST);
         (gl.glEnable)(BLEND);
         (gl.glViewport)(0, 0, w as i32, h as i32);

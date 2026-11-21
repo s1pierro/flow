@@ -39,6 +39,59 @@ pub struct Etat {
     /// Le renfort (`renfort`) : où il en est, et les tuiles qu'il a faites.
     pub renfort: Option<String>,
     pub par_renfort: usize,
+    /// La zone générée.
+    pub zone: Option<crate::relief3d::ZoneFine>,
+    /// Les tuiles faites : leur clé et d'où elles viennent (`ICI`, `RENFORT`, `REPRISE`).
+    pub tuiles_faites: Vec<(Cle, u8)>,
+    /// Quand chaque tuile a été faite (s depuis le début ; les reprises n'y sont pas).
+    pub instants: Vec<f32>,
+    /// La charge de cet appareil et celle du renfort (`charge::Mesure`).
+    pub charge: Option<crate::charge::Mesure>,
+    pub charge_renfort: Option<crate::charge::Mesure>,
+}
+
+/// D'où vient une tuile faite.
+pub const ICI: u8 = 0;
+pub const RENFORT: u8 = 1;
+pub const REPRISE: u8 = 2;
+
+impl Etat {
+    /// Le temps écoulé depuis le début (s), ou la durée une fois fini.
+    pub fn ecoule(&self) -> f32 {
+        if self.fini {
+            self.duree
+        } else {
+            self.debut.map_or(0.0, |d| d.elapsed().as_secs_f32())
+        }
+    }
+
+    /// La cadence récente (tuiles par seconde, sur les 30 dernières tuiles faites).
+    pub fn cadence(&self) -> Option<f32> {
+        let n = self.instants.len();
+        if n == 0 {
+            return None;
+        }
+        let k = n.min(30);
+        let depuis = if n > k { self.instants[n - k - 1] } else { 0.0 };
+        let dt = (self.instants[n - 1] - depuis).max(1e-3);
+        Some(k as f32 / dt)
+    }
+
+    /// Le temps restant estimé (s), à la cadence récente.
+    pub fn reste(&self) -> Option<f32> {
+        let c = self.cadence()?;
+        Some(self.total.saturating_sub(self.faites) as f32 / c)
+    }
+
+    /// Une tuile faite.
+    fn faite(&mut self, cle: Cle, origine: u8) {
+        self.faites += 1;
+        self.tuiles_faites.push((cle, origine));
+        if origine != REPRISE {
+            let t = self.debut.map_or(0.0, |d| d.elapsed().as_secs_f32());
+            self.instants.push(t);
+        }
+    }
 }
 
 /// Change l'état de la génération.
@@ -103,7 +156,7 @@ fn boucle_renfort(donnees: Arc<RwLock<Donnees>>, lieu: String, file: File, fini:
             Ok(d) => renfort::Lien::ouvrir(a, &d, &lieu, |m| maj(|e| e.renfort = Some(m.to_string()))),
             Err(_) => return,
         };
-        let mut lien = match lien {
+        let lien = match lien {
             Ok(l) => l,
             Err(m) => {
                 maj(|e| e.renfort = Some(m));
@@ -111,53 +164,87 @@ fn boucle_renfort(donnees: Arc<RwLock<Donnees>>, lieu: String, file: File, fini:
                 continue;
             }
         };
-        maj(|e| e.renfort = Some(format!("renfort : {}", a.ip())));
-        while !ARRET.load(Ordering::Relaxed) {
-            let Some(cle) = prendre(&file, true) else { return };
-            let rendre = |file: &File, remettre: bool| {
-                if let Ok(mut f) = file.lock() {
-                    if remettre {
-                        f.0.push_front(cle);
+        // Autant de liens que le renfort a de fils de calcul (le lieu est déjà chez
+        // lui : les liens suivants s'ouvrent vite)
+        let fils = lien.fils;
+        maj(|e| e.renfort = Some(format!("renfort : {} ({} fils)", a.ip(), fils)));
+        let mut autres = Vec::new();
+        for k in 1..fils {
+            let (donnees, lieu, file, carte, dossier, memoire) = (donnees.clone(), lieu.clone(), file.clone(), carte.clone(), dossier.clone(), memoire.clone());
+            autres.push(std::thread::Builder::new().name(format!("carte-renfort-{k}")).spawn(move || {
+                let l = match donnees.read() {
+                    Ok(d) => renfort::Lien::ouvrir(a, &d, &lieu, |_| {}),
+                    Err(_) => return Ok(()),
+                }?;
+                travailler_renfort(l, &donnees, &file, &carte, &dossier, &memoire)
+            }));
+        }
+        let r = travailler_renfort(lien, &donnees, &file, &carte, &dossier, &memoire);
+        let mut perdu = r.err();
+        for t in autres.into_iter().flatten() {
+            if let Ok(Err(m)) = t.join() {
+                perdu.get_or_insert(m);
+            }
+        }
+        match perdu {
+            // La file est vide
+            None => return,
+            Some(m) => maj(|e| e.renfort = Some(format!("renfort perdu ({m}) ; nouvelle recherche…"))),
+        }
+    }
+}
+
+/// Un lien du renfort : lui fait faire des tuiles de la file jusqu'à ce qu'elle soit
+/// vide (Ok) ou que le lien se perde (la tuile en cours revient à la file).
+fn travailler_renfort(mut lien: crate::renfort::Lien, donnees: &RwLock<Donnees>, file: &File, carte: &Mutex<sage_carte::Carte>, dossier: &Path, memoire: &crate::materialisation::Memoire) -> Result<(), String> {
+    while !ARRET.load(Ordering::Relaxed) {
+        let Some(cle) = prendre(file, true) else { return Ok(()) };
+        let rendre = |remettre: bool| {
+            if let Ok(mut f) = file.lock() {
+                if remettre {
+                    f.0.push_front(cle);
+                }
+                f.1 = f.1.saturating_sub(1);
+            }
+        };
+        match lien.tuile(cle) {
+            Ok((mesure, r)) => {
+                let b = match donnees.read() {
+                    Ok(d) => {
+                        memoire.faite_ailleurs(&d, cle);
+                        boite_tuile(&d, cle)
                     }
-                    f.1 = f.1.saturating_sub(1);
-                }
-            };
-            match lien.tuile(cle) {
-                Ok(r) => {
-                    let b = match donnees.read() {
-                        Ok(d) => {
-                            memoire.faite_ailleurs(&d, cle);
-                            boite_tuile(&d, cle)
-                        }
-                        Err(_) => [0.0; 4],
-                    };
-                    let mut triangles = 0;
-                    if let Some((hmin, hmax, n, glb)) = r {
-                        if ecrire_tuile(&dossier.join(sage_carte::nom_tuile(cle)), &glb).is_err() {
-                            rendre(&file, true);
-                            return;
-                        }
-                        triangles = n as usize;
-                        if let Ok(mut c) = carte.lock() {
-                            c.tuiles.push(sage_carte::EntreeTuile { cle, boite: b, hmin, hmax, triangles: n });
-                        }
+                    Err(_) => [0.0; 4],
+                };
+                let mut triangles = 0;
+                if let Some((hmin, hmax, n, glb)) = r {
+                    if let Err(m) = ecrire_tuile(&dossier.join(sage_carte::nom_tuile(cle)), &glb) {
+                        rendre(true);
+                        return Err(m);
                     }
-                    maj(|e| {
-                        e.faites += 1;
-                        e.par_renfort += 1;
-                        e.triangles += triangles;
-                    });
-                    let _ = indexer(&carte, &dossier);
-                    rendre(&file, false);
+                    triangles = n as usize;
+                    if let Ok(mut c) = carte.lock() {
+                        c.tuiles.push(sage_carte::EntreeTuile { cle, boite: b, hmin, hmax, triangles: n });
+                    }
                 }
-                Err(m) => {
-                    rendre(&file, true);
-                    maj(|e| e.renfort = Some(format!("renfort perdu ({m}) ; nouvelle recherche…")));
-                    break;
-                }
+                maj(|e| {
+                    e.faite(cle, RENFORT);
+                    e.par_renfort += 1;
+                    e.triangles += triangles;
+                    if mesure.is_some() {
+                        e.charge_renfort = mesure;
+                    }
+                });
+                let _ = indexer(carte, dossier);
+                rendre(false);
+            }
+            Err(m) => {
+                rendre(true);
+                return Err(m);
             }
         }
     }
+    Ok(())
 }
 
 /// Le bilan des mesures, écrit dans le dossier de la carte.
@@ -324,7 +411,7 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
     let matieres_flow = flow.join("matieres");
     ARRET.store(false, Ordering::Relaxed);
     if let Ok(mut e) = ETAT.lock() {
-        *e = Some(Etat { nom: nom.clone(), dossier: dossier.clone(), debut: Some(std::time::Instant::now()), ..Default::default() });
+        *e = Some(Etat { nom: nom.clone(), dossier: dossier.clone(), debut: Some(std::time::Instant::now()), zone: Some(z), ..Default::default() });
     }
     // L'appareil reste éveillé pendant la génération (rendu à la fin)
     crate::renfort::eveil(true);
@@ -368,7 +455,7 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                         let b = boite_tuile(&*donnees.read().map_err(|_| "données inaccessibles")?, cle);
                         let en = entree(&t, b);
                         maj(|e| {
-                            e.faites += 1;
+                            e.faite(cle, REPRISE);
                             e.reprises += 1;
                             e.triangles += en.triangles as usize;
                         });
@@ -386,22 +473,32 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                 let (donnees, lieu, file, fini, carte, dossier, memoire) = (donnees.clone(), lieu.clone(), file.clone(), fini.clone(), carte.clone(), dossier.clone(), memoire.clone());
                 std::thread::Builder::new().name("carte-renfort".into()).spawn(move || boucle_renfort(donnees, lieu, file, fini, carte, dossier, memoire)).ok()
             };
-            let r = (|| -> Result<(), String> {
+            // Les fils de calcul de cet appareil : autant que de cœurs, chacun ne prend
+            // une tuile que si le régulateur le permet (mémoire, chaleur, réglage)
+            let regul = crate::charge::Regulateur::new();
+            let travail = |i: usize| -> Result<(), String> {
                 loop {
                     if ARRET.load(Ordering::Relaxed) {
                         return Err("arrêtée".into());
                     }
-                    let Some(cle) = prendre(&file, false) else {
-                        // La file est vide : attendre les tuiles encore chez le renfort
-                        // (une tuile perdue revient à la file)
-                        if file.lock().map_or(true, |f| f.1 == 0) {
-                            return Ok(());
+                    // La file est vide : attendre les tuiles encore chez le renfort (une
+                    // tuile perdue revient à la file)
+                    let vide = file.lock().map_or(true, |f| f.0.is_empty());
+                    if vide && file.lock().map_or(true, |f| f.1 == 0) {
+                        return Ok(());
+                    }
+                    if vide || !regul.permis(i) {
+                        if i == 0 {
+                            let m = regul.mesure();
+                            maj(|e| e.charge = Some(m));
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        std::thread::sleep(std::time::Duration::from_millis(250));
                         continue;
-                    };
+                    }
+                    let Some(cle) = prendre(&file, false) else { continue };
                     let chemin = dossier.join(sage_carte::nom_tuile(cle));
                     let (t, b) = {
+                        let _g = regul.commencer();
                         let d = donnees.read().map_err(|_| "données inaccessibles")?;
                         let _s = crate::suivi::tache("carte (tuile)");
                         (tuile(&d, cle, &memoire), boite_tuile(&d, cle))
@@ -417,14 +514,31 @@ pub fn lancer(donnees: Arc<RwLock<Donnees>>, z: ZoneFine, flow: &Path, lieu: Str
                         }
                     }
                     let m = memoire.mesures();
+                    let charge = regul.mesure();
                     maj(|e| {
-                        e.faites += 1;
+                        e.faite(cle, ICI);
                         e.mesures = m.clone();
+                        e.charge = Some(charge);
                     });
                     indexer(&carte, &dossier)?;
                     let _ = std::fs::write(dossier.join(MESURES), m.texte());
                 }
-            })();
+            };
+            let r = std::thread::scope(|sc| {
+                let fils: Vec<_> = (0..crate::charge::coeurs()).map(|i| {
+                    let travail = &travail;
+                    sc.spawn(move || travail(i))
+                }).collect();
+                let mut r = Ok(());
+                for f in fils {
+                    match f.join() {
+                        Ok(Err(m)) if r.is_ok() => r = Err(m),
+                        Err(_) if r.is_ok() => r = Err("un fil de calcul a paniqué".to_string()),
+                        _ => {}
+                    }
+                }
+                r
+            });
             fini.store(true, Ordering::Relaxed);
             if let Some(a) = aide {
                 let _ = a.join();

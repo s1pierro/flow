@@ -216,6 +216,11 @@ pub struct Lieux {
     /// centre (x, z), posé au point visé quand on y entre.
     materialisation3d: bool,
     zone_rayon: f32,
+    /// Le rayon de la zone des cartes (m), à part de celui de la Matérialisation : il
+    /// peut aller bien plus loin (la génération ne garde pas tout en mémoire).
+    rayon_cartes: f32,
+    /// Le mur qui borde la zone des cartes : sa zone, son maillage.
+    mur_cartes: Option<(crate::relief3d::ZoneFine, crate::draw::Maillage3d, crate::draw::Maillage3d)>,
     /// En Matérialisation : les bâtiments en volumes fermés en surimpression.
     bati_mat: bool,
     zone_centre: Option<[f32; 2]>,
@@ -302,6 +307,8 @@ impl Default for Lieux {
             sur: Default::default(),
             materialisation3d: false,
             zone_rayon: 500.0,
+            rayon_cartes: 500.0,
+            mur_cartes: None,
             bati_mat: false,
             zone_centre: None,
             rubrique: None,
@@ -357,6 +364,12 @@ fn ouvrir(e: &Etat) -> Box<dyn Contexte> {
         l.zone_centre = Some([x, z]);
     } else if let Some(r) = e.nombre("zone_rayon") {
         l.zone_rayon = r;
+    }
+    if let Some(n) = e.nombre("fils") {
+        crate::charge::FILS.store(n.max(0.0) as usize, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(r) = e.nombre("rayon_cartes") {
+        l.rayon_cartes = r.clamp(RAYON_CARTES_MIN, RAYON_CARTES_MAX);
     }
     // Les tuiles sélectionnées : « selection = niveau/i/j … »
     l.selection = crate::selection::Selection::lire(e.texte("selection").unwrap_or(""), e.texte("selection_seules") == Some("oui"));
@@ -1351,6 +1364,22 @@ impl Lieux {
             (true, Some(centre)) => Some(crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon }),
             _ => None,
         };
+        // Le mur de la zone des cartes, refait quand elle change
+        let montree = self.zone_cartes_montree();
+        if montree.is_none() {
+            self.mur_cartes = None;
+        } else if self.mur_cartes.as_ref().map(|m| m.0) != montree {
+            if let (Some(z), Some(carte)) = (montree, &self.carte) {
+                if let Ok(d) = carte.donnees.read() {
+                    let (v, i, f) = crate::relief3d::mur_zone(&d, z);
+                    let revision = self.mur_cartes.as_ref().map_or(1, |m| m.1.revision + 1);
+                    let v = std::sync::Arc::new(v);
+                    self.mur_cartes = Some((z, crate::draw::Maillage3d { id: 0x4D55_5200_0000_0001, revision, sommets: v.clone(), indices: std::sync::Arc::new(i) }, crate::draw::Maillage3d { id: 0x4D55_5200_0000_0002, revision, sommets: v, indices: std::sync::Arc::new(f) }));
+                }
+            }
+        }
+        let Some(r) = &mut self.trois_d else { return };
+        r.mur = self.mur_cartes.as_ref().map(|m| (m.1.clone(), m.2.clone()));
         r.placage = placage;
         let a = cx.couleurs().accent;
         r.accent = [a[0] as f32 / 255.0, a[1] as f32 / 255.0, a[2] as f32 / 255.0];
@@ -1443,6 +1472,7 @@ impl Lieux {
             self.recevoir(g, zone);
         }
         let Some(vue) = self.vue else { return };
+        let montree = self.zone_cartes_montree();
         let Some(carte) = &mut self.carte else { return };
         carte.dessiner(cx, zone, &vue);
         cx.clip(Some(zone));
@@ -1457,6 +1487,35 @@ impl Lieux {
                 };
                 for k in 0..n {
                     cx.dl.line(p(k), p(k + 1), 2.0 * d, accent);
+                }
+            }
+        }
+        // La zone des cartes : ses tuiles faites teintées, son contour épais
+        if let Some(z) = montree {
+            if let Ok(dn) = carte.donnees.read() {
+                if let Some(e) = crate::generer_carte::etat().filter(|e| e.zone == Some(z)) {
+                    let mut c = accent;
+                    c[3] = 70;
+                    for &(cle, _) in &e.tuiles_faites {
+                        let bt = crate::carte::boite_tuile(&dn, cle);
+                        let (a, b) = (vue.ecran(zone, bt[0], bt[1]), vue.ecran(zone, bt[2], bt[3]));
+                        let r = Rect::new(a[0].min(b[0]), a[1].min(b[1]), (b[0] - a[0]).abs(), (b[1] - a[1]).abs());
+                        if r.w > 0.5 && r.h > 0.5 {
+                            cx.dl.rrect(r, 0.0, c);
+                        }
+                    }
+                }
+                let cles = crate::relief3d::tuiles_zone(&dn, z);
+                let dans: std::collections::HashSet<(i32, i32)> = cles.iter().map(|c| (c.1, c.2)).collect();
+                let orange = [25, 205, 240, 255];
+                for &cle in &cles {
+                    let bt = crate::carte::boite_tuile(&dn, cle);
+                    let (i, j) = (cle.1, cle.2);
+                    for (v, a, e) in [((i, j - 1), [bt[0], bt[1]], [bt[2], bt[1]]), ((i + 1, j), [bt[2], bt[1]], [bt[2], bt[3]]), ((i, j + 1), [bt[2], bt[3]], [bt[0], bt[3]]), ((i - 1, j), [bt[0], bt[3]], [bt[0], bt[1]])] {
+                        if !dans.contains(&v) {
+                            cx.dl.line(vue.ecran(zone, a[0], a[1]), vue.ecran(zone, e[0], e[1]), 3.0 * d, orange);
+                        }
+                    }
                 }
             }
         }
@@ -1803,7 +1862,7 @@ impl Lieux {
                 // Les cartes pour WhiteRoom et S.A.G.E. (`sage-carte`) : la zone ou le lieu
                 // entier matérialisés tuile par tuile dans un fil et écrits dans
                 // Flow/cartes, sans passer par la vue Matérialisation
-                if rubrique(cx, &mut b, &mut self.rubrique, base, "Cartes (WhiteRoom, S.A.G.E.)") {
+                if rubrique(cx, &mut b, &mut self.rubrique, base, RUBRIQUE_CARTES) {
                     self.panneau_cartes(cx, &mut b, base, c.dossier.clone());
                 }
                 if rubrique(cx, &mut b, &mut self.rubrique, base, "Sources") {
@@ -1863,6 +1922,19 @@ impl Lieux {
     /// La sélection de tuiles de la maquette : ne voir qu'elle, son résumé (surface,
     /// éléments du lieu touchés, maillages), la liste de ses tuiles.
     /// Le point visé : la cible de la caméra en 3D, le milieu de la carte en 2D.
+    /// La zone des cartes à montrer (celle de la génération en cours, sinon celle du
+    /// panneau), quand la rubrique Cartes est ouverte ou qu'une génération tourne.
+    fn zone_cartes_montree(&self) -> Option<crate::relief3d::ZoneFine> {
+        let etat = crate::generer_carte::etat();
+        if let Some(z) = etat.as_ref().filter(|e| !e.fini).and_then(|e| e.zone) {
+            return Some(z);
+        }
+        if self.rubrique != Some(RUBRIQUE_CARTES) {
+            return None;
+        }
+        self.zone_centre.or_else(|| self.point_vise()).map(|centre| crate::relief3d::ZoneFine { centre, rayon: self.rayon_cartes })
+    }
+
     fn point_vise(&self) -> Option<[f32; 2]> {
         match (&self.trois_d, &self.vue) {
             (Some(r), _) => Some([r.camera.cible[0], r.camera.cible[2]]),
@@ -1878,14 +1950,15 @@ impl Lieux {
         let donnees = carte.donnees.clone();
         // Rayon et centre sont ceux de la Matérialisation ; réglés ici quand elle n'est
         // pas ouverte (le cercle de la zone est tracé sur la carte)
-        let materialisation = self.trois_d.is_some() && self.maquette3d && self.materialisation3d;
-        if !materialisation {
-            cx.slider(b, sub_id(base, 676), "Rayon", &format!("{:.0} m", self.zone_rayon), &mut self.zone_rayon, 50.0, 1500.0);
-            self.zone_rayon = (self.zone_rayon / 25.0).round() * 25.0;
-            if cx.button(b, sub_id(base, 677), "Centrer la zone sur le point visé") {
-                self.zone_centre = self.point_vise();
-            }
+        // Le rayon de la carte, à part de celui de la Matérialisation (le centre est
+        // commun) ; le mur cyan en borde les tuiles dans la vue
+        cx.slider(b, sub_id(base, 676), "Rayon de la carte", &format!("{:.0} m", self.rayon_cartes), &mut self.rayon_cartes, RAYON_CARTES_MIN, RAYON_CARTES_MAX);
+        let pas = if self.rayon_cartes > 1500.0 { 100.0 } else { 25.0 };
+        self.rayon_cartes = (self.rayon_cartes / pas).round() * pas;
+        if cx.button(b, sub_id(base, 677), "Centrer la zone sur le point visé") {
+            self.zone_centre = self.point_vise();
         }
+        reglage_fils(cx, b, sub_id(base, 679));
         // En 2D, la zone se pose au milieu de la carte (son cercle paraît)
         if self.zone_centre.is_none() && self.trois_d.is_none() {
             self.zone_centre = self.point_vise();
@@ -1894,7 +1967,7 @@ impl Lieux {
         let lieu = self.chemin.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "lieu".into());
         let (zone, entiere, n_zone, n_tout, cote) = {
             let Ok(d) = donnees.read() else { return };
-            let zone = centre.map(|centre| crate::relief3d::ZoneFine { centre, rayon: self.zone_rayon });
+            let zone = centre.map(|centre| crate::relief3d::ZoneFine { centre, rayon: self.rayon_cartes });
             let entiere = crate::generer_carte::zone_entiere(&d);
             let n_zone = zone.map_or(0, |z| crate::relief3d::tuiles_zone(&d, z).len());
             let n_tout = crate::relief3d::tuiles_zone(&d, entiere).len();
@@ -1907,7 +1980,7 @@ impl Lieux {
                 crate::generer_carte::arreter();
             }
         } else if let Some(flow) = flow {
-            cx.paragraph(b, &format!("Tuiles de {cote:.0} m : {} dans la zone ({:.0} m autour de {}), {} pour toute la carte. Une génération arrêtée reprend où elle en était.", n_zone, self.zone_rayon, centre.map_or("—".into(), |c| format!("{:.0} ; {:.0}", c[0], c[1])), n_tout));
+            cx.paragraph(b, &format!("Tuiles de {cote:.0} m : {} dans la zone ({:.0} m autour de {}), {} pour toute la carte. Une génération arrêtée reprend où elle en était.", n_zone, self.rayon_cartes, centre.map_or("—".into(), |c| format!("{:.0} ; {:.0}", c[0], c[1])), n_tout));
             if let Some(z) = zone {
                 if cx.button(b, sub_id(base, 674), "Générer la zone") {
                     let nom = crate::generer_carte::nom_par_defaut(&lieu, z);
@@ -1924,9 +1997,30 @@ impl Lieux {
             let texte = match (&e.erreur, e.fini) {
                 (Some(m), _) => format!("Génération {m} : {} tuiles sur {} dans {lieu_carte} (relancer reprend où elle en était).", e.faites, e.total),
                 (None, true) => format!("Carte écrite dans {lieu_carte} : {} tuiles, {} triangles, en {:.0} s{}.", e.total, e.triangles, e.duree, if e.reprises > 0 { format!(" ({} reprises)", e.reprises) } else { String::new() }),
-                (None, false) => format!("Génération de {lieu_carte} : {} tuiles sur {}, {} triangles…", e.faites, e.total, e.triangles),
+                (None, false) => format!("Génération de {lieu_carte} en cours."),
             };
             cx.paragraph(b, &texte);
+            // L'avancement : une barre, puis le détail
+            if !e.fini && e.total > 0 {
+                let f = e.faites as f32 / e.total as f32;
+                let col = cx.couleurs();
+                let h = (8.0 * cx.dp).round();
+                let r = Rect::new(b.x, b.y + 4.0 * cx.dp, b.w, h);
+                cx.dl.rrect(r, h / 2.0, col.puce);
+                cx.dl.rrect(Rect::new(r.x, r.y, (r.w * f).max(h), h), h / 2.0, col.accent);
+                b.y += h + 10.0 * cx.dp;
+                let cadence = e.cadence().map_or("—".to_string(), |c| format!("{:.1} tuiles/min", c * 60.0));
+                let reste = e.reste().map_or("—".to_string(), duree);
+                let nouvelles = e.faites - e.reprises;
+                cx.paragraph(b, &format!("{} / {} tuiles ({:.0} %) · {} écoulées · {cadence} · reste ~{reste}", e.faites, e.total, 100.0 * f, duree(e.ecoule())));
+                cx.paragraph(b, &format!("{nouvelles} faites, dont {} par le renfort ; {} reprises ; {} triangles", e.par_renfort, e.reprises, e.triangles));
+                if let Some(m) = &e.charge {
+                    cx.paragraph(b, &format!("Cet appareil : {}", m.texte()));
+                }
+                if let Some(m) = &e.charge_renfort {
+                    cx.paragraph(b, &format!("Renfort : {}", m.texte()));
+                }
+            }
             if let Some(r) = &e.renfort {
                 cx.paragraph(b, &format!("{r}{}", if e.par_renfort > 0 { format!(" · {} tuiles faites par le renfort", e.par_renfort) } else { String::new() }));
             }
@@ -2243,8 +2337,12 @@ impl Lieux {
                     None => "en attente d'une génération".into(),
                 };
                 cx.paragraph(&mut b, &format!("{ou} · {} tuiles faites{}", e.faites, e.message.as_ref().map_or(String::new(), |m| format!(" · {m}"))));
+                if let Some(m) = &e.charge {
+                    cx.paragraph(&mut b, &m.texte());
+                }
             }
         }
+        reglage_fils(cx, &mut b, sub_id(base, 731));
         cx.section(&mut b, "Lieux");
         let liste = self.liste.clone().unwrap_or_default();
         if liste.is_empty() {
@@ -2676,6 +2774,13 @@ impl Contexte for Lieux {
         if self.ordre != crate::carte::ordre_par_defaut() {
             e.mettre("ordre", self.ordre.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
         }
+        if self.rayon_cartes != 500.0 {
+            e.mettre("rayon_cartes", self.rayon_cartes);
+        }
+        let fils = crate::charge::FILS.load(std::sync::atomic::Ordering::Relaxed);
+        if fils != 0 {
+            e.mettre("fils", fils as f32);
+        }
     }
 
     fn anime(&self, _c: &Commun) -> bool {
@@ -2765,6 +2870,36 @@ impl Contexte for Lieux {
         }
         self.barre(cx, c, p);
         String::new()
+    }
+}
+
+/// Le titre de la rubrique des cartes (la zone se montre quand elle est ouverte).
+const RUBRIQUE_CARTES: &str = "Cartes (WhiteRoom, S.A.G.E.)";
+
+/// Le rayon de la zone des cartes (m).
+const RAYON_CARTES_MIN: f32 = 50.0;
+const RAYON_CARTES_MAX: f32 = 5000.0;
+
+/// Le réglage des fils de calcul de cet appareil (génération et renfort) : 0 pour
+/// automatique, sinon de 1 au nombre de cœurs.
+fn reglage_fils(cx: &mut Cx, b: &mut crate::widgets::Body, id: Id) {
+    use std::sync::atomic::Ordering;
+    let coeurs = crate::charge::coeurs();
+    let mut v = crate::charge::FILS.load(Ordering::Relaxed).min(coeurs) as f32;
+    let texte = if v < 0.5 { format!("auto (≤ {})", crate::charge::fils_max()) } else { format!("{v:.0} sur {coeurs}") };
+    cx.slider(b, id, "Fils de calcul", &texte, &mut v, 0.0, coeurs as f32);
+    crate::charge::FILS.store(v.round() as usize, Ordering::Relaxed);
+}
+
+/// Une durée lisible : « 42 s », « 3 min 05 », « 1 h 12 ».
+fn duree(s: f32) -> String {
+    let s = s.max(0.0).round() as u64;
+    if s < 60 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min {:02}", s / 60, s % 60)
+    } else {
+        format!("{} h {:02}", s / 3600, (s % 3600) / 60)
     }
 }
 

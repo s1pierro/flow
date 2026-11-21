@@ -138,6 +138,10 @@ pub struct Terrain3d {
     /// Des traits en surimpression (sommets de 9 flottants, indices deux par deux), de
     /// leur couleur et de leur épaisseur en pixels : le réseau des voies sur la maquette.
     pub traces: Vec<(Maillage3d, [f32; 3], f32)>,
+    /// Des murs semi-transparents (sommets de `SOMMET` flottants), de leur couleur et de
+    /// leur opacité : le contour de la zone d'une carte. Dessinés en dernier, sans
+    /// écrire la profondeur.
+    pub murs: Vec<(Maillage3d, [f32; 3], f32)>,
 }
 
 /// Les textures des matières de la maquette (`placage.rs`) : `couches` images carrées

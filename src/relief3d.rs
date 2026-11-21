@@ -139,6 +139,9 @@ pub struct Relief3d {
     /// La zone de la vue Matérialisation (`ZoneFine`), si on y est : seules ses tuiles, toutes au
     /// niveau le plus fin, montrées une fois toutes faites.
     pub zone: Option<ZoneFine>,
+    /// Le mur qui borde la zone d'une carte (`mur_zone`), dessiné semi-transparent, et
+    /// son faîte.
+    pub mur: Option<(Maillage3d, Maillage3d)>,
     /// Ses tuiles, pour la zone et la retouche de la carte données.
     zone_cles: Option<(ZoneFine, u64, Vec<Cle>)>,
     /// En Matérialisation : les bâtiments en volumes fermés en surimpression
@@ -159,6 +162,59 @@ pub struct Relief3d {
 pub struct ZoneFine {
     pub centre: [f32; 2],
     pub rayon: f32,
+}
+
+/// Le mur qui borde une zone : sa couleur, son opacité, sa hauteur au-dessus du sol (m)
+/// et ce qu'il descend dessous.
+/// (un cyan que rien d'autre n'emploie dans la vue ; son faîte tracé d'un trait franc)
+pub const MUR_COULEUR: [f32; 3] = [0.10, 0.80, 0.95];
+pub const MUR_OPACITE: f32 = 0.25;
+pub const MUR_TRAIT: [f32; 3] = [0.20, 0.95, 1.0];
+pub const MUR_TRAIT_LARGEUR: f32 = 2.5;
+pub const MUR_HAUT: f32 = 50.0;
+pub const MUR_BAS: f32 = 2.0;
+/// Le pas des sommets le long du mur (m) : il suit le relief.
+const MUR_PAS: f32 = 6.0;
+
+/// Le mur semi-transparent qui borde les tuiles de la zone `z` : un pan par côté
+/// extérieur de tuile, de `MUR_BAS` sous le relief à `MUR_HAUT` au-dessus (sommets de
+/// `SOMMET` flottants, matière du relief), et son faîte (indices deux par deux).
+pub fn mur_zone(d: &Donnees, z: ZoneFine) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+    let cles = tuiles_zone(d, z);
+    let dans: HashSet<(i32, i32)> = cles.iter().map(|c| (c.1, c.2)).collect();
+    let (mut v, mut ind, mut faite) = (Vec::new(), Vec::new(), Vec::new());
+    for &cle in &cles {
+        let b = boite_tuile(d, cle);
+        let (i, j) = (cle.1, cle.2);
+        // Les côtés sans voisine dans la zone : (début, fin, normale vers l'extérieur)
+        let cotes = [
+            ((i, j - 1), [b[0], b[1]], [b[2], b[1]], [0.0, -1.0]),
+            ((i + 1, j), [b[2], b[1]], [b[2], b[3]], [1.0, 0.0]),
+            ((i, j + 1), [b[2], b[3]], [b[0], b[3]], [0.0, 1.0]),
+            ((i - 1, j), [b[0], b[3]], [b[0], b[1]], [-1.0, 0.0]),
+        ];
+        for (voisine, a, e, n) in cotes {
+            if dans.contains(&voisine) {
+                continue;
+            }
+            let l = (e[0] - a[0]).hypot(e[1] - a[1]);
+            let k = (l / MUR_PAS).ceil().max(1.0) as usize;
+            let base = (v.len() / SOMMET) as u32;
+            for t in 0..=k {
+                let f = t as f32 / k as f32;
+                let (x, zz) = (a[0] + (e[0] - a[0]) * f, a[1] + (e[1] - a[1]) * f);
+                let h = d.lieu.relief(x as f64, zz as f64) as f32;
+                v.extend_from_slice(&[x, h - MUR_BAS, zz, n[0], 0.0, n[1], 0.0, 0.0, 0.0]);
+                v.extend_from_slice(&[x, h + MUR_HAUT, zz, n[0], 0.0, n[1], 0.0, 0.0, 0.0]);
+            }
+            for t in 0..k as u32 {
+                let (p, q) = (base + 2 * t, base + 2 * t + 2);
+                ind.extend_from_slice(&[p, q, q + 1, p, q + 1, p + 1]);
+                faite.extend_from_slice(&[p + 1, q + 1]);
+            }
+        }
+    }
+    (v, ind, faite)
 }
 
 /// Les tuiles d'une zone fine au plus (au-delà, on ne la matérialise pas : la mémoire).
@@ -234,7 +290,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None, bati_mat: false, bati_mat_faits: HashMap::new(), bati_mat_bilan: (0, 0, 0, 0, 0) }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None, bati_mat: false, bati_mat_faits: HashMap::new(), bati_mat_bilan: (0, 0, 0, 0, 0), mur: None }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -652,7 +708,7 @@ impl Relief3d {
         self.dessinees = morceaux.len();
         self.bati_dessinees = 0;
         let dist = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: faces, blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes, placage: self.placage.clone(), traces });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [dist * 3.0 + 2000.0, dist * 12.0 + 12_000.0], morceaux, bati: faces, blanc: self.blanc, aretes: aretes_sol, aretes_bati: Vec::new(), choix, accent: self.accent, eaux, defonces, defonces_aretes, placage: self.placage.clone(), traces: traces.into_iter().chain(self.mur.iter().map(|m| (m.1.clone(), MUR_TRAIT, MUR_TRAIT_LARGEUR))).collect(), murs: self.mur.iter().map(|m| (m.0.clone(), MUR_COULEUR, MUR_OPACITE)).collect() });
         let zone = zone_cles;
         self.oublier(zone.as_ref());
     }
@@ -814,7 +870,7 @@ impl Relief3d {
         }
         self.dessinees = morceaux.len();
         let d = self.camera.distance;
-        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new(), placage: None, traces: Vec::new() });
+        cx.dl.terrain(Terrain3d { rect: zone, mvp, oeil: self.camera.oeil(), ciel: CIEL, brume: [d * 3.0 + 2000.0, d * 12.0 + 12_000.0], morceaux, bati, blanc: self.blanc, aretes: aretes_sol, aretes_bati, choix: Vec::new(), accent: self.accent, eaux: Vec::new(), defonces: Vec::new(), defonces_aretes: Vec::new(), placage: None, traces: self.mur.iter().map(|m| (m.1.clone(), MUR_TRAIT, MUR_TRAIT_LARGEUR)).collect(), murs: self.mur.iter().map(|m| (m.0.clone(), MUR_COULEUR, MUR_OPACITE)).collect() });
         // Les maillages qui n'ont pas servi depuis longtemps
         if self.batis.len() > GARDES / 2 {
             let mut v: Vec<(u64, Cle)> = self.batis.iter().map(|(k, m)| (m.vu, *k)).collect();

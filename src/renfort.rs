@@ -110,7 +110,12 @@ pub struct EtatRenfort {
     pub lieu: Option<String>,
     pub faites: usize,
     pub message: Option<String>,
+    /// La charge de cet appareil (fils, processeur, mémoire, température).
+    pub charge: Option<crate::charge::Mesure>,
 }
+
+/// Le lieu servi : son empreinte, ses données, sa mémoire de génération.
+type LieuServi = (u64, Arc<RwLock<Donnees>>, Arc<crate::materialisation::Memoire>);
 
 struct Serveur {
     etat: Arc<Mutex<EtatRenfort>>,
@@ -157,12 +162,16 @@ pub fn servir(oui: bool, flow: Option<std::path::PathBuf>) -> Result<(), String>
             }
         });
     }
-    // Le travail : une génération à la fois
+    // Le travail : une connexion par fil de calcul de la génération servie (chacune
+    // fait une tuile à la fois ; le régulateur dit combien calculent ensemble)
     {
         let (etat, arret) = (etat.clone(), arret.clone());
         let _ = std::thread::Builder::new().name("renfort".into()).spawn(move || {
-            let mut lieu: Option<(u64, Arc<RwLock<Donnees>>, crate::materialisation::Memoire)> = None;
+            let lieu: Arc<Mutex<Option<LieuServi>>> = Arc::new(Mutex::new(None));
+            let regul = Arc::new(crate::charge::Regulateur::new());
+            let places: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
             while !arret.load(Ordering::Relaxed) {
+                maj(&etat, |e| e.charge = Some(regul.mesure()));
                 match tcp.accept() {
                     Ok((s, de)) => {
                         let _ = s.set_nonblocking(false);
@@ -170,10 +179,34 @@ pub fn servir(oui: bool, flow: Option<std::path::PathBuf>) -> Result<(), String>
                             e.servie = Some(de);
                             e.message = None;
                         });
-                        let r = servir_generation(s, &etat, &arret, &mut lieu, flow.as_deref());
-                        maj(&etat, |e| {
-                            e.servie = None;
-                            e.message = r.err();
+                        // La place de cette connexion : la première libre
+                        let place = places.lock().map_or(0, |mut p| match p.iter().position(|&x| !x) {
+                            Some(i) => {
+                                p[i] = true;
+                                i
+                            }
+                            None => {
+                                p.push(true);
+                                p.len() - 1
+                            }
+                        });
+                        let (etat, arret, lieu, regul, places, flow) = (etat.clone(), arret.clone(), lieu.clone(), regul.clone(), places.clone(), flow.clone());
+                        let _ = std::thread::Builder::new().name("renfort-fil".into()).spawn(move || {
+                            let r = servir_generation(s, &etat, &arret, &lieu, &regul, place, flow.as_deref());
+                            let reste = places.lock().map_or(0, |mut p| {
+                                if let Some(x) = p.get_mut(place) {
+                                    *x = false;
+                                }
+                                p.iter().filter(|&&x| x).count()
+                            });
+                            maj(&etat, |e| {
+                                if reste == 0 {
+                                    e.servie = None;
+                                }
+                                if let Err(m) = r {
+                                    e.message = Some(m);
+                                }
+                            });
                         });
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(300)),
@@ -193,7 +226,7 @@ fn maj(e: &Mutex<EtatRenfort>, f: impl FnOnce(&mut EtatRenfort)) {
 }
 
 /// Sert une génération jusqu'à ce qu'elle se termine ou se coupe.
-fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &AtomicBool, lieu: &mut Option<(u64, Arc<RwLock<Donnees>>, crate::materialisation::Memoire)>, flow: Option<&std::path::Path>) -> Result<(), String> {
+fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &AtomicBool, lieu: &Mutex<Option<LieuServi>>, regul: &crate::charge::Regulateur, place: usize, flow: Option<&std::path::Path>) -> Result<(), String> {
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let err = |e: std::io::Error| e.to_string();
     // Bonjour : la même version, sinon refus
@@ -206,7 +239,8 @@ fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &Atomic
         let _ = envoyer(&mut s, b'R', version().as_bytes());
         return Err(format!("génération refusée : Flow {v} de l'autre côté, {} ici", version()));
     }
-    envoyer(&mut s, b'O', version().as_bytes()).map_err(err)?;
+    // D'accord : la version, puis le nombre de fils de calcul (autant de connexions)
+    envoyer(&mut s, b'O', format!("{}\n{}", version(), crate::charge::fils_max()).as_bytes()).map_err(err)?;
     let _ = s.set_read_timeout(None);
     loop {
         if arret.load(Ordering::Relaxed) {
@@ -223,13 +257,14 @@ fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &Atomic
                 let h = u64::from_le_bytes(o.get(..8).ok_or("empreinte")?.try_into().unwrap());
                 let nom = String::from_utf8_lossy(&o[8..]).into_owned();
                 let fichier = flow.map(|f| f.join(DOSSIER).join(format!("{h:016x}.reel")));
+                let mut lieu = lieu.lock().map_err(|_| "lieu inaccessible")?;
                 let deja = lieu.as_ref().is_some_and(|l| l.0 == h);
                 let sur_disque = !deja && fichier.as_ref().is_some_and(|f| f.exists());
                 if deja || sur_disque {
                     if sur_disque {
                         maj(etat, |e| e.message = Some(format!("lecture de {nom}…")));
                         let o = std::fs::read(fichier.as_ref().unwrap()).map_err(|e| e.to_string())?;
-                        poser_lieu(lieu, h, &o).ok_or("lieu reçu illisible")?;
+                        poser_lieu(&mut lieu, h, &o).ok_or("lieu reçu illisible")?;
                     }
                     maj(etat, |e| {
                         e.lieu = Some(nom);
@@ -255,19 +290,30 @@ fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &Atomic
                     }
                     let _ = std::fs::write(d.join(format!("{h:016x}.reel")), &o[8..]);
                 }
-                poser_lieu(lieu, h, &o[8..]).ok_or("lieu reçu illisible")?;
+                poser_lieu(&mut *lieu.lock().map_err(|_| "lieu inaccessible")?, h, &o[8..]).ok_or("lieu reçu illisible")?;
                 maj(etat, |e| e.message = None);
                 envoyer(&mut s, b'A', &[]).map_err(err)?;
             }
             // Une tuile : la faire et la rendre
             b'T' => {
                 let cle = cle_de(&o).ok_or("tuile illisible")?;
-                let (_, d, memoire) = lieu.as_ref().ok_or("tuile demandée avant le lieu")?;
+                let (_, d, memoire) = lieu.lock().map_err(|_| "lieu inaccessible")?.clone().ok_or("tuile demandée avant le lieu")?;
+                // Attendre son tour (le régulateur ménage la mémoire et la chaleur)
+                while !regul.permis(place) {
+                    if arret.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(300));
+                }
                 let t = {
+                    let _g = regul.commencer();
                     let d = d.read().map_err(|_| "données inaccessibles")?;
-                    crate::generer_carte::tuile(&d, cle, memoire)
+                    crate::generer_carte::tuile(&d, cle, &memoire)
                 };
+                // La tuile, précédée de la charge de cet appareil
+                let mesure = regul.mesure();
                 let mut r = cle_octets(cle);
+                r.extend_from_slice(&mesure.octets());
                 if let Some(t) = t {
                     let en = crate::generer_carte::entree(&t, [0.0; 4]);
                     r.extend_from_slice(&en.hmin.to_le_bytes());
@@ -276,7 +322,10 @@ fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &Atomic
                     r.extend_from_slice(&sage_carte::glb::ecrire(&t));
                 }
                 envoyer(&mut s, b'F', &r).map_err(err)?;
-                maj(etat, |e| e.faites += 1);
+                maj(etat, |e| {
+                    e.faites += 1;
+                    e.charge = Some(mesure);
+                });
             }
             _ => return Err("message inattendu".into()),
         }
@@ -284,14 +333,14 @@ fn servir_generation(mut s: TcpStream, etat: &Mutex<EtatRenfort>, arret: &Atomic
 }
 
 /// Le lieu reçu (ordre des couches puis octets du lieu), prêt à générer.
-fn poser_lieu(lieu: &mut Option<(u64, Arc<RwLock<Donnees>>, crate::materialisation::Memoire)>, h: u64, o: &[u8]) -> Option<()> {
+fn poser_lieu(lieu: &mut Option<LieuServi>, h: u64, o: &[u8]) -> Option<()> {
     let n = *o.first()? as usize;
     let ordre: Vec<Couche> = o.get(1..1 + n)?.to_vec();
     let l = sage_reel::Lieu::depuis_octets(o.get(1 + n..)?)?;
     let mut d = Donnees::new(l);
     d.ordre = ordre;
     let memoire = crate::materialisation::Memoire::pour(&d, &[]);
-    *lieu = Some((h, Arc::new(RwLock::new(d)), memoire));
+    *lieu = Some((h, Arc::new(RwLock::new(d)), Arc::new(memoire)));
     Some(())
 }
 
@@ -334,6 +383,8 @@ pub fn chercher() -> Option<(SocketAddr, String)> {
 pub struct Lien {
     s: TcpStream,
     pub adresse: SocketAddr,
+    /// Les fils de calcul du renfort (autant de liens à ouvrir).
+    pub fils: usize,
 }
 
 impl Lien {
@@ -349,6 +400,7 @@ impl Lien {
         if g != b'O' {
             return Err(format!("renfort en Flow {}, il faut la {} des deux côtés", String::from_utf8_lossy(&v), version()));
         }
+        let fils = String::from_utf8_lossy(&v).split('\n').nth(1).and_then(|n| n.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 32);
         // Le lieu : son empreinte d'abord
         let octets = d.lieu.octets();
         let mut contenu = vec![d.ordre.len() as u8];
@@ -374,22 +426,25 @@ impl Lien {
             return Err("réponse inattendue du renfort".into());
         }
         let _ = s.set_read_timeout(Some(ATTENTE_TUILE));
-        Ok(Lien { s, adresse: a })
+        Ok(Lien { s, adresse: a, fils })
     }
 
-    /// Fait faire la tuile `cle` : rien si elle est vide, sinon (hmin, hmax, triangles,
-    /// GLB).
-    pub fn tuile(&mut self, cle: Cle) -> Result<Option<(f32, f32, u32, Vec<u8>)>, String> {
+    /// Fait faire la tuile `cle` : la charge du renfort, et rien si la tuile est vide,
+    /// sinon (hmin, hmax, triangles, GLB).
+    #[allow(clippy::type_complexity)]
+    pub fn tuile(&mut self, cle: Cle) -> Result<(Option<crate::charge::Mesure>, Option<(f32, f32, u32, Vec<u8>)>), String> {
         let err = |e: std::io::Error| e.to_string();
         envoyer(&mut self.s, b'T', &cle_octets(cle)).map_err(err)?;
         let (g, o) = recevoir(&mut self.s).map_err(err)?;
         if g != b'F' || cle_de(&o) != Some(cle) {
             return Err("réponse inattendue du renfort".into());
         }
-        if o.len() <= 9 {
-            return Ok(None);
+        let mesure = o.get(9..).and_then(crate::charge::Mesure::lire);
+        let k = 9 + crate::charge::Mesure::TAILLE;
+        if o.len() <= k {
+            return Ok((mesure, None));
         }
-        let f = |k: usize| o.get(k..k + 4).map(|b| [b[0], b[1], b[2], b[3]]).ok_or("tuile tronquée");
-        Ok(Some((f32::from_le_bytes(f(9)?), f32::from_le_bytes(f(13)?), u32::from_le_bytes(f(17)?), o[21..].to_vec())))
+        let f = |i: usize| o.get(k + i..k + i + 4).map(|b| [b[0], b[1], b[2], b[3]]).ok_or("tuile tronquée");
+        Ok((mesure, Some((f32::from_le_bytes(f(0)?), f32::from_le_bytes(f(4)?), u32::from_le_bytes(f(8)?), o[k + 12..].to_vec()))))
     }
 }

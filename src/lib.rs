@@ -25,6 +25,7 @@ pub mod remblais_voies;
 pub mod relief3d;
 pub mod bati_ferme;
 pub mod generer_carte;
+pub mod charge;
 pub mod renfort;
 pub mod champ_voirie;
 pub mod carrefours;
