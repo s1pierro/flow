@@ -62,6 +62,11 @@ const SOUS: f32 = 0.3;
 /// laisser de face confondue avec le dessus du remblai) jusqu'à `DEFONCE_HAUT` au-dessus.
 const DEFONCE_HAUT: f32 = 3.2;
 const DEFONCE_SOUS: f32 = 0.05;
+/// Les voies de bus en site propre (le TEOR) ont la priorité : une défonce de plus
+/// sur toute leur chaîne, à travers les carrefours, son fond plus bas de tant (m) que
+/// celui des autres voies. La différence des défonces laisse alors partout le fond le
+/// plus bas : le bitume bordeaux, continu d'un bout à l'autre.
+const PRIORITE_BUS: f32 = 0.02;
 /// L'enfoncement des bâtiments dans la tuile (m) : leur soubassement descend d'autant
 /// sous le point le plus bas du terrain le long de leur contour.
 const SOUBASSEMENT: f32 = 3.0;
@@ -73,6 +78,11 @@ const OUVRAGE: f32 = 1.0;
 /// La matière d'un volume de défonce des voies : son dessous (tourné vers le bas, il
 /// devient le fond, la chaussée) en bitume ; ses côtés et son dessus en béton clair.
 fn chaussee(f: Forme) -> Forme {
+    chaussee_en(f, mq::matiere::CHAUSSEE)
+}
+
+/// Comme `chaussee`, le fond dans la matière `fond` (le bitume bordeaux des voies de bus).
+fn chaussee_en(f: Forme, fond: u16) -> Forme {
     let mut f = f.en(mq::matiere::BETON);
     for k in 0..f.faces.len() {
         let p = &f.faces[k];
@@ -86,7 +96,7 @@ fn chaussee(f: Forme) -> Forme {
         }
         let l = (l2[0] * l2[0] + ny * ny + l2[2] * l2[2]).sqrt();
         if l > 1e-9 && ny / l < -0.6 {
-            f.matieres[k] = mq::matiere::CHAUSSEE;
+            f.matieres[k] = fond;
         }
     }
     f
@@ -613,22 +623,27 @@ fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Ve
 /// même rue enchaînés à travers les nœuds de passage, sol, pont et tunnel compris) qui
 /// touchent la boîte `b` (marge comprise), avec leur demi-largeur et, à leurs bouts, la
 /// bouche d'un carrefour simple où ils s'arrêtent.
-fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Vec<Pt>, f32, [Option<Bouche>; 2])> {
+/// `entieres` : seulement les voies de bus, sur toute leur chaîne (sans les couper aux
+/// bouches des carrefours ni les oublier dans la plaque d'un groupe), sans bouches.
+fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4], entieres: bool) -> Vec<(Vec<Pt>, bool, [Option<Bouche>; 2])> {
     let marge = 10.0;
     let mut v = Vec::new();
     for c in champ.chaines_dans(b, marge) {
+        if entieres && !c.bus {
+            continue;
+        }
         let w = c.w;
         let m = marge + 2.0 * w;
-        let pts = &c.trace;
+        let pts = if entieres { &c.points } else { &c.trace };
         let dedans = |p: &[f32], q: &[f32]| p[0].max(q[0]) >= b[0] - m && p[0].min(q[0]) <= b[2] + m && p[1].max(q[1]) >= b[1] - m && p[1].min(q[1]) <= b[3] + m;
         // Les morceaux d'une suite, la bouche gardée au bout de la chaîne
         let mut pousser = |cur: Vec<Pt>, debut: bool, fin: bool| {
             let ms = morceaux(&cur);
             let n = ms.len();
             for (i, p) in ms.into_iter().enumerate() {
-                let bd = if debut && i == 0 { c.bouches[0] } else { None };
-                let bf = if fin && i + 1 == n { c.bouches[1] } else { None };
-                v.push((p, w, [bd, bf]));
+                let bd = if debut && i == 0 && !entieres { c.bouches[0] } else { None };
+                let bf = if fin && i + 1 == n && !entieres { c.bouches[1] } else { None };
+                v.push((p, c.bus, [bd, bf]));
             }
         };
         // Les suites de segments qui touchent la boîte
@@ -1188,12 +1203,13 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         }
     };
     let bas_defonce = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS);
-    for (t, _, bouts) in traces(&champ, b) {
+    for (t, bus, bouts) in traces(&champ, b, false) {
         let t = reechantillonner(&arrondir(&t), PAS_RUBAN);
         let bouts = [bouts[0].as_ref(), bouts[1].as_ref()];
         let rem = ruban(&t, bouts, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
-        defonces.push(chaussee(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce)));
+        let fond = if bus { mq::matiere::CHAUSSEE_BUS } else { mq::matiere::CHAUSSEE };
+        defonces.push(chaussee_en(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond));
     }
     // Les carrefours simples : une plaque chacun
     for car in champ.carrefours_dans(b, 10.0) {
@@ -1210,6 +1226,14 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         let rem = if sol { dalle(c, w, h, |q| terre(q).min(terre(c)).min(h(q)) - SOUS) } else { dalle(c, w, h, |q| h(q) - OUVRAGE) };
         remblais.push(rem.en(mq::matiere::REMBLAI));
         defonces.push(chaussee(dalle(c, w, |q| h(q) + DEFONCE_HAUT, |q| h(q) - DEFONCE_SOUS)));
+    }
+    // Les voies de bus d'un bout à l'autre, prioritaires (`PRIORITE_BUS`)
+    let bas_bus = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS - PRIORITE_BUS);
+    for (t, _, _) in traces(&champ, b, true) {
+        let t = reechantillonner(&arrondir(&t), PAS_RUBAN);
+        if t.len() >= 2 {
+            defonces.push(chaussee_en(ruban(&t, [None, None], Some(&*champ), |h| h + DEFONCE_HAUT, bas_bus), mq::matiere::CHAUSSEE_BUS));
+        }
     }
     noter("rubans et dalles des routes");
     // Les bâtiments qui touchent la tuile, en volumes fermés (`bati_ferme`), enfoncés de

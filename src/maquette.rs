@@ -664,6 +664,9 @@ pub mod matiere {
     /// `BATI` à `BATI + TONS_BATI - 1` ; chaque bâtiment tire le sien de son numéro.
     pub const BATI: u16 = 9;
     pub const TONS_BATI: u16 = 8;
+    /// La chaussée des voies de bus en site propre (le TEOR à Rouen) : le bitume
+    /// bordeaux.
+    pub const CHAUSSEE_BUS: u16 = BATI + TONS_BATI;
     /// Les tons des bâtiments (le shader et la carte les reprennent), proches du blanc
     /// cassé : calcaire, pierre de Caen, sable pâle, pierre grise, gris clair, gris perle,
     /// gris chaud, ocre très pâle.

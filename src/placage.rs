@@ -20,8 +20,9 @@ pub const COTE: u32 = 512;
 
 /// La matière de la bibliothèque de chaque matière de la maquette, de 1 à `HAUT - 1`,
 /// puis celle de la bordure du quai (la couche `COUCHE_BORDURE`), puis le bitume de la
-/// chaussée (`COUCHE_CHAUSSEE`).
-pub const TABLE: [(u16, &str); 8] = [
+/// chaussée (`COUCHE_CHAUSSEE`), le béton clair (`COUCHE_BETON`), le bitume bordeaux
+/// des voies de bus (`COUCHE_BUS`).
+pub const TABLE: [(u16, &str); 9] = [
     (matiere::LIT, "vase-lit"),
     (matiere::BERGE, "taille-quai"),
     (matiere::REMBLAI, "pierre-quai"),
@@ -30,12 +31,13 @@ pub const TABLE: [(u16, &str); 8] = [
     (matiere::QUAI, "bordure-quai"),
     (matiere::CHAUSSEE, "bitume"),
     (matiere::BETON, "beton-clair"),
+    (matiere::CHAUSSEE_BUS, "bitume-bordeaux"),
 ];
 pub const COUCHE_BORDURE: usize = 5;
 
 /// Les réglages livrés avec Flow (dossier `matieres/` du dépôt), un par nom de `TABLE` :
 /// écrits dans le dossier des matières quand ils y manquent.
-pub const LIVREES: [(&str, &str); 7] = [
+pub const LIVREES: [(&str, &str); 8] = [
     ("vase-lit", include_str!("../matieres/vase-lit.txt")),
     ("taille-quai", include_str!("../matieres/taille-quai.txt")),
     ("pierre-quai", include_str!("../matieres/pierre-quai.txt")),
@@ -43,6 +45,7 @@ pub const LIVREES: [(&str, &str); 7] = [
     ("bordure-quai", include_str!("../matieres/bordure-quai.txt")),
     ("bitume", include_str!("../matieres/bitume.txt")),
     ("beton-clair", include_str!("../matieres/beton-clair.txt")),
+    ("bitume-bordeaux", include_str!("../matieres/bitume-bordeaux.txt")),
 ];
 
 /// Écrit dans `d` les matières livrées qui y manquent.
@@ -57,6 +60,7 @@ fn livrer(d: &Path) {
 }
 pub const COUCHE_CHAUSSEE: usize = 6;
 pub const COUCHE_BETON: usize = 7;
+pub const COUCHE_BUS: usize = 8;
 
 #[derive(Default)]
 struct Etat {
@@ -139,7 +143,7 @@ pub fn textures(dossier: &Path) -> Option<Placage3d> {
                 let mut e = etat().lock().unwrap();
                 e.en_cours = false;
                 e.revision += 1;
-                let mut c = [1.0f32; 8];
+                let mut c = [1.0f32; 9];
                 c[..cotes.len()].copy_from_slice(&cotes);
                 e.pret = Some(Placage3d {
                     image: crate::draw::Image { id: 0x504c_4143_4147_4500, revision: e.revision, largeur: COTE, hauteur: COTE * TABLE.len() as u32, pixels: Arc::new(pixels) },
@@ -183,7 +187,7 @@ mod tests {
         let (px, cotes) = fabriquer(&d);
         assert_eq!(px.len(), (COTE * COTE * 4) as usize * TABLE.len());
         // Les côtés des réglages livrés, et leurs fichiers écrits
-        assert_eq!(cotes[TABLE.len() - 1], sage_matieres::Reglages::lire(LIVREES[6].1).unwrap().cote.max(0.05));
+        assert_eq!(cotes[TABLE.len() - 1], sage_matieres::Reglages::lire(LIVREES[7].1).unwrap().cote.max(0.05));
         assert!(d.join("bitume.txt").exists());
         let _ = std::fs::remove_dir_all(&d);
     }

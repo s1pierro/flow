@@ -1,0 +1,27 @@
+# Matière (sage-matieres) : modifiable à la main
+# Le bitume bordeaux des voies de bus en site propre (le TEOR à Rouen) : un enrobé
+# teinté, sans marquage ni usure,
+# 4 m de côté (une voie de 3 m et 0,5 m d'enrobé de chaque côté), qui se répète en
+# long comme en travers.
+genre = chaussee
+cote = 4
+resolution = 512
+graine = 1
+irregularite = 0.15
+couleur = 352 0.42 0.25
+couleur2 = 340 0.30 0.20
+variation = 0.4
+grain = 0.6
+couleur_joint = 50 0.05 0.9
+relief = 0.5
+voies = 1
+largeur_voie = 3
+accotement = 0.5
+rive = aucun
+axe = aucun
+separation = aucun
+tiret = 2
+espace = 2
+usure = 0
+usure_marquage = 0
+granulat = 10

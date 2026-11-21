@@ -50,6 +50,9 @@ pub struct Chaine {
     /// (`carrefours`), et ces bouches (début, fin).
     pub trace: Vec<Pt>,
     pub bouches: [Option<crate::carrefours::Bouche>; 2],
+    /// Une voie de bus en site propre (le TEOR à Rouen) : chaussée en bitume bordeaux,
+    /// unie à sa voie soeur de l'autre sens (`unir_bus`).
+    pub bus: bool,
 }
 
 pub struct Champ {
@@ -81,6 +84,13 @@ const JEU: f32 = 0.3;
 const SERRAGE_MAX: f32 = 0.5;
 /// Parallèles : à moins de tant de degrés (dans un sens ou l'autre).
 const PARALLELES: f32 = 20.0;
+/// Deux voies de bus parallèles (les deux sens d'un site propre) dont les bords sont à
+/// moins de `UNIR_MAX` mètres : une seule chaussée, chacune élargie vers l'autre jusqu'au
+/// milieu de l'écart, plus `JOINT` de recouvrement.
+const UNIR_MAX: f32 = 2.5;
+const JOINT: f32 = 0.15;
+/// Le pas (m) des points des voies de bus, pour suivre l'écart à la voie soeur.
+const PAS_BUS: f32 = 2.0;
 
 /// Les routes (sans les piétonnes) d'un nœud.
 fn routes(r: &Reseau, n: usize) -> Vec<usize> {
@@ -96,6 +106,10 @@ pub fn passage_simple(r: &Reseau, n: usize) -> Option<(usize, usize)> {
         return None;
     }
     let (a, b) = (&r.aretes[v[0]], &r.aretes[v[1]]);
+    // Une voie de bus ne s'enchaîne qu'à une voie de bus (sa chaussée est bordeaux)
+    if (a.genre == sage_reel::BUS) != (b.genre == sage_reel::BUS) {
+        return None;
+    }
     let e = (a.largeur - b.largeur).abs();
     (e < LARGEUR_ECART || (e <= BISEAU_ECART_MAX && rang(a.genre).abs_diff(rang(b.genre)) <= 1)).then_some((v[0], v[1]))
 }
@@ -254,7 +268,8 @@ fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
                     let Some(l) = index.get(&(ci, cj)) else { continue };
                     for &(k2, j) in l {
                         let k2 = k2 as usize;
-                        if k2 == k {
+                        // Deux voies de bus se recouvrent : elles font une seule chaussée
+                        if k2 == k || (v.bus && voies[k2].bus) {
                             continue;
                         }
                         let (u, w) = (voies[k2].points[j as usize], voies[k2].points[j as usize + 1]);
@@ -313,6 +328,144 @@ fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
     }
 }
 
+/// Les points d'un tracé redécoupés au plus tous les `pas` mètres (le passage du plus
+/// haut des deux bouts).
+fn redecouper(p: &[Pt], pas: f32) -> Vec<Pt> {
+    let mut v = Vec::with_capacity(p.len());
+    for (i, &q) in p.iter().enumerate() {
+        if i > 0 {
+            let a = p[i - 1];
+            let l = (q[0] - a[0]).hypot(q[1] - a[1]);
+            let n = (l / pas).ceil() as usize;
+            for j in 1..n {
+                let t = j as f32 / n as f32;
+                let mut m: Pt = std::array::from_fn(|c| a[c] + t * (q[c] - a[c]));
+                m[5] = a[5].max(q[5]);
+                v.push(m);
+            }
+        }
+        v.push(q);
+    }
+    v
+}
+
+/// Les deux sens d'un site propre de bus en une seule chaussée : chaque point au sol
+/// d'une voie de bus dont une voie de bus parallèle, au même niveau, a son bord à moins
+/// de `UNIR_MAX` mètres du sien est déplacé vers elle et élargi d'autant (son bord
+/// extérieur reste en place, l'intérieur va jusqu'au milieu de l'écart plus `JOINT`),
+/// l'élargissement étalé en pente douce. Deux voies qui se recouvrent déjà restent
+/// telles quelles : le champ leur donne la même hauteur.
+fn unir_bus(voies: &mut [Chaine]) {
+    for v in voies.iter_mut().filter(|v| v.bus) {
+        v.points = redecouper(&v.points, PAS_BUS);
+    }
+    let cos_min = PARALLELES.to_radians().cos();
+    let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
+    for (k, v) in voies.iter().enumerate().filter(|(_, v)| v.bus) {
+        for (i, s) in v.points.windows(2).enumerate() {
+            if !au_sol(&s[0]) || !au_sol(&s[1]) {
+                continue;
+            }
+            let (a, b) = (case(s[0][0].min(s[1][0]), s[0][1].min(s[1][1])), case(s[0][0].max(s[1][0]), s[0][1].max(s[1][1])));
+            for ci in a.0..=b.0 {
+                for cj in a.1..=b.1 {
+                    index.entry((ci, cj)).or_default().push((k as u32, i as u32));
+                }
+            }
+        }
+    }
+    let mut nouvelles: Vec<(usize, Vec<f32>, Vec<[f32; 2]>)> = Vec::new();
+    for (k, v) in voies.iter().enumerate().filter(|(_, v)| v.bus) {
+        let p = &v.points;
+        let n = p.len();
+        if n < 2 {
+            continue;
+        }
+        // L'élargissement de chaque point et la direction de la voie soeur
+        let mut es = vec![0.0f32; n];
+        let mut dirs = vec![[0.0f32; 2]; n];
+        for i in 0..n {
+            let q = p[i];
+            if !au_sol(&q) {
+                continue;
+            }
+            let (a, b) = (p[i.saturating_sub(1)], p[(i + 1).min(n - 1)]);
+            let t = { let (x, z) = (b[0] - a[0], b[1] - a[1]); let l = x.hypot(z).max(1e-6); [x / l, z / l] };
+            let c = case(q[0], q[1]);
+            // La voie soeur la plus proche : (écart des bords, distance, direction)
+            let mut soeur: Option<(f32, f32, [f32; 2])> = None;
+            for ci in c.0 - 1..=c.0 + 1 {
+                for cj in c.1 - 1..=c.1 + 1 {
+                    let Some(l) = index.get(&(ci, cj)) else { continue };
+                    for &(k2, j) in l {
+                        if k2 as usize == k {
+                            continue;
+                        }
+                        let (u, w) = (voies[k2 as usize].points[j as usize], voies[k2 as usize].points[j as usize + 1]);
+                        if (u[2] - q[2]).abs().min((w[2] - q[2]).abs()) > NIVEAU_NUL {
+                            continue;
+                        }
+                        let (x, z) = (w[0] - u[0], w[1] - u[1]);
+                        let l2 = x * x + z * z;
+                        if l2 < 1e-6 || ((x * t[0] + z * t[1]) / l2.sqrt()).abs() < cos_min {
+                            continue;
+                        }
+                        let s = (((q[0] - u[0]) * x + (q[1] - u[1]) * z) / l2).clamp(0.0, 1.0);
+                        let (dx, dz) = (u[0] + s * x - q[0], u[1] + s * z - q[1]);
+                        let d = dx.hypot(dz);
+                        let ecart = d - q[6] - (u[6] + s * (w[6] - u[6]));
+                        if d < 1e-3 || ecart > UNIR_MAX || soeur.is_some_and(|e| e.1 <= d) {
+                            continue;
+                        }
+                        soeur = Some((ecart, d, [dx / d, dz / d]));
+                    }
+                }
+            }
+            if let Some((ecart, _, dir)) = soeur {
+                if ecart > 0.0 {
+                    es[i] = 0.5 * ecart + JOINT;
+                    dirs[i] = dir;
+                }
+            }
+        }
+        if es.iter().all(|&e| e == 0.0) {
+            continue;
+        }
+        // L'élargissement retombe en pente douce là où la voie soeur s'écarte
+        let pente = 0.5 / BISEAU_PAR_METRE;
+        for i in 1..n {
+            let ds = (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+            es[i] = es[i].min(es[i - 1] + ds * pente);
+        }
+        for i in (0..n - 1).rev() {
+            let ds = (p[i + 1][0] - p[i][0]).hypot(p[i + 1][1] - p[i][1]);
+            es[i] = es[i].min(es[i + 1] + ds * pente);
+        }
+        nouvelles.push((k, es, dirs));
+    }
+    for (k, es, dirs) in nouvelles {
+        let v = &mut voies[k];
+        for ((q, e), d) in v.points.iter_mut().zip(es).zip(dirs) {
+            if e <= 0.0 {
+                continue;
+            }
+            // L'axe avance de la moitié de l'élargissement vers la voie soeur, la
+            // demi-largeur en prend autant : le bord extérieur ne bouge pas
+            let o = [0.5 * e * d[0], 0.5 * e * d[1]];
+            q[2] += q[3] * o[0] + q[4] * o[1];
+            q[0] += o[0];
+            q[1] += o[1];
+            q[6] += 0.5 * e;
+            v.w = v.w.max(q[6]);
+        }
+        let mut boite = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for p in &v.points {
+            boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
+        }
+        v.boite = boite;
+    }
+}
+
 fn case(x: f32, z: f32) -> (i32, i32) {
     ((x / CASE).floor() as i32, (z / CASE).floor() as i32)
 }
@@ -326,6 +479,7 @@ impl Champ {
             bouts.push((debut, fin));
             let (mut pts, mut codes, mut ws): (Vec<[f32; 3]>, Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new(), Vec::new());
             let (mut w, mut pd) = (0.0f32, 0.0f32);
+            let bus = suite.iter().all(|&(k, _)| r.aretes[k].genre == sage_reel::BUS);
             // Les changements de largeur : (point commun, largeur avant, après)
             let mut biseaux: Vec<(usize, f32, f32)> = Vec::new();
             for &(k, endroit) in &suite {
@@ -356,9 +510,10 @@ impl Champ {
             for p in &points {
                 boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
             }
-            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None] });
+            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], bus });
         }
         desserrer(&mut voies, &bouts);
+        unir_bus(&mut voies);
         // Les carrefours simples : les chaînes coupées à leurs bouches
         let (carrefours, coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts);
         for ((v, c), &ab) in voies.iter_mut().zip(&coupes).zip(&absorbees) {

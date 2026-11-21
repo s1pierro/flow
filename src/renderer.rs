@@ -139,7 +139,7 @@ uniform sampler2D u_image;
 uniform int u_avec_image;
 uniform highp sampler2DArray u_matieres;
 uniform int u_avec_matieres;
-uniform float u_cotes[8];
+uniform float u_cotes[9];
 uniform float u_bordure;
 uniform vec3 u_couleur;
 uniform vec3 u_ciel;
@@ -179,6 +179,8 @@ void main() {
     else if (k == 14) c = vec3(0.93, 0.93, 0.92);
     else if (k == 15) c = vec3(0.87, 0.85, 0.82);
     else if (k == 16) c = vec3(0.91, 0.87, 0.78);
+    // Le bitume bordeaux des voies de bus (17)
+    else if (k == 17) c = vec3(0.36, 0.11, 0.13);
     else c = vec3(0.95, 0.15, 0.15);
     // Le placage : la couche de la matière, répétée tous les `cote` mètres
     // Le dessus du quai (4) : v_m le long de sa ligne et la distance à elle ; la
@@ -194,6 +196,9 @@ void main() {
     } else if (u_avec_matieres == 1 && k == 8) {
       // Le béton clair des côtés et du dessus de la défonce des voies
       c = texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb;
+    } else if (u_avec_matieres == 1 && k == 17) {
+      // Le bitume bordeaux des voies de bus en site propre
+      c = texture(u_matieres, vec3(v_m / u_cotes[8], 8.0)).rgb;
     } else if (u_avec_matieres == 1 && k >= 9 && k <= 16) {
       // Les bâtiments : le grain du béton clair, teinté de leur ton
       c *= texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb / vec3(0.82, 0.81, 0.78);
@@ -623,7 +628,7 @@ impl Renderer {
             Some(p) if !t.blanc => {
                 self.lier_matieres(p);
                 (gl.glUniform1i)(self.u_matieres[0], 1);
-                (gl.glUniform1fv)(self.u_matieres[1], 8, p.cotes.as_ptr());
+                (gl.glUniform1fv)(self.u_matieres[1], 9, p.cotes.as_ptr());
                 (gl.glUniform1f)(self.u_matieres[2], crate::maquette::BORDURE);
             }
             _ => (gl.glUniform1i)(self.u_matieres[0], 0),
