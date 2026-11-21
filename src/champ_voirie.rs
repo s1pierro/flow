@@ -250,12 +250,13 @@ impl Champ {
             voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None] });
         }
         // Les carrefours simples : les chaînes coupées à leurs bouches
-        let (carrefours, coupes) = crate::carrefours::construire(r, &voies, &bouts);
-        for (v, c) in voies.iter_mut().zip(&coupes) {
-            v.trace = crate::carrefours::couper(&v.points, c);
+        let (carrefours, coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts);
+        for ((v, c), &ab) in voies.iter_mut().zip(&coupes).zip(&absorbees) {
+            // Une chaîne absorbée dans la plaque d'un groupe n'a plus de ruban
+            v.trace = if ab { Vec::new() } else { crate::carrefours::couper(&v.points, c) };
             v.bouches = [c[0].map(|x| x.1), c[1].map(|x| x.1)];
         }
-        let simples = carrefours.iter().map(|c| c.noeud).collect();
+        let simples = carrefours.iter().flat_map(|c| c.noeuds.iter().copied()).collect();
         let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
         for (k, v) in voies.iter().enumerate() {
             // Les bouts comptent jusqu'à leur prolongement (une demi-largeur), frange

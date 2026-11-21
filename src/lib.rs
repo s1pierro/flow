@@ -28,6 +28,7 @@ pub mod generer_carte;
 pub mod renfort;
 pub mod champ_voirie;
 pub mod carrefours;
+pub mod carrefours_groupes;
 pub mod booleens;
 pub mod modifieurs;
 pub mod voirie3d;

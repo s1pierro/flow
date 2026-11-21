@@ -24,12 +24,12 @@ use std::f32::consts::{PI, TAU};
 /// Le rayon (m) des bordures arrondies entre deux bras.
 pub const BORDURE: f32 = 3.0;
 /// La bouche d'un bras : au moins à `S_MIN`, au plus à `S_MAX` mètres du nœud.
-const S_MIN: f32 = 2.0;
-const S_MAX: f32 = 20.0;
+pub(crate) const S_MIN: f32 = 2.0;
+pub(crate) const S_MAX: f32 = 20.0;
 /// Ce que la bouche laisse au-delà de la bordure (m).
-const MARGE: f32 = 0.5;
+pub(crate) const MARGE: f32 = 0.5;
 /// Ce qu'il doit rester d'une chaîne entre ses coupes (m).
-const RESTE: f32 = 3.0;
+pub(crate) const RESTE: f32 = 3.0;
 /// Le plus grand écart (m) entre deux points du contour (hors bouches).
 pub const PAS: f32 = 2.0;
 /// Le pas d'angle des arcs.
@@ -52,42 +52,53 @@ pub struct Bouche {
 /// nœud) et ses bouches : `contour[k..k + 3]` est la section de la bouche (bord, axe,
 /// bord).
 pub struct Carrefour {
-    pub noeud: usize,
+    /// Ses nœuds (un seul pour un carrefour simple, tous ceux d'un groupe).
+    pub noeuds: Vec<usize>,
     pub c: [f32; 2],
-    pub(crate) plan: Plan,
+    /// Les plans de ses nœuds : un point lit le plus proche.
+    pub(crate) plans: Vec<Plan>,
     pub contour: Vec<[f32; 2]>,
+    /// Les trous de la plaque (l'îlot d'un giratoire), en sens indirect.
+    pub trous: Vec<Vec<[f32; 2]>>,
     pub bouches: Vec<(usize, Bouche)>,
     pub boite: [f32; 4],
+}
+
+impl Carrefour {
+    /// Le plan du nœud le plus proche de (x, z).
+    pub(crate) fn plan(&self, x: f32, z: f32) -> &Plan {
+        self.plans.iter().min_by(|a, b| (a.c[0] - x).hypot(a.c[1] - z).total_cmp(&(b.c[0] - x).hypot(b.c[1] - z))).unwrap()
+    }
 }
 
 /// Un bras d'un carrefour : la chaîne, si elle part du nœud (son début), ses points
 /// vers l'extérieur et leurs abscisses, sa direction au nœud, sa demi-largeur, son
 /// angle et sa bouche.
-struct Bras {
-    k: usize,
-    debut: bool,
-    pts: Vec<Pt>,
-    s0: Vec<f32>,
-    u: [f32; 2],
-    w: f32,
-    ang: f32,
-    s: f32,
+pub(crate) struct Bras {
+    pub(crate) k: usize,
+    pub(crate) debut: bool,
+    pub(crate) pts: Vec<Pt>,
+    pub(crate) s0: Vec<f32>,
+    pub(crate) u: [f32; 2],
+    pub(crate) w: f32,
+    pub(crate) ang: f32,
+    pub(crate) s: f32,
 }
 
-fn norm(v: [f32; 2]) -> [f32; 2] {
+pub(crate) fn norm(v: [f32; 2]) -> [f32; 2] {
     let l = v[0].hypot(v[1]).max(1e-9);
     [v[0] / l, v[1] / l]
 }
-fn gauche(d: [f32; 2]) -> [f32; 2] {
+pub(crate) fn gauche(d: [f32; 2]) -> [f32; 2] {
     [-d[1], d[0]]
 }
-fn droite(d: [f32; 2]) -> [f32; 2] {
+pub(crate) fn droite(d: [f32; 2]) -> [f32; 2] {
     [d[1], -d[0]]
 }
-fn plus(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
+pub(crate) fn plus(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
     [a[0] + b[0] * t, a[1] + b[1] * t]
 }
-fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
+pub(crate) fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 /// L'angle de `b` après `a`, dans [0, 2π).
@@ -106,13 +117,13 @@ fn croiser(p: [f32; 2], d: [f32; 2], q: [f32; 2], e: [f32; 2]) -> Option<(f32, f
 }
 
 impl Bras {
-    fn longueur(&self) -> f32 {
+    pub(crate) fn longueur(&self) -> f32 {
         self.s0[self.s0.len() - 1]
     }
 
     /// Le point de tracé à l'abscisse `s` et la direction (vers l'extérieur) du
     /// segment qui le porte.
-    fn a(&self, s: f32) -> (Pt, [f32; 2]) {
+    pub(crate) fn a(&self, s: f32) -> (Pt, [f32; 2]) {
         let j = self.s0.partition_point(|&x| x <= s).clamp(1, self.pts.len() - 1);
         let (a, b) = (&self.pts[j - 1], &self.pts[j]);
         let t = ((s - self.s0[j - 1]) / (self.s0[j] - self.s0[j - 1]).max(1e-9)).clamp(0.0, 1.0);
@@ -126,7 +137,7 @@ impl Bras {
 /// `bouts` : début, fin), ses coupes : (abscisse depuis le bout, bouche) au début et à
 /// la fin.
 #[allow(clippy::type_complexity)]
-pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Vec<Carrefour>, Vec<[Option<(f32, Bouche)>; 2]>) {
+pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Vec<Carrefour>, Vec<[Option<(f32, Bouche)>; 2]>, Vec<bool>) {
     let mut coupes: Vec<[Option<(f32, Bouche)>; 2]> = vec![[None, None]; voies.len()];
     // Les bouts des chaînes à chaque nœud
     let mut aux: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
@@ -134,9 +145,16 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
         aux.entry(a).or_default().push((k, true));
         aux.entry(b).or_default().push((k, false));
     }
+    // 0. Les groupes de nœuds proches, d'abord
+    let mut carrefours = Vec::new();
+    let mut absorbees = vec![false; voies.len()];
+    let en_groupe = crate::carrefours_groupes::construire(r, voies, bouts, &aux, &mut coupes, &mut absorbees, &mut carrefours);
     // 1. Les candidats et leurs bras, les bouches posées
     let mut candidats: HashMap<usize, Vec<Bras>> = HashMap::new();
     'noeuds: for (&n, bouts_n) in &aux {
+        if en_groupe.contains(&n) {
+            continue;
+        }
         let routes: Vec<usize> = r.noeuds[n].aretes.iter().copied().filter(|&k| r.aretes[k].genre != sage_reel::PIETONNE).collect();
         if routes.len() < 3 || bouts_n.len() != routes.len() || routes.iter().any(|&k| r.aretes[k].passage != Passage::Sol) {
             continue;
@@ -195,7 +213,8 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
     // jusqu'au-delà de la bouche
     let coupe_autre = |k: usize, debut: bool| -> f32 {
         let n = if debut { bouts[k].1 } else { bouts[k].0 };
-        candidats.get(&n).and_then(|v| v.iter().find(|b| b.k == k && b.debut != debut)).map_or(0.0, |b| b.s)
+        let groupe = coupes[k][usize::from(debut)].map_or(0.0, |c| c.0);
+        candidats.get(&n).and_then(|v| v.iter().find(|b| b.k == k && b.debut != debut)).map_or(groupe, |b| b.s)
     };
     let valides: Vec<usize> = candidats
         .iter()
@@ -207,7 +226,6 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
         .map(|(&n, _)| n)
         .collect();
     // 3. Les contours
-    let mut carrefours = Vec::new();
     for n in valides {
         let bras = &candidats[&n];
         let Some(pl) = plan(r, n) else { continue };
@@ -357,9 +375,9 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
             bouches.push((k, bo));
             coupes[b.k][usize::from(!b.debut)] = Some((b.s, bo));
         }
-        carrefours.push(Carrefour { noeud: n, c, plan: pl, contour, bouches, boite });
+        carrefours.push(Carrefour { noeuds: vec![n], c, plans: vec![pl], contour, trous: Vec::new(), bouches, boite });
     }
-    (carrefours, coupes)
+    (carrefours, coupes, absorbees)
 }
 
 /// Le tracé d'une chaîne coupé à ses bouches : de la bouche du début (son point) à

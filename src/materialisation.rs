@@ -560,18 +560,30 @@ type Maillage = (Vec<[f32; 2]>, Vec<[u32; 3]>, Vec<u32>);
 /// Le contour (sens direct) triangulé par Delaunay avec des points intérieurs tous les
 /// `carrefours::PAS` mètres (`i_triangle`) ; les points du contour gardés au bit près.
 /// Rien si un point du contour s'est perdu ou si l'aire n'y est pas.
-fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
+fn maillage_delaunay(anneaux: &[Vec<[f32; 2]>]) -> Option<Maillage> {
     use i_triangle::float::triangulatable::Triangulatable;
     let pas = crate::carrefours::PAS;
+    // Les anneaux mis bout à bout ; un point a ses voisins dans son anneau
+    let contour: Vec<[f32; 2]> = anneaux.concat();
     let nc = contour.len();
+    let mut tranches = Vec::with_capacity(anneaux.len());
+    let mut o = 0;
+    for a in anneaux {
+        tranches.push((o, a.len()));
+        o += a.len();
+    }
+    let voisin = |k: usize, pas_: isize| {
+        let &(o, n) = tranches.iter().find(|&&(o, n)| k >= o && k < o + n).unwrap();
+        o + ((k - o) as isize + pas_).rem_euclid(n as isize) as usize
+    };
     let mut boite = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for p in contour {
+    for p in &contour {
         boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
     }
     let dedans = |p: [f32; 2]| {
         let mut d = false;
         for i in 0..nc {
-            let (a, b) = (contour[i], contour[(i + 1) % nc]);
+            let (a, b) = (contour[i], contour[voisin(i, 1)]);
             if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
                 d = !d;
             }
@@ -580,7 +592,7 @@ fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
     };
     let loin = |p: [f32; 2]| {
         (0..nc).all(|i| {
-            let (a, b) = (contour[i], contour[(i + 1) % nc]);
+            let (a, b) = (contour[i], contour[voisin(i, 1)]);
             let (ux, uz) = (b[0] - a[0], b[1] - a[1]);
             let l2 = (ux * ux + uz * uz).max(1e-12);
             let t = (((p[0] - a[0]) * ux + (p[1] - a[1]) * uz) / l2).clamp(0.0, 1.0);
@@ -604,7 +616,7 @@ fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
         z += dz;
         j += 1;
     }
-    let forme: Vec<Vec<[f64; 2]>> = vec![contour.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()];
+    let forme: Vec<Vec<[f64; 2]>> = anneaux.iter().map(|a| a.iter().map(|p| [p[0] as f64, p[1] as f64]).collect()).collect();
     let st: Vec<[f64; 2]> = steiner.iter().map(|p| [p[0] as f64, p[1] as f64]).collect();
     let d = forme.triangulate_with_steiner_points(&st).into_delaunay();
     let pts: Vec<[f64; 2]> = d.points();
@@ -659,21 +671,22 @@ fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
     // d'un côté droit recoupé) : remis par suites, en éventail dans le triangle posé
     // sur le côté qui joint leurs voisins gardés
     let mut ind = ind;
-    let Some(depart) = (0..nc).find(|&k| ext[k] != u32::MAX) else { return None };
+    for &(o, na) in &tranches {
+    let Some(depart) = (o..o + na).find(|&k| ext[k] != u32::MAX) else { return None };
     let mut k = 0;
-    while k < nc {
-        let i = (depart + k) % nc;
+    while k < na {
+        let i = voisin(depart, k as isize);
         if ext[i] != u32::MAX {
             k += 1;
             continue;
         }
         // La suite des perdus i.., entre a (gardé, avant) et b (gardé, après)
         let mut suite = Vec::new();
-        while k < nc && ext[(depart + k) % nc] == u32::MAX {
-            suite.push((depart + k) % nc);
+        while k < na && ext[voisin(depart, k as isize)] == u32::MAX {
+            suite.push(voisin(depart, k as isize));
             k += 1;
         }
-        let (a, b) = (ext[(suite[0] + nc - 1) % nc], ext[(suite[suite.len() - 1] + 1) % nc]);
+        let (a, b) = (ext[voisin(suite[0], -1)], ext[voisin(suite[suite.len() - 1], 1)]);
         let cote = |tr: &[u32]| (0..3).find(|&e| {
             let (u, v) = (tr[e], tr[(e + 1) % 3]);
             (u == a && v == b) || (u == b && v == a)
@@ -707,6 +720,7 @@ fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
             ind.extend_from_slice(&[p[0], p[1], w]);
         }
     }
+    }
     // Les triangles, en sens direct ; l'aire doit être celle du contour
     let aire = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| 0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
     let mut tris = Vec::with_capacity(ind.len() / 3);
@@ -722,7 +736,7 @@ fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
     }
     let mut cible = 0.0f32;
     for i in 0..nc {
-        let (a, b) = (contour[i], contour[(i + 1) % nc]);
+        let (a, b) = (contour[i], contour[voisin(i, 1)]);
         cible += 0.5 * (a[0] * b[1] - b[0] * a[1]);
     }
     if cible <= 0.0 || (somme - cible).abs() > 0.01 * cible {
@@ -732,6 +746,12 @@ fn maillage_delaunay(contour: &[[f32; 2]]) -> Option<Maillage> {
         return None;
     }
     Some((xz, tris, ext))
+}
+
+/// Les anneaux (l'extérieur en sens direct, les trous en sens indirect) se
+/// triangulent-ils ?
+pub(crate) fn maillage_valide(anneaux: &[Vec<[f32; 2]>]) -> bool {
+    maillage_delaunay(anneaux).is_some()
 }
 
 /// Le contour maillé en anneaux autour du nœud `c` (un anneau tous les
@@ -823,10 +843,17 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
     }
     // Le maillage du dessus : Delaunay du contour et de points intérieurs, les anneaux
     // autour du nœud à défaut
-    let (xz, tris, ext) = maillage_delaunay(contour).unwrap_or_else(|| {
-        PLAQUES_REPLI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        maillage_anneaux(c, contour)
-    });
+    let mut anneaux = vec![contour.clone()];
+    anneaux.extend(car.trous.iter().cloned());
+    let maillage = match maillage_delaunay(&anneaux) {
+        Some(m) => Some(m),
+        None if car.trous.is_empty() => {
+            PLAQUES_REPLI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(maillage_anneaux(c, contour))
+        }
+        None => None,
+    };
+    let Some((xz, tris, ext)) = maillage else { return Forme::default() };
     let nv = xz.len() as u32;
     let sur_contour: HashMap<u32, usize> = ext.iter().enumerate().map(|(k, &i)| (i, k)).collect();
     let mut f = Forme::default();
@@ -835,7 +862,7 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
         let (h, b) = match sur_contour.get(&(i as u32)).and_then(|k| impose.get(k)) {
             Some(&e) => e,
             None => {
-                let propre = car.plan.h(p[0], p[1]);
+                let propre = car.plan(p[0], p[1]).h(p[0], p[1]);
                 let h = champ.h(p[0], p[1], propre).unwrap_or(propre);
                 (h, bas_libre(p, h))
             }
@@ -852,6 +879,16 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
     // Les murs du contour : aux bouches, en éventail depuis le bas de l'axe, comme le
     // bout du ruban ; ailleurs, un quadrilatère par côté
     let bouche_de = |k: usize| car.bouches.iter().find(|&&(b, _)| k == b || k == b + 1).map(|&(b, _)| b);
+    // Les trous : un quadrilatère par côté
+    let mut o = nc;
+    for t in &car.trous {
+        let n = t.len();
+        for k in 0..n {
+            let (u, v) = (ext[o + k], ext[o + (k + 1) % n]);
+            f.faces.push(vec![v, u, u + nv, v + nv]);
+        }
+        o += n;
+    }
     for k in 0..nc {
         let (u, v) = (ext[k], ext[(k + 1) % nc]);
         match bouche_de(k) {
