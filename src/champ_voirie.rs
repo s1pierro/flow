@@ -277,7 +277,7 @@ fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
                         let (a2, b2) = bouts[k2];
                         let commun = [a1, b1].iter().filter(|n| **n == a2 || **n == b2).count() > 0;
                         if commun {
-                            let pres = [p[0], p[n - 1]].iter().any(|e| (e[0] - q[0]).hypot(e[1] - q[1]) < 3.0 * (q[6] + w2));
+                            let pres = [p[0], p[n - 1]].iter().any(|e| (e[0] - q[0]).hypot(e[1] - q[1]) < q[6] + w2);
                             if pres {
                                 continue;
                             }

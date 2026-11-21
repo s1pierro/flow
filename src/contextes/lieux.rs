@@ -207,6 +207,8 @@ pub struct Lieux {
     maquette3d: bool,
     /// En maquette : le suivi des tâches (`suivi`) par-dessus la vue.
     suivi3d: bool,
+    /// Le panneau des outils replié (pilule Panneau, `panneau`) : la vue prend tout.
+    panneau_replie: bool,
     /// En maquette : les tracés du réseau et les remblais des voies en surimpression.
     sur: crate::relief3d::Surimpression,
     /// La vue Matérialisation (une maquette à part : le niveau le plus fin seul, dans
@@ -296,6 +298,7 @@ impl Default for Lieux {
             blanc3d: false,
             defonce3d: false,
             suivi3d: false,
+            panneau_replie: false,
             sur: Default::default(),
             materialisation3d: false,
             zone_rayon: 500.0,
@@ -1372,7 +1375,8 @@ impl Lieux {
                 4 => self.defonce3d,
                 _ => self.suivi3d,
             };
-            if x > zone.x + m && x + cx.pill_width(nom) > zone.right() - m {
+            // (la pilule Panneau, en haut à droite, garde sa place)
+            if x > zone.x + m && x + cx.pill_width(nom) > zone.right() - 2.0 * m - cx.pill_width("Panneau") {
                 x = zone.x + m;
                 y += cx.commande() + m * 0.5;
             }
@@ -2578,6 +2582,16 @@ impl Contexte for Lieux {
                 }
                 Ok(format!("remblai {} distance {} rayon {}", self.sur.remblai, self.sur.remblai_distance, self.sur.remblai_rayon))
             }
+            // Le panneau : « panneau non » le replie, « panneau oui » le rouvre
+            "panneau" => {
+                match m.get(1).map(|s| s.as_str()) {
+                    Some("non") => self.panneau_replie = true,
+                    Some("oui") => self.panneau_replie = false,
+                    None => {}
+                    _ => return Some(Err("panneau [oui | non]".into())),
+                }
+                Ok(format!("panneau {}", if self.panneau_replie { "replié" } else { "ouvert" }))
+            }
             // La zone fine : « zone non », « zone <rayon> » (au point visé), « zone »
             "zone" => {
                 match m.get(1).map(|s| s.as_str()) {
@@ -2712,7 +2726,9 @@ impl Contexte for Lieux {
         if self.carte.is_some() {
             // Le panneau à droite en paysage, dessous en portrait
             let d = cx.dp;
-            let (zone, panneau) = if r.w > r.h * 1.1 {
+            let (zone, panneau) = if self.panneau_replie {
+                (r, Rect::new(r.right(), r.y, 0.0, r.h))
+            } else if r.w > r.h * 1.1 {
                 let w = (340.0 * d).min(r.w * 0.42);
                 (Rect::new(r.x, r.y, r.w - w, r.h), Rect::new(r.right() - w, r.y, w, r.h))
             } else {
@@ -2730,7 +2746,18 @@ impl Contexte for Lieux {
             } else {
                 self.dessiner_carte(cx, zone, base);
             }
-            self.panneau(cx, c, panneau, base);
+            if !self.panneau_replie {
+                self.panneau(cx, c, panneau, base);
+            }
+            // Replier ou rouvrir le panneau : en haut à droite de la vue
+            let m = cx.ecart();
+            let nom = "Panneau";
+            let x = zone.right() - m - cx.pill_width(nom);
+            cx.clip(Some(zone));
+            if cx.pill(sub_id(base, 29), x, zone.y + m, nom, !self.panneau_replie) {
+                self.panneau_replie = !self.panneau_replie;
+            }
+            cx.clip(None);
         } else if self.plan.is_some() {
             self.dessiner_plan(cx, c, r, base, k);
         } else {

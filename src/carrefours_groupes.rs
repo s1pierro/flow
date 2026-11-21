@@ -45,6 +45,10 @@ const INTERIEUR_MAX: f32 = 60.0;
 /// à moins de tant de degrés, bords à moins du dégagement l'un de l'autre. Leurs
 /// bouches sont alignées et l'entre-deux coupé avec eux.
 const JUMEAUX_ANGLE: f32 = 25.0;
+/// Jusqu'où (m au-delà de `S_MAX`) reculer les bouches de deux jumeaux pour les aligner,
+/// et de combien leurs nœuds peuvent être décalés le long de la voie.
+const JUMEAUX_RECUL: f32 = 15.0;
+const JUMEAUX_DECALAGE: f32 = 30.0;
 /// Le jeu minimal entre deux bras jumeaux à leur bouche (m).
 const JUMEAUX_JEU: f32 = 0.2;
 
@@ -339,12 +343,25 @@ fn groupe(
                 if s <= 0.0 {
                     continue;
                 }
-                let ((qi, di), (_, dj)) = (bi.a(s), bj.a(s));
-                if di[0] * dj[0] + di[1] * dj[1] < cos_j {
+                // Parallèles tout du long de leur début, pas seulement en un point
+                let paralleles = [10.0f32, 15.0, 20.0, S_MAX + 5.0].iter().all(|&x| {
+                    let x = x.min(bi.longueur() - 0.1).min(bj.longueur() - 0.1);
+                    let ((_, di), (_, dj)) = (bi.a(x), bj.a(x));
+                    di[0] * dj[0] + di[1] * dj[1] >= cos_j
+                });
+                if !paralleles {
                     continue;
                 }
-                let oi = [qi[0], qi[1]];
-                let ecart = bj.pts.windows(2).zip(bj.s0.windows(2)).take_while(|(_, l)| l[0] < S_MAX + PROLONGE).map(|(p, _)| au_segment(oi, [p[0][0], p[0][1]], [p[1][0], p[1][1]]) - p[0][6].max(p[1][6])).fold(f32::MAX, f32::min) - qi[6];
+                // L'écart de leurs bords : le plus petit, de l'un à l'autre et de l'autre à
+                // l'un, à plusieurs abscisses (leurs nœuds peuvent être décalés)
+                let ecart_de = |a: &Bras, b: &Bras| -> f32 {
+                    [10.0f32, 15.0, 20.0, S_MAX + 5.0].iter().map(|&x| {
+                        let q = a.a(x.min(a.longueur() - 0.1)).0;
+                        let o = [q[0], q[1]];
+                        b.pts.windows(2).zip(b.s0.windows(2)).take_while(|(_, l)| l[0] < S_MAX + JUMEAUX_DECALAGE).map(|(p, _)| au_segment(o, [p[0][0], p[0][1]], [p[1][0], p[1][1]]) - p[0][6].max(p[1][6])).fold(f32::MAX, f32::min) - q[6]
+                    }).fold(f32::MAX, f32::min)
+                };
+                let ecart = ecart_de(bi, bj).min(ecart_de(bj, bi));
                 if ecart < marge {
                     candidats.push((ecart, i, j));
                 }
@@ -364,6 +381,29 @@ fn groupe(
             jumeau[d][0] = Some(g);
             jumeau[g][1] = Some(d);
             paires.push((d, g));
+        }
+    }
+    // Les grappes de jumeaux : les composantes des paires
+    let mut grappes: Vec<Vec<usize>> = Vec::new();
+    {
+        let mut vu = vec![false; bras.len()];
+        for i in 0..bras.len() {
+            if vu[i] || jumeau[i] == [None, None] {
+                continue;
+            }
+            let mut g = vec![i];
+            vu[i] = true;
+            let mut k = 0;
+            while k < g.len() {
+                for j in jumeau[g[k]].into_iter().flatten() {
+                    if !vu[j] {
+                        vu[j] = true;
+                        g.push(j);
+                    }
+                }
+                k += 1;
+            }
+            grappes.push(g);
         }
     }
     // Les bouches : assez loin de toutes les autres emprises (bras voisins compris, sauf
@@ -406,57 +446,69 @@ fn groupe(
             }
             bras[i].s = s;
         }
-        // Les jumeaux : la bouche de gauche sur la ligne de celle de droite (plusieurs
-        // passes : trois chaussées côte à côte)
-        for _ in 0..4 {
-        for &(d, g) in &paires {
-            let mut s = bras[d].s.max(bras[g].s);
-            loop {
-                if s > S_MAX + 5.0 {
-                    return echec("jumeaux sans bouches alignées");
-                }
-                let (q, t) = bras[d].a(s);
-                let mut meilleur = (f32::MAX, 0.0);
-                let mut x = S_MIN;
-                while x <= (S_MAX + 10.0).min(bras[g].longueur() - 0.1) {
-                    let (p, _) = bras[g].a(x);
-                    let e = ((p[0] - q[0]) * t[0] + (p[1] - q[1]) * t[1]).abs();
-                    if e < meilleur.0 {
-                        meilleur = (e, x);
+        // Les jumeaux, par grappes (deux, trois, quatre chaussées côte à côte) : leurs
+        // bouches sur une même ligne en travers, la plus proche où toutes sont dégagées
+        for grappe in &grappes {
+            let t = {
+                let (x, z) = grappe.iter().fold((0.0, 0.0), |a, &k| {
+                    let d = bras[k].a(S_MAX.min(bras[k].longueur() - 0.1)).1;
+                    (a.0 + d[0], a.1 + d[1])
+                });
+                norm([x, z])
+            };
+            let proj = |k: usize, s: f32, bras: &[Bras]| {
+                let q = bras[k].a(s).0;
+                q[0] * t[0] + q[1] * t[1]
+            };
+            let s_max = S_MAX + JUMEAUX_RECUL + JUMEAUX_DECALAGE;
+            // L'abscisse du bras k où il passe la ligne l
+            let s_de = |k: usize, l: f32, bras: &[Bras]| -> Option<f32> {
+                let mut s = S_MIN;
+                while s <= s_max.min(bras[k].longueur() - 0.1) {
+                    if proj(k, s, bras) >= l {
+                        return Some(s);
                     }
-                    x += 0.05;
+                    s += 0.05;
                 }
-                let sg = meilleur.1;
-                let (p, _) = bras[g].a(sg);
-                let jeu = (p[0] - q[0]) * gauche(t)[0] + (p[1] - q[1]) * gauche(t)[1] - q[6] - p[6];
-                if meilleur.0 < 0.1 && jeu >= JUMEAUX_JEU && degage(d, s, &bras) && degage(g, sg, &bras) {
-                    bras[d].s = s;
-                    bras[g].s = sg;
+                None
+            };
+            let mut l = grappe.iter().map(|&k| proj(k, bras[k].s, &bras)).fold(f32::MIN, f32::max);
+            let mut dernier = String::new();
+            let mut fait = false;
+            for _ in 0..80 {
+                let ss: Vec<Option<f32>> = grappe.iter().map(|&k| s_de(k, l, &bras)).collect();
+                if ss.iter().any(|x| x.is_none()) {
+                    dernier = format!("ligne {l:.1} hors d'un bras");
                     break;
                 }
-                s += 0.5;
-            }
-            // Le jeu entre leurs bords à la bouche
-            let (q, t) = bras[d].a(bras[d].s);
-            let (p, _) = bras[g].a(bras[g].s);
-            let ecart = (p[0] - q[0]) * gauche(t)[0] + (p[1] - q[1]) * gauche(t)[1] - q[6] - p[6];
-            if ecart < JUMEAUX_JEU {
+                let ss: Vec<f32> = ss.into_iter().flatten().collect();
+                let degagees = grappe.iter().zip(&ss).all(|(&k, &s)| degage(k, s, &bras));
+                // Le jeu entre voisins à leurs bouches
+                let jeu = paires.iter().filter(|(d, _)| grappe.contains(d)).map(|&(d, g)| {
+                    let sd = ss[grappe.iter().position(|&k| k == d).unwrap()];
+                    let sg = ss[grappe.iter().position(|&k| k == g).unwrap()];
+                    let (q, td) = bras[d].a(sd);
+                    let (p, _) = bras[g].a(sg);
+                    (p[0] - q[0]) * gauche(td)[0] + (p[1] - q[1]) * gauche(td)[1] - q[6] - p[6]
+                }).fold(f32::MAX, f32::min);
                 if suivi {
-                    eprintln!("  jumeaux {} et {} : jeu de {ecart:.2} m à la bouche", bras[d].k, bras[g].k);
+                    dernier = format!("ligne {l:.1} : abscisses {:?}, jeu {jeu:.2}, dégagées {degagees}", ss.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>());
                 }
-                return echec("jumeaux qui se recouvrent");
+                if degagees && jeu >= JUMEAUX_JEU {
+                    for (&k, &s) in grappe.iter().zip(&ss) {
+                        bras[k].s = s;
+                    }
+                    fait = true;
+                    break;
+                }
+                l += 0.5;
             }
-        }
-        }
-    }
-    for &(d, g) in &paires {
-        let (q, t) = bras[d].a(bras[d].s);
-        let (p, _) = bras[g].a(bras[g].s);
-        if ((p[0] - q[0]) * t[0] + (p[1] - q[1]) * t[1]).abs() > 0.1 {
-            if suivi {
-                eprintln!("  jumeaux {} (bouche à {:.1}) et {} (à {:.1}) : décalés de {:.2} m ; paires {:?}", bras[d].k, bras[d].s, bras[g].k, bras[g].s, (p[0] - q[0]) * t[0] + (p[1] - q[1]) * t[1], paires.iter().map(|&(a, b)| (bras[a].k, bras[b].k)).collect::<Vec<_>>());
+            if !fait {
+                if suivi {
+                    eprintln!("  grappe {:?} : {dernier}", grappe.iter().map(|&k| bras[k].k).collect::<Vec<_>>());
+                }
+                return echec("jumeaux sans bouches alignées");
             }
-            return echec("jumeaux sans bouches alignées");
         }
     }
     // Assez de place sur chaque bras, et au sol jusqu'au-delà de la bouche et du
