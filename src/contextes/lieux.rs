@@ -495,7 +495,7 @@ fn voie_neuve(l: &Lieu, trace: &[[f32; 2]], pont: bool, genre: u8, largeur: f32)
             sol[a..b].iter().sum::<f32>() / (b - a) as f32
         }).collect()
     };
-    Route { genre, largeur, points: pts.iter().zip(&hs).map(|(p, h)| [p[0], p[1], *h]).collect() }
+    Route { revetement: 0, genre, largeur, points: pts.iter().zip(&hs).map(|(p, h)| [p[0], p[1], *h]).collect() }
 }
 
 impl Lieux {
@@ -605,7 +605,13 @@ impl Lieux {
             return;
         };
         let sortie = dossier.join(format!("{}.reel", nom_de_fichier(&nom)));
-        let d = Demande { nom, lat, lon, pas: self.pas as f64, sortie: sortie.clone(), toits: self.toits, largeur: self.emprise_m().0, longueur: self.emprise_m().1 };
+        let d = Demande { nom, lat, lon, pas: self.pas as f64, sortie, toits: self.toits, largeur: self.emprise_m().0, longueur: self.emprise_m().1 };
+        self.lancer_generation(d);
+    }
+
+    /// Lance la génération de `d` dans un fil (suivie par `Generation`).
+    fn lancer_generation(&mut self, d: Demande) {
+        let sortie = d.sortie.clone();
         let suivi = Arc::new(Suivi::default());
         let s = suivi.clone();
         let fil = std::thread::spawn(move || {
@@ -2300,9 +2306,11 @@ impl Lieux {
             cx.paragraph(&mut b, &format!("{}…", p.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())));
         }
         if let Some(g) = &self.generation {
-            let (etape, part) = g.suivi.etat();
+            let r = g.suivi.rapport();
+            let part = r.part;
             cx.section(&mut b, "Génération");
-            cx.paragraph(&mut b, &format!("{etape} — {:.0} %", part * 100.0));
+            cx.paragraph(&mut b, &format!("{} — {:.0} % · {}{}", r.etape, part * 100.0, generer::duree(r.ecoule), r.reste.map_or(String::new(), |x| format!(", reste ~{}", generer::duree(x)))));
+            cx.paragraph(&mut b, &format!("téléchargés : {} ({:.0} Mo) · dans le cache : {}{}", r.telecharges, r.octets as f64 / 1e6, r.en_cache, if r.echecs > 0 { format!(" · {} échecs", r.echecs) } else { String::new() }));
             let barre = Rect::new(b.x, b.y, b.w, 8.0 * cx.dp);
             cx.dl.rrect(barre, 4.0 * cx.dp, col.ligne);
             cx.dl.rrect(Rect::new(barre.x, barre.y, barre.w * part, barre.h), 4.0 * cx.dp, col.accent);
@@ -2754,6 +2762,64 @@ impl Contexte for Lieux {
                 });
                 Ok(format!("rayon {} centre {:?} · {etat}", self.rayon_cartes, self.zone_centre))
             }
+            // La génération d'un lieu (.reel) : « lieu » (le rapport), « lieu journal [n] »,
+            // « lieu generer <nom> <lat> <lon> [largeur longueur [pas]] », « lieu regenerer »
+            // (le lieu ouvert, d'après ses réglages, en place : l'ancien fichier est
+            // gardé à côté), « lieu arreter »
+            "lieu" => {
+                let nb = |k: usize| m.get(k).and_then(|s| s.replace(',', ".").parse::<f64>().ok());
+                match m.get(1).map(|s| s.as_str()) {
+                    None => {}
+                    Some("journal") => {
+                        let Some(g) = &self.generation else { return Some(Err("aucune génération".into())) };
+                        let n = m.get(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+                        let j = g.suivi.journal(0);
+                        return Some(Ok(j[j.len().saturating_sub(n)..].join("\n")));
+                    }
+                    Some("arreter") => match &self.generation {
+                        Some(g) => g.suivi.arreter(),
+                        None => return Some(Err("aucune génération".into())),
+                    },
+                    Some(quoi @ ("generer" | "regenerer")) => {
+                        if self.generation.is_some() {
+                            return Some(Err("une génération tourne déjà".into()));
+                        }
+                        let d = if quoi == "regenerer" {
+                            let (Some(carte), Some(chemin)) = (&self.carte, self.chemin.clone()) else { return Some(Err("pas de lieu ouvert".into())) };
+                            let Ok(d) = carte.donnees.read() else { return Some(Err("lieu occupé".into())) };
+                            let l = &d.lieu;
+                            // L'emprise d'après la grille (la même que celle de la demande :
+                            // les réponses d'OSM du cache sont reprises)
+                            let entiere = l.grille == sage_reel::Grille::entiere(l.pas);
+                            let (largeur, longueur) = if entiere { (0.0, 0.0) } else { ((l.grille.nx - 1) as f64 * l.pas, (l.grille.nz - 1) as f64 * l.pas) };
+                            let dem = Demande { nom: l.nom.clone(), lat: l.lat, lon: l.lon, pas: l.pas, sortie: chemin.clone(), toits: true, largeur, longueur };
+                            drop(d);
+                            // L'ancien fichier, gardé à côté
+                            let garde = chemin.with_file_name(format!("{}-format{}.reel", chemin.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned()), sage_reel::FORMAT - 1));
+                            if !garde.exists() {
+                                if let Err(e) = std::fs::copy(&chemin, &garde) {
+                                    return Some(Err(format!("copie de l'ancien lieu : {e}")));
+                                }
+                            }
+                            dem
+                        } else {
+                            let (Some(nom), Some(lat), Some(lon)) = (m.get(2), nb(3), nb(4)) else { return Some(Err("lieu generer <nom> <lat> <lon> [largeur longueur [pas]]".into())) };
+                            let Some(dossier) = Lieux::dossier(c) else { return Some(Err("pas de dossier pour Flow".into())) };
+                            let sortie = dossier.join(format!("{}.reel", nom_de_fichier(nom)));
+                            Demande { nom: nom.clone(), lat, lon, pas: nb(7).unwrap_or(self.pas as f64), sortie, toits: self.toits, largeur: nb(5).unwrap_or(self.emprise_m().0), longueur: nb(6).unwrap_or(self.emprise_m().1) }
+                        };
+                        self.lancer_generation(d);
+                    }
+                    _ => return Some(Err("lieu [journal [n] | generer <nom> <lat> <lon> [largeur longueur [pas]] | regenerer | arreter]".into())),
+                }
+                Ok(match &self.generation {
+                    Some(g) => format!("{}\n{}", g.sortie.display(), g.suivi.rapport().texte()),
+                    None => match &self.message {
+                        Some((t, _)) => format!("aucune génération · {t}"),
+                        None => "aucune génération".into(),
+                    },
+                })
+            }
             "generation" => Ok(match self.trois_d.as_ref().and_then(|r| r.generation) {
                 Some((f, t)) => format!("generation {f} {t}"),
                 None => "generation finie".into(),
@@ -2972,7 +3038,7 @@ mod tests {
         let mut lieu = Lieu::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 0.0, &vec![10.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), Vec::new());
         let ligne = |numero: &str, arrets: Vec<u32>| Ligne { mode: BUS, numero: numero.into(), nom: String::new(), couleur: None, arrets, trace: vec![Morceau { ou: SOL, points: vec![[0.0, 0.0], [100.0, 0.0]] }] };
         lieu.transports = Transports {
-            tunnels: vec![Route { genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
+            tunnels: vec![Route { revetement: 0, genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
             rails: vec![Rail { mode: METRO, ou: TUNNEL, niveau: -2, points: vec![[0.0, 400.0, 2.0], [100.0, 400.0, 2.0]] }],
             arrets: vec![Arret { modes: 1 << BUS, x: 50.0, z: 0.0, nom: "Mairie".into(), abri: true, niveau: 0 }, Arret { modes: 1 << METRO, x: 50.0, z: 410.0, nom: "Théâtre".into(), abri: false, niveau: -1 }],
             lignes: vec![ligne("10", vec![0]), ligne("2", vec![0]), ligne("2", vec![0]), Ligne { mode: METRO, ..ligne("M", vec![]) }],

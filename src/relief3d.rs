@@ -1642,8 +1642,8 @@ mod tests {
         let h = vec![10.0; g.points()];
         // Deux chaussées parallèles : un seul tablier, dans la tuile de son milieu
         let ponts = vec![
-            Route { genre: GRANDE, largeur: 8.0, points: vec![[0.0, 0.0, 20.0], [100.0, 0.0, 20.0]] },
-            Route { genre: GRANDE, largeur: 8.0, points: vec![[100.0, 11.0, 20.0], [0.0, 11.0, 20.0]] },
+            Route { revetement: 0, genre: GRANDE, largeur: 8.0, points: vec![[0.0, 0.0, 20.0], [100.0, 0.0, 20.0]] },
+            Route { revetement: 0, genre: GRANDE, largeur: 8.0, points: vec![[100.0, 11.0, 20.0], [0.0, 11.0, 20.0]] },
         ];
         let d = Donnees::new(Lieu::sur("P", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), Vec::new(), ponts));
         assert_eq!(d.tabliers.len(), 1);
@@ -1745,7 +1745,7 @@ mod tests {
         let h = vec![10.0; g.points()];
         let d0 = Donnees::new(Lieu::sur("V", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), Vec::new(), Vec::new()));
         let (x0, z0, c) = d0.monde();
-        let route = Route { genre: GRANDE, largeur: 8.0, points: vec![[x0, z0 + c * 0.53, 11.0], [x0 + c, z0 + c * 0.55, 11.0]] };
+        let route = Route { revetement: 0, genre: GRANDE, largeur: 8.0, points: vec![[x0, z0 + c * 0.53, 11.0], [x0 + c, z0 + c * 0.55, 11.0]] };
         let d = Donnees::new(Lieu::sur("V", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], vec![route], Vec::new(), Vec::new()));
         // Une tuile fine sur la route (cases de moins de VOIRIE_CASE m), et une grossière
         let z = (0..=NIVEAU_MAX).find(|&z| c / (1u32 << z) as f32 / COTES as f32 <= VOIRIE_CASE).unwrap();

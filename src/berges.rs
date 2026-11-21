@@ -226,7 +226,7 @@ mod tests {
         l.niveau = 0.0;
         l.surfaces_eau = vec![SurfaceEau { nature: 0, anneaux: vec![vec![[-100.0, -180.0], [100.0, -180.0], [100.0, 180.0], [-100.0, 180.0]]] }];
         // Une route le long de la rive est, sur sa moitié nord
-        l.routes = vec![Route { genre: ROUTE, largeur: 8.0, points: vec![[110.0, -180.0, 1.0], [110.0, 0.0, 1.0]] }];
+        l.routes = vec![Route { revetement: 0, genre: ROUTE, largeur: 8.0, points: vec![[110.0, -180.0, 1.0], [110.0, 0.0, 1.0]] }];
         let d = Donnees::new(l);
         let b = &d.berges()[0][0];
         let en = |x: f32, z: f32| {
