@@ -38,6 +38,15 @@ const PROLONGE: f32 = 2.0 * BORDURE + 2.0;
 /// Le dégagement d'une bouche : ses coins à au moins tant de fois la bordure des autres
 /// emprises.
 const DEGAGEMENT: f32 = 1.5;
+/// Un tronçon dont les deux bouts sont dans le groupe y est intérieur jusqu'à cette
+/// longueur (m) : l'anneau d'un giratoire plus long qu'un lien.
+const INTERIEUR_MAX: f32 = 60.0;
+/// Deux bras jumeaux (les chaussées séparées d'un boulevard qui sortent côte à côte) :
+/// à moins de tant de degrés, bords à moins du dégagement l'un de l'autre. Leurs
+/// bouches sont alignées et l'entre-deux coupé avec eux.
+const JUMEAUX_ANGLE: f32 = 25.0;
+/// Le jeu minimal entre deux bras jumeaux à leur bouche (m).
+const JUMEAUX_JEU: f32 = 0.2;
 
 type Anneau = Vec<[f64; 2]>;
 
@@ -56,6 +65,47 @@ fn au_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 /// L'emprise d'un tracé de l'abscisse `s0` à `s1` (demi-largeur des points, plus
 /// `marge`) : un polygone, bords gauches puis droits à rebours.
 fn bande(b: &Bras, s0: f32, s1: f32, marge: f32) -> Anneau {
+    bande2(b, s0, s1, marge, marge)
+}
+
+/// L'axe d'un bras de `s0` à `s1`.
+fn axe_bras(b: &Bras, s0: f32, s1: f32) -> Vec<Pt> {
+    let mut axe: Vec<Pt> = vec![b.a(s0).0];
+    for (p, &s) in b.pts.iter().zip(&b.s0) {
+        if s > s0 + 0.05 && s < s1 - 0.05 {
+            axe.push(*p);
+        }
+    }
+    axe.push(b.a(s1.min(b.longueur())).0);
+    axe
+}
+
+/// Les bords d'un axe (demi-largeur des points plus la marge de chaque côté) : gauche,
+/// droit, dans le sens de l'axe.
+fn bords(axe: &[Pt], mg: f32, md: f32) -> (Anneau, Anneau) {
+    let n = axe.len();
+    let mut g = Vec::with_capacity(n);
+    let mut d = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a, b) = (axe[i.saturating_sub(1)], axe[(i + 1).min(n - 1)]);
+        let t = norm([b[0] - a[0], b[1] - a[1]]);
+        let o = [axe[i][0], axe[i][1]];
+        g.push(f64s(plus(o, gauche(t), axe[i][6] + mg)));
+        d.push(f64s(plus(o, droite(t), axe[i][6] + md)));
+    }
+    (g, d)
+}
+
+/// L'emprise d'un bras, marges différentes à gauche et à droite.
+fn bande2(b: &Bras, s0: f32, s1: f32, mg: f32, md: f32) -> Anneau {
+    let (mut g, mut d) = bords(&axe_bras(b, s0, s1), mg, md);
+    d.reverse();
+    g.extend(d);
+    g
+}
+
+#[allow(dead_code)]
+fn bande_ancienne(b: &Bras, s0: f32, s1: f32, marge: f32) -> Anneau {
     let mut axe: Vec<Pt> = vec![b.a(s0).0];
     for (p, &s) in b.pts.iter().zip(&b.s0) {
         if s > s0 + 0.05 && s < s1 - 0.05 {
@@ -88,6 +138,17 @@ fn disque(c: [f32; 2], r: f32) -> Anneau {
         let a = k as f32 * std::f32::consts::TAU / 16.0;
         f64s(plus(c, [a.cos(), a.sin()], r))
     }).collect()
+}
+
+/// Les anneaux tous en sens direct.
+fn orienter(v: &mut [Anneau]) {
+    for a in v.iter_mut() {
+        let n = a.len();
+        let s: f64 = (0..n).map(|i| a[i][0] * a[(i + 1) % n][1] - a[(i + 1) % n][0] * a[i][1]).sum();
+        if s < 0.0 {
+            a.reverse();
+        }
+    }
 }
 
 /// L'aire signée d'un anneau (positive en sens direct).
@@ -218,13 +279,19 @@ fn groupe(
     if boite[2] - boite[0] > COTE_MAX || boite[3] - boite[1] > COTE_MAX {
         return echec("trop grand");
     }
-    // Les tronçons intérieurs et les bras
+    // Les tronçons intérieurs (les liens, et ce qui relie deux nœuds du groupe sans être
+    // trop long) et les bras
+    let longueur = |k: usize| -> f32 { voies[k].points.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum() };
+    let interieur = |k: usize| {
+        let (a, b) = bouts[k];
+        dans.contains(&a) && dans.contains(&b) && (lien(k) || (a != b && voies[k].points.iter().all(au_sol) && longueur(k) <= INTERIEUR_MAX))
+    };
     let mut interieurs: Vec<usize> = Vec::new();
     let mut bras: Vec<Bras> = Vec::new();
     for &n in g {
         for &(k, debut) in &aux[&n] {
-            let (a, b) = bouts[k];
-            if lien(k) && dans.contains(&a) && dans.contains(&b) {
+            let (_a, _b) = bouts[k];
+            if interieur(k) {
                 if debut {
                     interieurs.push(k);
                 }
@@ -257,17 +324,59 @@ fn groupe(
     for &n in g {
         fixes.push((pos(n), pos(n), rayon_noeud(n)));
     }
-    // Les bouches : assez loin de toutes les autres emprises (bras voisins compris)
+    // Les bras jumeaux : (bras de droite, bras de gauche), chacun dans une paire au plus
+    let marge = DEGAGEMENT * BORDURE;
+    let cos_j = JUMEAUX_ANGLE.to_radians().cos();
+    // (le jumeau de gauche, de droite)
+    let mut jumeau: Vec<[Option<usize>; 2]> = vec![[None, None]; bras.len()];
+    let mut paires: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut candidats: Vec<(f32, usize, usize)> = Vec::new();
+        for i in 0..bras.len() {
+            for j in i + 1..bras.len() {
+                let (bi, bj) = (&bras[i], &bras[j]);
+                let s = 10.0f32.min(bi.longueur() - 0.1).min(bj.longueur() - 0.1);
+                if s <= 0.0 {
+                    continue;
+                }
+                let ((qi, di), (_, dj)) = (bi.a(s), bj.a(s));
+                if di[0] * dj[0] + di[1] * dj[1] < cos_j {
+                    continue;
+                }
+                let oi = [qi[0], qi[1]];
+                let ecart = bj.pts.windows(2).zip(bj.s0.windows(2)).take_while(|(_, l)| l[0] < S_MAX + PROLONGE).map(|(p, _)| au_segment(oi, [p[0][0], p[0][1]], [p[1][0], p[1][1]]) - p[0][6].max(p[1][6])).fold(f32::MAX, f32::min) - qi[6];
+                if ecart < marge {
+                    candidats.push((ecart, i, j));
+                }
+            }
+        }
+        candidats.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, i, j) in candidats {
+            // Lequel est à gauche de l'autre
+            let s = 10.0f32.min(bras[i].longueur() - 0.1);
+            let (qi, di) = bras[i].a(s);
+            let (qj, _) = bras[j].a(s.min(bras[j].longueur() - 0.1));
+            let gj = (qj[0] - qi[0]) * gauche(di)[0] + (qj[1] - qi[1]) * gauche(di)[1];
+            let (d, g) = if gj > 0.0 { (i, j) } else { (j, i) };
+            if jumeau[d][0].is_some() || jumeau[g][1].is_some() {
+                continue;
+            }
+            jumeau[d][0] = Some(g);
+            jumeau[g][1] = Some(d);
+            paires.push((d, g));
+        }
+    }
+    // Les bouches : assez loin de toutes les autres emprises (bras voisins compris, sauf
+    // le jumeau)
     let degage = |i: usize, s: f32, bras: &[Bras]| -> bool {
         let b = &bras[i];
         let (q, d) = b.a(s);
         let o = [q[0], q[1]];
         let coins = [plus(o, droite(d), q[6]), plus(o, gauche(d), q[6])];
-        let marge = DEGAGEMENT * BORDURE;
         let loin = |a: [f32; 2], z: [f32; 2], w: f32| coins.iter().all(|&c| au_segment(c, a, z) - w > marge);
         // Le disque du nœud du bras : seulement en avant de lui
         fixes.iter().all(|&(a, z, w)| loin(a, z, w))
-            && bras.iter().enumerate().filter(|&(j, _)| j != i).all(|(_, o)| {
+            && bras.iter().enumerate().filter(|&(j, _)| j != i && !jumeau[i].contains(&Some(j))).all(|(_, o)| {
                 o.pts.windows(2).zip(o.s0.windows(2)).take_while(|(_, s)| s[0] < o.s + PROLONGE).all(|(p, _)| loin([p[0][0], p[0][1]], [p[1][0], p[1][1]], p[0][6].max(p[1][6])))
             })
     };
@@ -278,9 +387,76 @@ fn groupe(
                 s += 0.5;
             }
             if s > S_MAX {
+                if suivi {
+                    // Ce qui gêne le bras i à S_MAX : le bras voisin le plus proche
+                    let (q, d) = bras[i].a(S_MAX);
+                    let o = [q[0], q[1]];
+                    for (_, b) in bras.iter().enumerate().filter(|&(j, _)| j != i) {
+                        let ecart = b.pts.windows(2).map(|p| au_segment(o, [p[0][0], p[0][1]], [p[1][0], p[1][1]]) - p[0][6]).fold(f32::MAX, f32::min) - q[6];
+                        let (_, db) = b.a(S_MAX.min(b.longueur() - 0.1));
+                        let angle = (d[0] * db[0] + d[1] * db[1]).clamp(-1.0, 1.0).acos().to_degrees();
+                        if ecart < 6.0 {
+                            eprintln!("  bras {} (l {:.1}) gêné par bras {} (l {:.1}) : écart des bords {ecart:.1} m, angle {angle:.0}°", bras[i].k, q[6] * 2.0, b.k, b.w * 2.0);
+                        }
+                    }
+                    let f = fixes.iter().map(|&(a, z, w)| au_segment(o, a, z) - w - q[6]).fold(f32::MAX, f32::min);
+                    eprintln!("  bras {} : emprise fixe la plus proche à {f:.1} m", bras[i].k);
+                }
                 return echec("bouche sans dégagement");
             }
             bras[i].s = s;
+        }
+        // Les jumeaux : la bouche de gauche sur la ligne de celle de droite (plusieurs
+        // passes : trois chaussées côte à côte)
+        for _ in 0..4 {
+        for &(d, g) in &paires {
+            let mut s = bras[d].s.max(bras[g].s);
+            loop {
+                if s > S_MAX + 5.0 {
+                    return echec("jumeaux sans bouches alignées");
+                }
+                let (q, t) = bras[d].a(s);
+                let mut meilleur = (f32::MAX, 0.0);
+                let mut x = S_MIN;
+                while x <= (S_MAX + 10.0).min(bras[g].longueur() - 0.1) {
+                    let (p, _) = bras[g].a(x);
+                    let e = ((p[0] - q[0]) * t[0] + (p[1] - q[1]) * t[1]).abs();
+                    if e < meilleur.0 {
+                        meilleur = (e, x);
+                    }
+                    x += 0.05;
+                }
+                let sg = meilleur.1;
+                let (p, _) = bras[g].a(sg);
+                let jeu = (p[0] - q[0]) * gauche(t)[0] + (p[1] - q[1]) * gauche(t)[1] - q[6] - p[6];
+                if meilleur.0 < 0.1 && jeu >= JUMEAUX_JEU && degage(d, s, &bras) && degage(g, sg, &bras) {
+                    bras[d].s = s;
+                    bras[g].s = sg;
+                    break;
+                }
+                s += 0.5;
+            }
+            // Le jeu entre leurs bords à la bouche
+            let (q, t) = bras[d].a(bras[d].s);
+            let (p, _) = bras[g].a(bras[g].s);
+            let ecart = (p[0] - q[0]) * gauche(t)[0] + (p[1] - q[1]) * gauche(t)[1] - q[6] - p[6];
+            if ecart < JUMEAUX_JEU {
+                if suivi {
+                    eprintln!("  jumeaux {} et {} : jeu de {ecart:.2} m à la bouche", bras[d].k, bras[g].k);
+                }
+                return echec("jumeaux qui se recouvrent");
+            }
+        }
+        }
+    }
+    for &(d, g) in &paires {
+        let (q, t) = bras[d].a(bras[d].s);
+        let (p, _) = bras[g].a(bras[g].s);
+        if ((p[0] - q[0]) * t[0] + (p[1] - q[1]) * t[1]).abs() > 0.1 {
+            if suivi {
+                eprintln!("  jumeaux {} (bouche à {:.1}) et {} (à {:.1}) : décalés de {:.2} m ; paires {:?}", bras[d].k, bras[d].s, bras[g].k, bras[g].s, (p[0] - q[0]) * t[0] + (p[1] - q[1]) * t[1], paires.iter().map(|&(a, b)| (bras[a].k, bras[b].k)).collect::<Vec<_>>());
+            }
+            return echec("jumeaux sans bouches alignées");
         }
     }
     // Assez de place sur chaque bras, et au sol jusqu'au-delà de la bouche et du
@@ -308,16 +484,54 @@ fn groupe(
     for b in &bras {
         morceaux.push(bande(b, 0.0, b.s + PROLONGE, 0.0));
     }
+    // Tous dans le même sens : en sens contraires, deux emprises qui se recouvrent
+    // s'annuleraient (règle non nulle)
+    orienter(&mut morceaux);
     let union = morceaux.simplify_shape(FillRule::NonZero);
     // 2. La fermeture
     let rb = BORDURE as f64;
     let large = union.outline(&OutlineStyle::new(rb).line_join(LineJoin::Round(0.2)));
     let ferme = large.outline(&OutlineStyle::new(-rb).line_join(LineJoin::Miter(0.1)));
+    // La fermeture contient l'union : réunies au cas où l'érosion aurait rongé un lien
+    let ferme = ferme.overlay(&union, OverlayRule::Union, FillRule::NonZero);
+    if suivi {
+        eprintln!("  union en {} morceaux, fermée en {}", union.len(), ferme.len());
+    }
     // 3. Les bras coupés à leur bouche
-    let coupe: Vec<Anneau> = bras.iter().map(|b| bande(b, b.s, b.s + PROLONGE + 2.0, 0.5)).collect();
+    // (les jumeaux sans marge l'un vers l'autre, l'entre-deux coupé avec eux)
+    let mut coupe: Vec<Anneau> = Vec::new();
+    for (i, b) in bras.iter().enumerate() {
+        let mg = if jumeau[i][0].is_some() { 0.0 } else { 0.5 };
+        let md = if jumeau[i][1].is_some() { 0.0 } else { 0.5 };
+        coupe.push(bande2(b, b.s, b.s + PROLONGE + 2.0, mg, md));
+    }
+    for &(d, g) in &paires {
+        let (bd, bg) = (&bras[d], &bras[g]);
+        let (gauche_d, _) = bords(&axe_bras(bd, bd.s, bd.s + PROLONGE + 2.0), 0.0, 0.0);
+        let (_, mut droite_g) = bords(&axe_bras(bg, bg.s, bg.s + PROLONGE + 2.0), 0.0, 0.0);
+        droite_g.reverse();
+        let mut entre = gauche_d;
+        entre.extend(droite_g);
+        coupe.push(entre);
+    }
+    orienter(&mut coupe);
     let plaque = ferme.overlay(&coupe, OverlayRule::Difference, FillRule::NonZero);
     let plaque: Vec<Vec<Anneau>> = plaque.into_iter().filter(|f| !f.is_empty()).collect();
     if plaque.len() != 1 {
+        if suivi {
+            for f in &plaque {
+                let a: Vec<[f32; 2]> = f[0].iter().map(|p| [p[0] as f32, p[1] as f32]).collect();
+                eprintln!("  morceau de {:.1} m² en ({:.1}, {:.1})", aire(&a).abs(), a[0][0], a[0][1]);
+            }
+            for &k in &interieurs {
+                let p = &voies[k].points;
+                eprintln!("  intérieur {k} : ({:.1}, {:.1}) → ({:.1}, {:.1}), l {:.1}", p[0][0], p[0][1], p[p.len() - 1][0], p[p.len() - 1][1], 2.0 * p[0][6]);
+            }
+            for b in &bras {
+                let (q, d) = b.a(b.s);
+                eprintln!("  bras {} : bouche à {:.1} m en ({:.1}, {:.1}) vers ({:.2}, {:.2}), l {:.1}", b.k, b.s, q[0], q[1], d[0], d[1], 2.0 * q[6]);
+            }
+        }
         return echec(&format!("plaque en {} morceaux", plaque.len()));
     }
     let anneaux: Vec<Vec<[f32; 2]>> = plaque[0].iter().map(|a| a.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()).collect();

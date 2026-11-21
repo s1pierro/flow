@@ -74,6 +74,13 @@ const LARGEUR_ECART: f32 = 0.6;
 const BISEAU_ECART_MAX: f32 = 5.0;
 /// La longueur du biseau (m) par mètre d'écart de largeur.
 const BISEAU_PAR_METRE: f32 = 3.0;
+/// Deux chaînes parallèles qui se recouvrent (les chaussées séparées d'un boulevard,
+/// chacune large de toutes ses voies) : leurs demi-largeurs réduites pour laisser ce
+/// jeu (m) entre leurs bords, d'au plus `SERRAGE_MAX`, en pente douce.
+const JEU: f32 = 0.3;
+const SERRAGE_MAX: f32 = 0.5;
+/// Parallèles : à moins de tant de degrés (dans un sens ou l'autre).
+const PARALLELES: f32 = 20.0;
 
 /// Les routes (sans les piétonnes) d'un nœud.
 fn routes(r: &Reseau, n: usize) -> Vec<usize> {
@@ -204,6 +211,108 @@ fn biseauter(pts: &mut Vec<[f32; 3]>, codes: &mut Vec<f32>, ws: &mut Vec<f32>, b
     *ws = w2;
 }
 
+/// Les chaussées parallèles qui se recouvrent, desserrées : chaque point au sol dont
+/// l'emprise mord sur celle d'une chaîne parallèle au même niveau voit sa demi-largeur
+/// réduite au prorata (`JEU` entre les bords), puis la réduction étalée en biseau. Près
+/// d'un nœud commun aux deux chaînes (où elles se rejoignent), rien.
+fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
+    let cos_min = PARALLELES.to_radians().cos();
+    let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
+    for (k, v) in voies.iter().enumerate() {
+        for (i, s) in v.points.windows(2).enumerate() {
+            if !au_sol(&s[0]) || !au_sol(&s[1]) {
+                continue;
+            }
+            let (a, b) = (case(s[0][0].min(s[1][0]), s[0][1].min(s[1][1])), case(s[0][0].max(s[1][0]), s[0][1].max(s[1][1])));
+            for ci in a.0..=b.0 {
+                for cj in a.1..=b.1 {
+                    index.entry((ci, cj)).or_default().push((k as u32, i as u32));
+                }
+            }
+        }
+    }
+    let mut nouvelles: Vec<(usize, Vec<f32>)> = Vec::new();
+    for (k, v) in voies.iter().enumerate() {
+        let p = &v.points;
+        let n = p.len();
+        if n < 2 {
+            continue;
+        }
+        let mut ws: Vec<f32> = p.iter().map(|q| q[6]).collect();
+        let mut touche = false;
+        for i in 0..n {
+            let q = p[i];
+            if !au_sol(&q) {
+                continue;
+            }
+            let (a, b) = (p[i.saturating_sub(1)], p[(i + 1).min(n - 1)]);
+            let t = { let (x, z) = (b[0] - a[0], b[1] - a[1]); let l = x.hypot(z).max(1e-6); [x / l, z / l] };
+            let c = case(q[0], q[1]);
+            let mut f = 1.0f32;
+            for ci in c.0 - 1..=c.0 + 1 {
+                for cj in c.1 - 1..=c.1 + 1 {
+                    let Some(l) = index.get(&(ci, cj)) else { continue };
+                    for &(k2, j) in l {
+                        let k2 = k2 as usize;
+                        if k2 == k {
+                            continue;
+                        }
+                        let (u, w) = (voies[k2].points[j as usize], voies[k2].points[j as usize + 1]);
+                        if (u[2] - q[2]).abs().min((w[2] - q[2]).abs()) > NIVEAU_NUL {
+                            continue;
+                        }
+                        let (x, z) = (w[0] - u[0], w[1] - u[1]);
+                        let l2 = x * x + z * z;
+                        if l2 < 1e-6 || ((x * t[0] + z * t[1]) / l2.sqrt()).abs() < cos_min {
+                            continue;
+                        }
+                        let s = (((q[0] - u[0]) * x + (q[1] - u[1]) * z) / l2).clamp(0.0, 1.0);
+                        let d = (q[0] - u[0] - s * x).hypot(q[1] - u[1] - s * z);
+                        let w2 = u[6].max(w[6]);
+                        if d >= q[6] + w2 + JEU {
+                            continue;
+                        }
+                        // Pas là où les deux chaînes se rejoignent
+                        let (a1, b1) = bouts[k];
+                        let (a2, b2) = bouts[k2];
+                        let commun = [a1, b1].iter().filter(|n| **n == a2 || **n == b2).count() > 0;
+                        if commun {
+                            let pres = [p[0], p[n - 1]].iter().any(|e| (e[0] - q[0]).hypot(e[1] - q[1]) < 3.0 * (q[6] + w2));
+                            if pres {
+                                continue;
+                            }
+                        }
+                        f = f.min(((d - JEU).max(0.0) / (q[6] + w2)).max(1.0 - SERRAGE_MAX));
+                    }
+                }
+            }
+            if f < 0.999 {
+                ws[i] = q[6] * f;
+                touche = true;
+            }
+        }
+        if !touche {
+            continue;
+        }
+        // La réduction étalée : une pente d'au plus 1 m de largeur par BISEAU_PAR_METRE
+        let pente = 0.5 / BISEAU_PAR_METRE;
+        for i in 1..n {
+            let ds = (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+            ws[i] = ws[i].min(ws[i - 1] + ds * pente);
+        }
+        for i in (0..n - 1).rev() {
+            let ds = (p[i + 1][0] - p[i][0]).hypot(p[i + 1][1] - p[i][1]);
+            ws[i] = ws[i].min(ws[i + 1] + ds * pente);
+        }
+        nouvelles.push((k, ws));
+    }
+    for (k, ws) in nouvelles {
+        for (q, w) in voies[k].points.iter_mut().zip(ws) {
+            q[6] = w;
+        }
+    }
+}
+
 fn case(x: f32, z: f32) -> (i32, i32) {
     ((x / CASE).floor() as i32, (z / CASE).floor() as i32)
 }
@@ -249,6 +358,7 @@ impl Champ {
             }
             voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None] });
         }
+        desserrer(&mut voies, &bouts);
         // Les carrefours simples : les chaînes coupées à leurs bouches
         let (carrefours, coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts);
         for ((v, c), &ab) in voies.iter_mut().zip(&coupes).zip(&absorbees) {
