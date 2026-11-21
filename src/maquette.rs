@@ -667,6 +667,9 @@ pub mod matiere {
     /// La chaussée des voies de bus en site propre (le TEOR à Rouen) : le bitume
     /// bordeaux.
     pub const CHAUSSEE_BUS: u16 = BATI + TONS_BATI;
+    /// La chaussée sous terre (dans un tunnel) : le bitume, plus sombre ; la carte le
+    /// dit à qui roule dessus (la réverbération de la voûte).
+    pub const CHAUSSEE_TUNNEL: u16 = CHAUSSEE_BUS + 1;
     /// Les tons des bâtiments (le shader et la carte les reprennent), proches du blanc
     /// cassé : calcaire, pierre de Caen, sable pâle, pierre grise, gris clair, gris perle,
     /// gris chaud, ocre très pâle.

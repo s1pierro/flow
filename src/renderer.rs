@@ -181,6 +181,8 @@ void main() {
     else if (k == 16) c = vec3(0.91, 0.87, 0.78);
     // Le bitume bordeaux des voies de bus (17)
     else if (k == 17) c = vec3(0.36, 0.11, 0.13);
+    // La chaussée sous terre (18) : le bitume, plus sombre
+    else if (k == 18) c = vec3(0.15, 0.15, 0.17);
     else c = vec3(0.95, 0.15, 0.15);
     // Le placage : la couche de la matière, répétée tous les `cote` mètres
     // Le dessus du quai (4) : v_m le long de sa ligne et la distance à elle ; la
@@ -196,6 +198,8 @@ void main() {
     } else if (u_avec_matieres == 1 && k == 8) {
       // Le béton clair des côtés et du dessus de la défonce des voies
       c = texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb;
+    } else if (u_avec_matieres == 1 && k == 18) {
+      c = 0.6 * texture(u_matieres, vec3(v_m / u_cotes[6], 6.0)).rgb;
     } else if (u_avec_matieres == 1 && k == 17) {
       // Le bitume bordeaux des voies de bus en site propre
       c = texture(u_matieres, vec3(v_m / u_cotes[8], 8.0)).rgb;

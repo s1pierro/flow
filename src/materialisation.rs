@@ -102,6 +102,34 @@ fn chaussee_en(f: Forme, fond: u16) -> Forme {
     f
 }
 
+/// La chaussée sous terre (`CHAUSSEE_TUNNEL`) : les fonds de chaussée d'un ruban
+/// dont le point le plus proche du tracé est en tunnel et à plus de `SOUS_TERRE`
+/// mètres sous le relief. WhiteRoom et S.A.G.E. y lisent qu'on roule sous une voûte
+/// (la réverbération), sans autre donnée que la matière sous les roues.
+fn sous_terre(mut f: Forme, t: &[Pt], terre: impl Fn([f32; 2]) -> f32) -> Forme {
+    let dessous: Vec<bool> = t.iter().map(|p| p[5] > 1.5 && p[2] + SOUS_TERRE < terre([p[0], p[1]])).collect();
+    if !dessous.iter().any(|&d| d) {
+        return f;
+    }
+    for k in 0..f.faces.len() {
+        if f.matieres[k] != mq::matiere::CHAUSSEE && f.matieres[k] != mq::matiere::CHAUSSEE_BUS {
+            continue;
+        }
+        let p = &f.faces[k];
+        let n = p.len().max(1) as f32;
+        let c = p.iter().fold([0.0f32; 2], |c, &i| [c[0] + f.sommets[i as usize][0] / n, c[1] + f.sommets[i as usize][2] / n]);
+        let i = (0..t.len()).min_by(|&a, &b| (t[a][0] - c[0]).hypot(t[a][1] - c[1]).total_cmp(&(t[b][0] - c[0]).hypot(t[b][1] - c[1])));
+        if i.is_some_and(|i| dessous[i]) {
+            f.matieres[k] = mq::matiere::CHAUSSEE_TUNNEL;
+        }
+    }
+    f
+}
+
+/// La profondeur (m) sous le relief à partir de laquelle une chaussée en tunnel est
+/// « sous terre » (les rampes d'accès, à l'air libre, restent de la chaussée).
+const SOUS_TERRE: f32 = 2.5;
+
 /// La demi-longueur (m) du lissage des hauteurs le long d'une voie : le réseau nivelé
 /// a des écarts de quelques dizaines de centimètres d'un point à l'autre.
 const LISSAGE: f32 = 10.0;
@@ -1209,7 +1237,7 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         let rem = ruban(&t, bouts, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
         let fond = if bus { mq::matiere::CHAUSSEE_BUS } else { mq::matiere::CHAUSSEE };
-        defonces.push(chaussee_en(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond));
+        defonces.push(sous_terre(chaussee_en(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond), &t, terre));
     }
     // Les carrefours simples : une plaque chacun
     for car in champ.carrefours_dans(b, 10.0) {
@@ -1232,7 +1260,7 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     for (t, _, _) in traces(&champ, b, true) {
         let t = reechantillonner(&arrondir(&t), PAS_RUBAN);
         if t.len() >= 2 {
-            defonces.push(chaussee_en(ruban(&t, [None, None], Some(&*champ), |h| h + DEFONCE_HAUT, bas_bus), mq::matiere::CHAUSSEE_BUS));
+            defonces.push(sous_terre(chaussee_en(ruban(&t, [None, None], Some(&*champ), |h| h + DEFONCE_HAUT, bas_bus), mq::matiere::CHAUSSEE_BUS), &t, terre));
         }
     }
     noter("rubans et dalles des routes");
