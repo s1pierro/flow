@@ -102,6 +102,54 @@ fn chaussee_en(f: Forme, fond: u16) -> Forme {
     f
 }
 
+/// Le revêtement de la chaussée d'un ruban : chaque fond de chaussée (bitume) prend
+/// celui du point le plus proche de sa chaîne (`Chaine::revetements`).
+fn revetir(mut f: Forme, revetements: &[([f32; 2], u8)]) -> Forme {
+    if revetements.is_empty() {
+        return f;
+    }
+    for k in 0..f.faces.len() {
+        if f.matieres[k] != mq::matiere::CHAUSSEE {
+            continue;
+        }
+        let p = &f.faces[k];
+        let n = p.len().max(1) as f32;
+        let c = p.iter().fold([0.0f32; 2], |c, &i| [c[0] + f.sommets[i as usize][0] / n, c[1] + f.sommets[i as usize][2] / n]);
+        if let Some((_, r)) = revetements.iter().min_by(|a, b| (a.0[0] - c[0]).hypot(a.0[1] - c[1]).total_cmp(&(b.0[0] - c[0]).hypot(b.0[1] - c[1]))) {
+            f.matieres[k] = mq::matiere::chaussee_de(*r);
+        }
+    }
+    f
+}
+
+/// Le revêtement d'un carrefour : le plus fréquent parmi ses voies (le bitume s'il y a
+/// égalité).
+fn revetement_carrefour(r: &Reseau, noeuds: &[usize]) -> u8 {
+    let mut n = [0usize; sage_reel::REVETEMENTS as usize];
+    for &k in noeuds {
+        for &a in &r.noeuds[k].aretes {
+            n[(r.aretes[a].revetement as usize).min(n.len() - 1)] += 1;
+        }
+    }
+    let max = n.iter().copied().max().unwrap_or(0);
+    if n[sage_reel::BITUME as usize] == max {
+        sage_reel::BITUME
+    } else {
+        n.iter().position(|&x| x == max).unwrap_or(0) as u8
+    }
+}
+
+/// Les fonds de chaussée (bitume) d'un carrefour en son revêtement.
+fn revetir_tout(mut f: Forme, revetement: u8) -> Forme {
+    let m = mq::matiere::chaussee_de(revetement);
+    for x in f.matieres.iter_mut() {
+        if *x == mq::matiere::CHAUSSEE {
+            *x = m;
+        }
+    }
+    f
+}
+
 /// La chaussée sous terre (`CHAUSSEE_TUNNEL`) : les fonds de chaussée d'un ruban
 /// dont le point le plus proche du tracé est en tunnel et à plus de `SOUS_TERRE`
 /// mètres sous le relief. WhiteRoom et S.A.G.E. y lisent qu'on roule sous une voûte
@@ -192,7 +240,7 @@ pub(crate) fn rang(genre: u8) -> u8 {
     match genre {
         sage_reel::GRANDE => 0,
         sage_reel::ROUTE | sage_reel::BUS => 1,
-        sage_reel::SERVICE => 2,
+        sage_reel::SERVICE | sage_reel::RUE_PIETONNE => 2,
         sage_reel::CHEMIN => 3,
         _ => 4,
     }
@@ -628,7 +676,7 @@ fn dalle(c: [f32; 2], w: f32, haut: impl Fn([f32; 2]) -> f32, bas: impl Fn([f32;
 /// Les carrefours près de la boîte `b` : les nœuds où se rejoignent au moins deux
 /// routes, avec leur plan, la plus grande demi-largeur et s'il y arrive une route au
 /// sol.
-fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Plan, f32, bool)> {
+fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Vec<(Plan, f32, bool, u8)> {
     let marge = 20.0;
     let mut v = Vec::new();
     for (k, n) in r.noeuds.iter().enumerate() {
@@ -642,7 +690,7 @@ fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Ve
         let Some(pl) = plan(r, k) else { continue };
         let routes: Vec<_> = n.aretes.iter().map(|&k| &r.aretes[k]).filter(|a| a.genre != sage_reel::PIETONNE).collect();
         let w = routes.iter().map(|a| (a.largeur * 0.5).max(1.0)).fold(0.0, f32::max);
-        v.push((pl, w, routes.iter().any(|a| a.passage == Passage::Sol)));
+        v.push((pl, w, routes.iter().any(|a| a.passage == Passage::Sol), revetement_carrefour(r, &[k])));
     }
     v
 }
@@ -653,7 +701,7 @@ fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Ve
 /// bouche d'un carrefour simple où ils s'arrêtent.
 /// `entieres` : seulement les voies de bus, sur toute leur chaîne (sans les couper aux
 /// bouches des carrefours ni les oublier dans la plaque d'un groupe), sans bouches.
-fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4], entieres: bool) -> Vec<(Vec<Pt>, bool, [Option<Bouche>; 2])> {
+fn traces<'a>(champ: &'a crate::champ_voirie::Champ, b: [f32; 4], entieres: bool) -> Vec<(Vec<Pt>, &'a crate::champ_voirie::Chaine, [Option<Bouche>; 2])> {
     let marge = 10.0;
     let mut v = Vec::new();
     for c in champ.chaines_dans(b, marge) {
@@ -671,7 +719,7 @@ fn traces(champ: &crate::champ_voirie::Champ, b: [f32; 4], entieres: bool) -> Ve
             for (i, p) in ms.into_iter().enumerate() {
                 let bd = if debut && i == 0 && !entieres { c.bouches[0] } else { None };
                 let bf = if fin && i + 1 == n && !entieres { c.bouches[1] } else { None };
-                v.push((p, c.bus, [bd, bf]));
+                v.push((p, c, [bd, bf]));
             }
         };
         // Les suites de segments qui touchent la boîte
@@ -1231,21 +1279,22 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         }
     };
     let bas_defonce = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS);
-    for (t, bus, bouts) in traces(&champ, b, false) {
+    for (t, chaine, bouts) in traces(&champ, b, false) {
+        let bus = chaine.bus;
         let t = reechantillonner(&arrondir(&t), PAS_RUBAN);
         let bouts = [bouts[0].as_ref(), bouts[1].as_ref()];
         let rem = ruban(&t, bouts, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
         let fond = if bus { mq::matiere::CHAUSSEE_BUS } else { mq::matiere::CHAUSSEE };
-        defonces.push(sous_terre(chaussee_en(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond), &t, terre));
+        defonces.push(sous_terre(revetir(chaussee_en(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond), &chaine.revetements), &t, terre));
     }
     // Les carrefours simples : une plaque chacun
     for car in champ.carrefours_dans(b, 10.0) {
         remblais.push(plaque(car, &champ, |h| h, bas_remblai, |p, h| terre(p).min(h) - SOUS).en(mq::matiere::REMBLAI));
-        defonces.push(chaussee(plaque(car, &champ, |h| h + DEFONCE_HAUT, bas_defonce, |_, h| h - DEFONCE_SOUS)));
+        defonces.push(revetir_tout(chaussee(plaque(car, &champ, |h| h + DEFONCE_HAUT, bas_defonce, |_, h| h - DEFONCE_SOUS)), revetement_carrefour(&r, &car.noeuds)));
     }
     // Les dalles des carrefours : elles bouchent les coins entre les rubans
-    for (pl, w, sol) in carrefours(&r, &champ, b) {
+    for (pl, w, sol, rev) in carrefours(&r, &champ, b) {
         let c = [pl.c[0], pl.c[1]];
         let h = |q: [f32; 2]| {
             let propre = pl.h(q[0], q[1]);
@@ -1253,7 +1302,7 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         };
         let rem = if sol { dalle(c, w, h, |q| terre(q).min(terre(c)).min(h(q)) - SOUS) } else { dalle(c, w, h, |q| h(q) - OUVRAGE) };
         remblais.push(rem.en(mq::matiere::REMBLAI));
-        defonces.push(chaussee(dalle(c, w, |q| h(q) + DEFONCE_HAUT, |q| h(q) - DEFONCE_SOUS)));
+        defonces.push(revetir_tout(chaussee(dalle(c, w, |q| h(q) + DEFONCE_HAUT, |q| h(q) - DEFONCE_SOUS)), rev));
     }
     // Les voies de bus d'un bout à l'autre, prioritaires (`PRIORITE_BUS`)
     let bas_bus = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS - PRIORITE_BUS);

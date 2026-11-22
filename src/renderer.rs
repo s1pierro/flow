@@ -139,7 +139,7 @@ uniform sampler2D u_image;
 uniform int u_avec_image;
 uniform highp sampler2DArray u_matieres;
 uniform int u_avec_matieres;
-uniform float u_cotes[9];
+uniform float u_cotes[10];
 uniform float u_bordure;
 uniform vec3 u_couleur;
 uniform vec3 u_ciel;
@@ -183,6 +183,12 @@ void main() {
     else if (k == 17) c = vec3(0.36, 0.11, 0.13);
     // La chaussée sous terre (18) : le bitume, plus sombre
     else if (k == 18) c = vec3(0.15, 0.15, 0.17);
+    // Les chaussées selon leur revêtement (19 à 23) : béton, pavés, gravier, terre, herbe
+    else if (k == 19) c = vec3(0.70, 0.69, 0.66);
+    else if (k == 20) c = vec3(0.50, 0.46, 0.42);
+    else if (k == 21) c = vec3(0.62, 0.58, 0.50);
+    else if (k == 22) c = vec3(0.45, 0.36, 0.26);
+    else if (k == 23) c = vec3(0.40, 0.52, 0.30);
     else c = vec3(0.95, 0.15, 0.15);
     // Le placage : la couche de la matière, répétée tous les `cote` mètres
     // Le dessus du quai (4) : v_m le long de sa ligne et la distance à elle ; la
@@ -198,6 +204,15 @@ void main() {
     } else if (u_avec_matieres == 1 && k == 8) {
       // Le béton clair des côtés et du dessus de la défonce des voies
       c = texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb;
+    } else if (u_avec_matieres == 1 && k == 19) {
+      c = 0.88 * texture(u_matieres, vec3(v_m / u_cotes[7], 7.0)).rgb;
+    } else if (u_avec_matieres == 1 && k == 20) {
+      // Les pavés de grès de Rouen
+      c = texture(u_matieres, vec3(v_m / u_cotes[9], 9.0)).rgb;
+    } else if (u_avec_matieres == 1 && k == 21) {
+      c = texture(u_matieres, vec3(v_m / u_cotes[2], 2.0)).rgb * vec3(1.05, 1.0, 0.9);
+    } else if (u_avec_matieres == 1 && (k == 22 || k == 23)) {
+      c *= texture(u_matieres, vec3(v_m / u_cotes[0], 0.0)).rgb / vec3(0.36, 0.33, 0.26);
     } else if (u_avec_matieres == 1 && k == 18) {
       c = 0.6 * texture(u_matieres, vec3(v_m / u_cotes[6], 6.0)).rgb;
     } else if (u_avec_matieres == 1 && k == 17) {
@@ -632,7 +647,7 @@ impl Renderer {
             Some(p) if !t.blanc => {
                 self.lier_matieres(p);
                 (gl.glUniform1i)(self.u_matieres[0], 1);
-                (gl.glUniform1fv)(self.u_matieres[1], 9, p.cotes.as_ptr());
+                (gl.glUniform1fv)(self.u_matieres[1], 10, p.cotes.as_ptr());
                 (gl.glUniform1f)(self.u_matieres[2], crate::maquette::BORDURE);
             }
             _ => (gl.glUniform1i)(self.u_matieres[0], 0),

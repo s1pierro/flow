@@ -670,6 +670,25 @@ pub mod matiere {
     /// La chaussée sous terre (dans un tunnel) : le bitume, plus sombre ; la carte le
     /// dit à qui roule dessus (la réverbération de la voûte).
     pub const CHAUSSEE_TUNNEL: u16 = CHAUSSEE_BUS + 1;
+    /// Les chaussées selon leur revêtement d'OSM (`surface=*`, lu dans le lieu) : béton,
+    /// pavés, gravier, terre, herbe (le bitume est `CHAUSSEE`).
+    pub const CHAUSSEE_BETON: u16 = CHAUSSEE_TUNNEL + 1;
+    pub const CHAUSSEE_PAVES: u16 = CHAUSSEE_BETON + 1;
+    pub const CHAUSSEE_GRAVIER: u16 = CHAUSSEE_PAVES + 1;
+    pub const CHAUSSEE_TERRE: u16 = CHAUSSEE_GRAVIER + 1;
+    pub const CHAUSSEE_HERBE: u16 = CHAUSSEE_TERRE + 1;
+
+    /// La chaussée d'un revêtement du lieu (`sage_reel::BITUME`…).
+    pub fn chaussee_de(revetement: u8) -> u16 {
+        match revetement {
+            sage_reel::BETON => CHAUSSEE_BETON,
+            sage_reel::PAVES => CHAUSSEE_PAVES,
+            sage_reel::GRAVIER => CHAUSSEE_GRAVIER,
+            sage_reel::TERRE => CHAUSSEE_TERRE,
+            sage_reel::HERBE => CHAUSSEE_HERBE,
+            _ => CHAUSSEE,
+        }
+    }
     /// Les tons des bâtiments (le shader et la carte les reprennent), proches du blanc
     /// cassé : calcaire, pierre de Caen, sable pâle, pierre grise, gris clair, gris perle,
     /// gris chaud, ocre très pâle.

@@ -151,7 +151,7 @@ pub struct Terrain3d {
 pub struct Placage3d {
     pub image: Image,
     pub couches: u32,
-    pub cotes: [f32; 9],
+    pub cotes: [f32; 10],
 }
 
 /// Une vue 3D : un maillage vu par `mvp` dans un rectangle de l'écran. `vue` (la

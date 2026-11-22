@@ -88,6 +88,7 @@ pub const REMBLAIS: [([f32; 3], &str); sage_reel::GENRES as usize] = [
     ([0.58, 0.58, 0.60], "chemin : gris"),
     ([0.52, 0.62, 0.30], "sentier : olive"),
     ([0.40, 0.50, 0.70], "bus : ardoise"),
+    ([0.85, 0.75, 0.62], "rue piétonne : sable"),
 ];
 
 /// Les suites de points (x, z, h) des arêtes au sol coupées à la boîte `b` : un

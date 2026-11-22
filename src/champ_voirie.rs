@@ -53,6 +53,10 @@ pub struct Chaine {
     /// Une voie de bus en site propre (le TEOR à Rouen) : chaussée en bitume bordeaux,
     /// unie à sa voie soeur de l'autre sens (`unir_bus`).
     pub bus: bool,
+    /// Le revêtement le long de la chaîne : les points des tronçons (x, z) et celui de
+    /// leur voie (`sage_reel::BITUME`…) ; un point de la chaussée prend celui du plus
+    /// proche. Vide : tout en bitume.
+    pub revetements: Vec<([f32; 2], u8)>,
 }
 
 pub struct Champ {
@@ -480,6 +484,11 @@ impl Champ {
             let (mut pts, mut codes, mut ws): (Vec<[f32; 3]>, Vec<f32>, Vec<f32>) = (Vec::new(), Vec::new(), Vec::new());
             let (mut w, mut pd) = (0.0f32, 0.0f32);
             let bus = suite.iter().all(|&(k, _)| r.aretes[k].genre == sage_reel::BUS);
+            let revetements: Vec<([f32; 2], u8)> = if suite.iter().all(|&(k, _)| r.aretes[k].revetement == sage_reel::BITUME) {
+                Vec::new()
+            } else {
+                suite.iter().flat_map(|&(k, _)| r.aretes[k].points.iter().map(move |p| ([p[0], p[1]], r.aretes[k].revetement))).collect()
+            };
             // Les changements de largeur : (point commun, largeur avant, après)
             let mut biseaux: Vec<(usize, f32, f32)> = Vec::new();
             for &(k, endroit) in &suite {
@@ -510,7 +519,7 @@ impl Champ {
             for p in &points {
                 boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
             }
-            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], bus });
+            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], bus, revetements });
         }
         desserrer(&mut voies, &bouts);
         unir_bus(&mut voies);

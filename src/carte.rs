@@ -13,7 +13,7 @@
 
 use crate::draw::{Image, Rect};
 use crate::widgets::Cx;
-use sage_reel::{origine, Batiment, Lieu, Route, BOIS, BUS, CHAMP, CHEMIN, CLASSES, GENRES, GRANDE, HABITE, PIETONNE, PRE, ROUTE, SENTIER, SERVICE, ZONE};
+use sage_reel::{origine, Batiment, Lieu, Route, BOIS, BUS, CHAMP, CHEMIN, CLASSES, GENRES, GRANDE, HABITE, PIETONNE, PRE, ROUTE, RUE_PIETONNE, SENTIER, SERVICE, ZONE};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -376,7 +376,7 @@ fn est_voie(c: Couche) -> bool {
 /// arrêts.
 pub fn ordre_par_defaut() -> Vec<Couche> {
     let mut v = vec![BOIS, PRE, CHAMP, HABITE, ZONE, COUCHE_EAU, COUCHE_COURS_EAU, COUCHE_TUNNELS];
-    v.extend([SENTIER, CHEMIN, PIETONNE, SERVICE, ROUTE, BUS, GRANDE].map(|g| COUCHE_VOIE + g));
+    v.extend([SENTIER, CHEMIN, PIETONNE, RUE_PIETONNE, SERVICE, ROUTE, BUS, GRANDE].map(|g| COUCHE_VOIE + g));
     v.extend([COUCHE_RAILS, COUCHE_PONTS, COUCHE_LIGNES, COUCHE_BATI, COUCHE_ARRETS]);
     v
 }
@@ -446,6 +446,7 @@ pub fn couleur_route(genre: u8, pont: bool) -> ([f32; 3], [f32; 3]) {
         GRANDE => [0.98, 0.82, 0.50],
         ROUTE | SERVICE => [1.0, 1.0, 1.0],
         PIETONNE => [0.95, 0.93, 0.88],
+        RUE_PIETONNE => [0.93, 0.90, 0.84],
         CHEMIN => [0.86, 0.74, 0.56],
         BUS => [0.95, 0.66, 0.62],
         _ => [0.80, 0.64, 0.46],
@@ -647,7 +648,7 @@ fn peindre_voies(px: &mut [u8], d: &Donnees, b: [f32; 4], m: f32, pont: bool, ge
                 let min = match r.genre {
                     GRANDE => 1.4,
                     ROUTE | BUS => 0.9,
-                    SERVICE | PIETONNE if m < 6.0 => 0.7,
+                    SERVICE | PIETONNE | RUE_PIETONNE if m < 6.0 => 0.7,
                     CHEMIN | SENTIER if m < 4.0 => 0.6,
                     _ if pont => 1.2,
                     _ => continue,

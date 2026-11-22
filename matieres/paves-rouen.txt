@@ -1,0 +1,18 @@
+# Matière (sage-matieres) : modifiable à la main
+# Les pavés de grès des rues de Rouen : petits, bombés, gris-beige tirant sur l'ocre,
+# en rangs décalés au hasard, aux joints de terre sombre
+genre = paves
+cote = 2
+resolution = 1024
+graine = 7
+longueur = 15
+hauteur = 11
+appareil = 1
+irregularite = 1
+couleur = 36 0.08 0.60
+couleur2 = 30 0.13 0.44
+variation = 0.9
+grain = 0.8
+joint = 8
+couleur_joint = 32 0.08 0.30
+relief = 0.9

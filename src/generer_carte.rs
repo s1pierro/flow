@@ -308,6 +308,11 @@ fn nom_matiere(f: f32) -> Option<&'static str> {
         BETON => "beton",
         CHAUSSEE_BUS => "chaussee_bus",
         CHAUSSEE_TUNNEL => "chaussee_tunnel",
+        CHAUSSEE_BETON => "chaussee_beton",
+        CHAUSSEE_PAVES => "chaussee_paves",
+        CHAUSSEE_GRAVIER => "chaussee_gravier",
+        CHAUSSEE_TERRE => "chaussee_terre",
+        CHAUSSEE_HERBE => "chaussee_herbe",
         m if (BATI..BATI + TONS_BATI).contains(&m) => NOMS_BATI[(m - BATI) as usize],
         _ => "autre",
     })
@@ -322,7 +327,7 @@ fn matieres(d: &Path) -> Vec<sage_carte::Matiere> {
         std::fs::read_to_string(d.join(format!("{nom}.txt"))).ok().and_then(|t| sage_matieres::Reglages::lire(&t)).map(|r| r.cote.max(0.05)).unwrap_or(1.0)
     };
     let mut v = vec![sage_carte::Matiere { nom: "sol".into(), texture: String::new(), cote: 0.0 }, sage_carte::Matiere { nom: sage_carte::EAU.into(), texture: String::new(), cote: 0.0 }];
-    for (m, tex) in [("lit", "vase-lit"), ("berge", "taille-quai"), ("remblai", "pierre-quai"), ("quai", "paves-quai"), ("quai_mur", "pierre-quai"), ("chaussee", "bitume"), ("beton", "beton-clair"), ("chaussee_bus", "bitume-bordeaux"), ("chaussee_tunnel", "bitume")] {
+    for (m, tex) in [("lit", "vase-lit"), ("berge", "taille-quai"), ("remblai", "pierre-quai"), ("quai", "paves-quai"), ("quai_mur", "pierre-quai"), ("chaussee", "bitume"), ("beton", "beton-clair"), ("chaussee_bus", "bitume-bordeaux"), ("chaussee_tunnel", "bitume"), ("chaussee_beton", "beton-clair"), ("chaussee_paves", "paves-rouen"), ("chaussee_gravier", "pierre-quai"), ("chaussee_terre", "vase-lit"), ("chaussee_herbe", "vase-lit")] {
         v.push(sage_carte::Matiere { nom: m.into(), texture: tex.into(), cote: cote(tex) });
     }
     // Les bâtiments : le grain du béton clair, teinté de leur ton
