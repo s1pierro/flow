@@ -506,7 +506,7 @@ fn voie_neuve(l: &Lieu, trace: &[[f32; 2]], pont: bool, genre: u8, largeur: f32)
             sol[a..b].iter().sum::<f32>() / (b - a) as f32
         }).collect()
     };
-    Route { revetement: 0, genre, largeur, points: pts.iter().zip(&hs).map(|(p, h)| [p[0], p[1], *h]).collect() }
+    Route { revetement: 0, files: sage_reel::Files::deduire(genre, largeur, 0), genre, largeur, points: pts.iter().zip(&hs).map(|(p, h)| [p[0], p[1], *h]).collect() }
 }
 
 impl Lieux {
@@ -1824,6 +1824,18 @@ impl Lieux {
                         cx.slider(&mut b, sub_id(base, 661), "Distance", &format!("{:.0} m", s.traces_distance), &mut s.traces_distance, 50.0, 3000.0);
                         cx.slider(&mut b, sub_id(base, 662), "Rayon", &format!("× {:.1}", s.traces_rayon).replace('.', ","), &mut s.traces_rayon, 0.5, 4.0);
                     }
+                    if s.traces {
+                        let avant = s.files;
+                        cx.toggle(&mut b, sub_id(base, 667), "Files des voies", &mut s.files);
+                        if s.files {
+                            cx.paragraph(&mut b, "En cyan, les lignes entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens.");
+                        }
+                        if s.files != avant {
+                            if let Some(r) = self.trois_d.as_mut() {
+                                r.refaire_traces();
+                            }
+                        }
+                    }
                     cx.toggle(&mut b, sub_id(base, 663), "Remblais des voies", &mut s.remblai);
                     if s.remblai {
                         cx.slider(&mut b, sub_id(base, 664), "Distance", &format!("{:.0} m", s.remblai_distance), &mut s.remblai_distance, 50.0, 3000.0);
@@ -2726,8 +2738,12 @@ impl Contexte for Lieux {
                     (Some("oui"), _) => self.sur.traces = true,
                     (Some("non"), _) => self.sur.traces = false,
                     (Some("refaire"), _) => r.refaire_traces(),
+                    (Some("files"), _) => {
+                        self.sur.files = m.get(2).is_none_or(|v| v != "non");
+                        r.refaire_traces();
+                    }
                     (None, _) => {}
-                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire]".into())),
+                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire | files [oui | non]]".into())),
                 }
                 Ok(format!("traces distance {} rayon {} tuiles {} · remblai distance {} rayon {} · {}", self.sur.traces_distance, self.sur.traces_rayon, r.traces_tuiles, self.sur.remblai_distance, self.sur.remblai_rayon, r.traces_bilan))
             }
@@ -3094,7 +3110,7 @@ mod tests {
         let mut lieu = Lieu::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 0.0, &vec![10.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), Vec::new());
         let ligne = |numero: &str, arrets: Vec<u32>| Ligne { mode: BUS, numero: numero.into(), nom: String::new(), couleur: None, arrets, trace: vec![Morceau { ou: SOL, points: vec![[0.0, 0.0], [100.0, 0.0]] }] };
         lieu.transports = Transports {
-            tunnels: vec![Route { revetement: 0, genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
+            tunnels: vec![Route { revetement: 0, files: Default::default(), genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
             rails: vec![Rail { mode: METRO, ou: TUNNEL, niveau: -2, points: vec![[0.0, 400.0, 2.0], [100.0, 400.0, 2.0]] }],
             arrets: vec![Arret { modes: 1 << BUS, x: 50.0, z: 0.0, nom: "Mairie".into(), abri: true, niveau: 0 }, Arret { modes: 1 << METRO, x: 50.0, z: 410.0, nom: "Théâtre".into(), abri: false, niveau: -1 }],
             lignes: vec![ligne("10", vec![0]), ligne("2", vec![0]), ligne("2", vec![0]), Ligne { mode: METRO, ..ligne("M", vec![]) }],

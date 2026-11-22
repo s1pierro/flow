@@ -137,7 +137,7 @@ impl Bras {
 /// `bouts` : début, fin), ses coupes : (abscisse depuis le bout, bouche) au début et à
 /// la fin.
 #[allow(clippy::type_complexity)]
-pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Vec<Carrefour>, Vec<[Option<(f32, Bouche)>; 2]>, Vec<bool>) {
+pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)], fourches: &std::collections::HashSet<usize>) -> (Vec<Carrefour>, Vec<[Option<(f32, Bouche)>; 2]>, Vec<bool>) {
     let mut coupes: Vec<[Option<(f32, Bouche)>; 2]> = vec![[None, None]; voies.len()];
     // Les bouts des chaînes à chaque nœud
     let mut aux: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
@@ -152,7 +152,8 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)]) -> (Ve
     // 1. Les candidats et leurs bras, les bouches posées
     let mut candidats: HashMap<usize, Vec<Bras>> = HashMap::new();
     'noeuds: for (&n, bouts_n) in &aux {
-        if en_groupe.contains(&n) {
+        // Une fourche se fait bord à bord (`champ_voirie::fourches`), sans plaque
+        if en_groupe.contains(&n) || fourches.contains(&n) {
             continue;
         }
         let routes: Vec<usize> = r.noeuds[n].aretes.iter().copied().filter(|&k| r.aretes[k].genre != sage_reel::PIETONNE).collect();

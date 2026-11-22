@@ -50,6 +50,9 @@ pub struct Chaine {
     /// (`carrefours`), et ces bouches (début, fin).
     pub trace: Vec<Pt>,
     pub bouches: [Option<crate::carrefours::Bouche>; 2],
+    /// Les bouts (début, fin) qui ne sont pas prolongés : le tronc d'une fourche
+    /// (`fourches`), que ses deux branches continuent bord à bord.
+    pub nets: [bool; 2],
     /// Une voie de bus en site propre (le TEOR à Rouen) : chaussée en bitume bordeaux,
     /// unie à sa voie soeur de l'autre sens (`unir_bus`).
     pub bus: bool,
@@ -69,6 +72,8 @@ pub struct Champ {
     /// Les carrefours simples, d'une seule pièce (`carrefours`).
     carrefours: Vec<crate::carrefours::Carrefour>,
     simples: std::collections::HashSet<usize>,
+    /// Les nœuds des fourches (`fourches`) : sans dalle.
+    fourches: std::collections::HashSet<usize>,
 }
 
 /// Le côté (m) des cases de l'index des chaînes.
@@ -233,7 +238,7 @@ fn biseauter(pts: &mut Vec<[f32; 3]>, codes: &mut Vec<f32>, ws: &mut Vec<f32>, b
 /// l'emprise mord sur celle d'une chaîne parallèle au même niveau voit sa demi-largeur
 /// réduite au prorata (`JEU` entre les bords), puis la réduction étalée en biseau. Près
 /// d'un nœud commun aux deux chaînes (où elles se rejoignent), rien.
-fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
+fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)], fourches: &[(usize, [f32; 2], f32)]) {
     let cos_min = PARALLELES.to_radians().cos();
     let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
     for (k, v) in voies.iter().enumerate() {
@@ -296,6 +301,12 @@ fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
                         let (a2, b2) = bouts[k2];
                         let commun = [a1, b1].iter().filter(|n| **n == a2 || **n == b2).count() > 0;
                         if commun {
+                            // Les deux branches d'une fourche, près de son nœud : bord à
+                            // bord, elles font une seule chaussée
+                            let branches = fourches.iter().any(|&(nf, c, l)| [a1, b1].contains(&nf) && [a2, b2].contains(&nf) && (q[0] - c[0]).hypot(q[1] - c[1]) < l + 5.0);
+                            if branches {
+                                continue;
+                            }
                             let pres = [p[0], p[n - 1]].iter().any(|e| (e[0] - q[0]).hypot(e[1] - q[1]) < q[6] + w2);
                             if pres {
                                 continue;
@@ -330,6 +341,167 @@ fn desserrer(voies: &mut [Chaine], bouts: &[(usize, usize)]) {
             q[6] = w;
         }
     }
+}
+
+/// Une fourche : un nœud au sol où finissent trois chaînes, une large (le tronc) et deux
+/// pas plus larges que lui (l'une plus étroite) qui en partent presque dans le même sens
+/// (une chaussée qui se partage, ou une voie qui continue et une bretelle qui s'en
+/// détache), à moins de `FOURCHE_ANGLE`
+/// degrés l'une de l'autre (une chaussée à deux files qui se partage en deux voies). Les
+/// deux branches y partent bord à bord : chacune décalée vers son côté pour que son bord
+/// extérieur prolonge celui du tronc (élargie s'il le faut pour que les deux le
+/// couvrent), le décalage s'effaçant en douceur sur `FOURCHE_L_MIN` à `FOURCHE_L_MAX`
+/// mètres ; le bout du tronc n'est plus prolongé (`Chaine::nets`). Avant, le tronc
+/// finissait en bout carré et les branches partaient de son axe, rétrécies l'une contre
+/// l'autre. Rend (nœud, centre, longueur du décalage) de chacune.
+const FOURCHE_ANGLE: f32 = 45.0;
+const FOURCHE_L_MIN: f32 = 15.0;
+const FOURCHE_L_MAX: f32 = 40.0;
+
+fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)]) -> Vec<(usize, [f32; 2], f32)> {
+    let mut aux: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+    for (k, &(a, b)) in bouts.iter().enumerate() {
+        aux.entry(a).or_default().push((k, true));
+        aux.entry(b).or_default().push((k, false));
+    }
+    let longueur = |p: &[Pt]| p.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum::<f32>();
+    let mut v = Vec::new();
+    let mut prises = std::collections::HashSet::new();
+    let mut noeuds: Vec<usize> = aux.keys().copied().collect();
+    noeuds.sort_unstable();
+    // FLOW_FOURCHE="x z" : pourquoi le nœud le plus proche est (ou n'est pas) une fourche
+    let suivi: Option<[f32; 2]> = std::env::var("FLOW_FOURCHE").ok().and_then(|v| {
+        let mut it = v.split_whitespace().filter_map(|x| x.parse().ok());
+        Some([it.next()?, it.next()?])
+    });
+    let suivi = suivi.and_then(|p| noeuds.iter().copied().min_by(|&a, &b| {
+        let d = |n: usize| (r.noeuds[n].p[0] - p[0]).hypot(r.noeuds[n].p[1] - p[1]);
+        d(a).total_cmp(&d(b))
+    }));
+    for n in noeuds {
+        let bs = &aux[&n];
+        let rs = routes(r, n);
+        if suivi == Some(n) {
+            eprintln!("fourche ? nœud {n} en {:?} : {} bouts de chaînes {:?}, {} routes, passages {:?}", r.noeuds[n].p, bs.len(), bs, rs.len(), rs.iter().map(|&k| r.aretes[k].passage).collect::<Vec<_>>());
+            for &(k, debut) in bs {
+                let p = if debut { voies[k].points.first() } else { voies[k].points.last() };
+                eprintln!("  chaîne {k} ({}) : bout {:?}, {} points, prise {}", if debut { "début" } else { "fin" }, p.map(|q| [q[0], q[1], q[5], q[6]]), voies[k].points.len(), prises.contains(&(k, debut)));
+            }
+        }
+        if bs.len() != 3 || rs.len() != 3 || rs.iter().any(|&k| r.aretes[k].passage != sage_reel::reseau::Passage::Sol) || bs.iter().any(|b| prises.contains(b)) {
+            continue;
+        }
+        // Les bouts au nœud : leurs points depuis le nœud, leur direction (vers 15 m),
+        // leur demi-largeur
+        let c = [r.noeuds[n].p[0], r.noeuds[n].p[1]];
+        let mut bras = Vec::new();
+        for &(k, debut) in bs {
+            let p: Vec<Pt> = if debut { voies[k].points.clone() } else { voies[k].points.iter().rev().copied().collect() };
+            if p.len() < 2 || (p[0][0] - c[0]).hypot(p[0][1] - c[1]) > 0.5 || !au_sol(&p[0]) {
+                break;
+            }
+            let mut s = 0.0;
+            let mut q = p[1];
+            for i in 1..p.len() {
+                s += (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+                q = p[i];
+                if s >= 15.0 {
+                    break;
+                }
+            }
+            let (x, z) = (q[0] - p[0][0], q[1] - p[0][1]);
+            let l = x.hypot(z).max(1e-6);
+            bras.push((k, debut, [x / l, z / l], p[0][6], longueur(&p)));
+        }
+        if suivi == Some(n) {
+            eprintln!("  {} bras retenus", bras.len());
+        }
+        if bras.len() != 3 || bras[0].0 == bras[1].0 || bras[1].0 == bras[2].0 || bras[0].0 == bras[2].0 {
+            continue;
+        }
+        let dot = |a: [f32; 2], b: [f32; 2]| a[0] * b[0] + a[1] * b[1];
+        let cos_max = FOURCHE_ANGLE.to_radians().cos();
+        let Some(t) = (0..3).find(|&t| {
+            let (b1, b2) = (&bras[(t + 1) % 3], &bras[(t + 2) % 3]);
+            dot(b1.2, b2.2) > cos_max && dot(bras[t].2, b1.2) < -0.7 && dot(bras[t].2, b2.2) < -0.7 && bras[t].3 + 0.3 >= b1.3.max(b2.3) && bras[t].3 + 0.3 >= b1.3.min(b2.3) + 0.5
+        }) else {
+            if suivi == Some(n) {
+                eprintln!("  pas de tronc : bras {:?}", bras.iter().map(|b| (b.0, b.2, b.3)).collect::<Vec<_>>());
+            }
+            continue;
+        };
+        if suivi == Some(n) {
+            eprintln!("  bras {:?}", bras.iter().map(|b| (b.0, b.2, b.3, b.4)).collect::<Vec<_>>());
+        }
+        let tronc = bras[t];
+        let f = [-tronc.2[0], -tronc.2[1]];
+        let g = [-f[1], f[0]];
+        let (mut b1, mut b2) = (bras[(t + 1) % 3], bras[(t + 2) % 3]);
+        let cote = |d: [f32; 2]| f[0] * d[1] - f[1] * d[0];
+        if cote(b1.2) < cote(b2.2) {
+            std::mem::swap(&mut b1, &mut b2);
+        }
+        // b1 à gauche (vers +g), b2 à droite ; élargies pour couvrir le tronc
+        let w = tronc.3;
+        let e = (w - b1.3 - b2.3).max(0.0);
+        let (w1, w2) = if e > 0.0 { (b1.3 + e / 2.0 + 0.05, b2.3 + e / 2.0 + 0.05) } else { (b1.3, b2.3) };
+        let (o1, o2) = (w - w1, w - w2);
+        let l = (5.0 * o1.max(o2)).clamp(FOURCHE_L_MIN, FOURCHE_L_MAX).min(0.45 * b1.4.min(b2.4));
+        if suivi == Some(n) {
+            eprintln!("  fourche : tronc {} (w {w}), branches {} et {} → décalages {o1:.2} {o2:.2}, l {l:.1}", tronc.0, b1.0, b2.0);
+        }
+        if l < 6.0 {
+            continue;
+        }
+        for (b, sens, o, wn) in [(b1, 1.0f32, o1, w1), (b2, -1.0, o2, w2)] {
+            let (k, debut) = (b.0, b.1);
+            let mut p: Vec<Pt> = if debut { voies[k].points.clone() } else { voies[k].points.iter().rev().copied().collect() };
+            // Des points tous les 2 m sur la longueur du décalage
+            let mut q: Vec<Pt> = vec![p[0]];
+            let mut s = 0.0f32;
+            for i in 1..p.len() {
+                let d = (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+                if s < l {
+                    let m = (d / 2.0).ceil().max(1.0) as usize;
+                    for j in 1..m {
+                        let u = j as f32 / m as f32;
+                        q.push(std::array::from_fn(|c| p[i - 1][c] + u * (p[i][c] - p[i - 1][c])));
+                    }
+                }
+                q.push(p[i]);
+                s += d;
+            }
+            p = q;
+            let mut s = 0.0f32;
+            for i in 0..p.len() {
+                if i > 0 {
+                    s += (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+                }
+                if s >= l {
+                    break;
+                }
+                let u = s / l;
+                let k1 = 1.0 - u * u * (3.0 - 2.0 * u);
+                p[i][0] += g[0] * sens * o * k1;
+                p[i][1] += g[1] * sens * o * k1;
+                p[i][6] += (wn - p[i][6]) * k1;
+            }
+            if !debut {
+                p.reverse();
+            }
+            let v = &mut voies[k];
+            v.points = p;
+            v.w = v.w.max(wn);
+            for q in &v.points {
+                v.boite = [v.boite[0].min(q[0]), v.boite[1].min(q[1]), v.boite[2].max(q[0]), v.boite[3].max(q[1])];
+            }
+            prises.insert((k, debut));
+        }
+        voies[tronc.0].nets[if tronc.1 { 0 } else { 1 }] = true;
+        prises.insert((tronc.0, tronc.1));
+        v.push((n, c, l));
+    }
+    v
 }
 
 /// Les points d'un tracé redécoupés au plus tous les `pas` mètres (le passage du plus
@@ -519,18 +691,19 @@ impl Champ {
             for p in &points {
                 boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
             }
-            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], bus, revetements });
+            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], nets: [false, false], bus, revetements });
         }
-        desserrer(&mut voies, &bouts);
+        let fourches = fourches(r, &mut voies, &bouts);
+        desserrer(&mut voies, &bouts, &fourches);
         unir_bus(&mut voies);
         // Les carrefours simples : les chaînes coupées à leurs bouches
-        let (carrefours, coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts);
+        let (carrefours, coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts, &fourches.iter().map(|f| f.0).collect());
         for ((v, c), &ab) in voies.iter_mut().zip(&coupes).zip(&absorbees) {
             // Une chaîne absorbée dans la plaque d'un groupe n'a plus de ruban
             v.trace = if ab { Vec::new() } else { crate::carrefours::couper(&v.points, c) };
             v.bouches = [c[0].map(|x| x.1), c[1].map(|x| x.1)];
         }
-        let simples = carrefours.iter().flat_map(|c| c.noeuds.iter().copied()).collect();
+        let simples: std::collections::HashSet<usize> = carrefours.iter().flat_map(|c| c.noeuds.iter().copied()).collect();
         let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
         for (k, v) in voies.iter().enumerate() {
             // Les bouts comptent jusqu'à leur prolongement (une demi-largeur), frange
@@ -560,7 +733,13 @@ impl Champ {
                 }
             }
         }
-        Champ { voies, index, chaines, carrefours, simples }
+        let fourches = fourches.iter().map(|f| f.0).filter(|n| !simples.contains(n)).collect();
+        Champ { voies, index, chaines, carrefours, simples, fourches }
+    }
+
+    /// Le nœud `n` est-il une fourche (`fourches`) ?
+    pub fn fourche(&self, n: usize) -> bool {
+        self.fourches.contains(&n)
     }
 
     /// Le nœud `n` est-il un carrefour simple ?

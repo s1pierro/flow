@@ -525,6 +525,11 @@ const PAS_RUBAN: f32 = 2.0;
 /// prolongés de `w` (ils couvrent le carrefour), sauf ceux arrêtés à la bouche d'un
 /// carrefour simple (`bouts`) : leur section est celle de la bouche.
 fn ruban(p: &[Pt], bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
+    ruban_net(p, bouts, [false, false], champ, haut, bas)
+}
+
+/// `ruban`, les bouts `nets` sans prolongement (le tronc d'une fourche).
+fn ruban_net(p: &[Pt], bouts: [Option<&Bouche>; 2], nets: [bool; 2], champ: Option<&crate::champ_voirie::Champ>, haut: impl Fn(f32) -> f32, bas: impl Fn([f32; 2], [f32; 2], [f32; 2], [f32; 3], bool) -> [f32; 3]) -> Forme {
     let n = p.len();
     let dir = |a: Pt, b: Pt| {
         let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
@@ -539,12 +544,12 @@ fn ruban(p: &[Pt], bouts: [Option<&Bouche>; 2], champ: Option<&crate::champ_voir
         [o[0], o[1], hauteur_a(a, o), a[3], a[4], a[5], a[6]]
     };
     let mut q: Vec<Pt> = Vec::with_capacity(n + 2);
-    if bouts[0].is_none() {
+    if bouts[0].is_none() && !nets[0] {
         let w = p[0][6];
         q.push(prolonge(&p[0], [-d0[0] * w, -d0[1] * w]));
     }
     q.extend_from_slice(p);
-    if bouts[1].is_none() {
+    if bouts[1].is_none() && !nets[1] {
         let w = p[n - 1][6];
         q.push(prolonge(&p[n - 1], [d1[0] * w, d1[1] * w]));
     }
@@ -684,7 +689,7 @@ fn carrefours(r: &Reseau, champ: &crate::champ_voirie::Champ, b: [f32; 4]) -> Ve
         if p[0] < b[0] - marge || p[0] > b[2] + marge || p[1] < b[1] - marge || p[1] > b[3] + marge {
             continue;
         }
-        if crate::champ_voirie::passage_simple(r, k).is_some() || champ.simple(k) {
+        if crate::champ_voirie::passage_simple(r, k).is_some() || champ.simple(k) || champ.fourche(k) {
             continue;
         }
         let Some(pl) = plan(r, k) else { continue };
@@ -1343,12 +1348,15 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     let bas_defonce = |_: [f32; 2], _: [f32; 2], _: [f32; 2], hs: [f32; 3], _: bool| hs.map(|h| h - DEFONCE_SOUS);
     for (t, chaine, bouts) in traces(&champ, b, false) {
         let bus = chaine.bus;
+        // Les bouts du tronc d'une fourche, s'ils sont ceux de la chaîne
+        let meme = |a: &Pt, b: Option<&Pt>| b.is_some_and(|b| (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-3);
+        let nets = [chaine.nets[0] && meme(&t[0], chaine.points.first()), chaine.nets[1] && meme(&t[t.len() - 1], chaine.points.last())];
         let t = reechantillonner(&arrondir(&t), PAS_RUBAN);
         let bouts = [bouts[0].as_ref(), bouts[1].as_ref()];
-        let rem = ruban(&t, bouts, Some(&*champ), |h| h, bas_remblai);
+        let rem = ruban_net(&t, bouts, nets, Some(&*champ), |h| h, bas_remblai);
         remblais.push(rem.en(mq::matiere::REMBLAI));
         let fond = if bus { mq::matiere::CHAUSSEE_BUS } else { mq::matiere::CHAUSSEE };
-        defonces.push(sous_terre(revetir(chaussee_en(ruban(&t, bouts, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond), &chaine.revetements), &t, terre));
+        defonces.push(sous_terre(revetir(chaussee_en(ruban_net(&t, bouts, nets, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond), &chaine.revetements), &t, terre));
     }
     // Les carrefours simples : une plaque chacun
     for car in champ.carrefours_dans(b, 10.0) {

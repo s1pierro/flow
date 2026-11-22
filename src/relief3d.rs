@@ -1293,23 +1293,27 @@ pub struct Surimpression {
     pub remblai: bool,
     pub remblai_distance: f32,
     pub remblai_rayon: f32,
+    /// Les lignes des files des voies (`sage_reel::Files`), en cyan, avec les tracés.
+    pub files: bool,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0 }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true }
     }
 }
 
 impl Surimpression {
-    /// « 1 300 1 1 600 2 » : tracés (0/1), distance, rayon ; remblais, de même.
+    /// « 1 300 1 1 600 2 1 » : tracés (0/1), distance, rayon ; remblais, de même ;
+    /// files (0/1, montrées si absent).
     pub fn lire(v: &[f32]) -> Option<Surimpression> {
-        let [t, td, tr, r, rd, rr] = v[..] else { return None };
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr })
+        let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
+        let f = v.get(6);
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon)
+        format!("{} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files))
     }
 }
 
@@ -1442,7 +1446,7 @@ impl Relief3d {
         for &cle in montrees {
             if !self.traces.contains_key(&cle) {
                 self.revision += 1;
-                let t = traces_reseau(&r, boite_tuile(&d, cle), cle, self.num, self.revision);
+                let t = traces_reseau(&r, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files);
                 self.traces.insert(cle, t);
             }
             v.extend(self.traces[&cle].iter().cloned());
@@ -1462,6 +1466,11 @@ const TRACE_SOL: [f32; 3] = [1.0, 0.78, 0.05];
 const TRACE_PONT: [f32; 3] = [0.92, 0.2, 0.85];
 const TRACE_TUNNEL: [f32; 3] = [0.15, 0.75, 0.95];
 const TRACE_NOEUD: [f32; 3] = [0.9, 0.1, 0.1];
+/// Les lignes des files : entre deux files lues dans OSM, entre deux files déduites,
+/// et entre les deux sens (ou autour d'une file partagée).
+const TRACE_FILE: [f32; 3] = [0.0, 0.9, 0.95];
+const TRACE_FILE_DEDUITE: [f32; 3] = [0.0, 0.5, 0.55];
+const TRACE_SENS: [f32; 3] = [0.55, 1.0, 1.0];
 
 /// Le segment p → q (x, z, h) coupé à la boîte b (Liang–Barsky), ou rien.
 fn couper(p: [f32; 3], q: [f32; 3], b: [f32; 4]) -> Option<([f32; 3], [f32; 3])> {
@@ -1490,7 +1499,7 @@ fn couper(p: [f32; 3], q: [f32; 3], b: [f32; 4]) -> Option<([f32; 3], [f32; 3])>
 
 /// Les tracés du réseau `r` dans la boîte `b` : un maillage de traits par passage, et
 /// les nœuds en croix.
-fn traces_reseau(r: &sage_reel::reseau::Reseau, b: [f32; 4], cle: Cle, num: u64, revision: u64) -> Vec<(Maillage3d, [f32; 3], f32)> {
+fn traces_reseau(r: &sage_reel::reseau::Reseau, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
     use sage_reel::reseau::Passage;
     // Un sommet de 9 flottants : position (x, h, z), normale vers le haut, le reste nul
     let poser = |s: &mut Vec<f32>, i: &mut Vec<u32>, a: [f32; 3], c: [f32; 3]| {
@@ -1500,7 +1509,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, b: [f32; 4], cle: Cle, num: u64,
         }
         i.extend_from_slice(&[n, n + 1]);
     };
-    let mut listes: [(Vec<f32>, Vec<u32>); 4] = Default::default();
+    let mut listes: [(Vec<f32>, Vec<u32>); 7] = Default::default();
     for a in &r.aretes {
         let k = match a.passage {
             Passage::Sol => 0,
@@ -1525,8 +1534,69 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, b: [f32; 4], cle: Cle, num: u64,
         poser(s, i, [p[0] - bras, p[1], p[2]], [p[0] + bras, p[1], p[2]]);
         poser(s, i, [p[0], p[1] - bras, p[2]], [p[0], p[1] + bras, p[2]]);
     }
+    // Les lignes des files : entre deux files voisines, décalées de l'axe, la gauche
+    // du tracé (sa normale (dz, −dx), z vers le sud) aux files à contresens
+    if files {
+        for a in &r.aretes {
+            let f = a.files;
+            let n = f.total as usize;
+            if n < 2 || a.points.len() < 2 {
+                continue;
+            }
+            let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));
+            let w = a.largeur * 0.5;
+            if x1 + w < b[0] || x0 - w > b[2] || z1 + w < b[1] || z0 - w > b[3] {
+                continue;
+            }
+            // La normale à gauche en chaque point (moyenne des segments voisins)
+            let pts = &a.points;
+            let m = pts.len();
+            let gauche: Vec<[f32; 2]> = (0..m)
+                .map(|i| {
+                    let (mut g, mut k) = ([0.0f32; 2], 0.0f32);
+                    for (u, v) in [(i.saturating_sub(1), i), (i, (i + 1).min(m - 1))] {
+                        let (dx, dz) = (pts[v][0] - pts[u][0], pts[v][1] - pts[u][1]);
+                        let l = dx.hypot(dz);
+                        if l > 1e-6 {
+                            g[0] += dz / l;
+                            g[1] += -dx / l;
+                            k += 1.0;
+                        }
+                    }
+                    // La moyenne des normales voisines : sa longueur est le cosinus du
+                    // demi-angle ; l'onglet (1 / cosinus) borné à 2. Un bout n'a qu'un
+                    // segment : sa normale telle quelle
+                    let g = [g[0] / k.max(1.0), g[1] / k.max(1.0)];
+                    let c = g[0].hypot(g[1]).max(0.5);
+                    [g[0] / (c * c), g[1] / (c * c)]
+                })
+                .collect();
+            let lw = a.largeur / n as f32;
+            let (ar, partagees) = (f.arriere as usize, n - f.avant as usize - f.arriere as usize);
+            for i in 1..n {
+                // Entre les deux sens (ou au bord d'une file partagée) : la ligne de sens
+                let groupe = |file: usize| if file < ar { 0 } else if file < ar + partagees { 1 } else { 2 };
+                let k = if groupe(i - 1) != groupe(i) {
+                    6
+                } else if f.osm {
+                    4
+                } else {
+                    5
+                };
+                let y = w - i as f32 * lw;
+                for j in 0..m - 1 {
+                    let p = [pts[j][0] + gauche[j][0] * y, pts[j][1] + gauche[j][1] * y, pts[j][2]];
+                    let q = [pts[j + 1][0] + gauche[j + 1][0] * y, pts[j + 1][1] + gauche[j + 1][1] * y, pts[j + 1][2]];
+                    if let Some((p, q)) = couper(p, q, b) {
+                        let (s, ix) = &mut listes[k];
+                        poser(s, ix, p, q);
+                    }
+                }
+            }
+        }
+    }
     let base = 0x7472_0000_0000_0000u64 ^ (num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
-    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0)];
+    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0)];
     listes
         .into_iter()
         .zip(reglages)
@@ -1642,8 +1712,8 @@ mod tests {
         let h = vec![10.0; g.points()];
         // Deux chaussées parallèles : un seul tablier, dans la tuile de son milieu
         let ponts = vec![
-            Route { revetement: 0, genre: GRANDE, largeur: 8.0, points: vec![[0.0, 0.0, 20.0], [100.0, 0.0, 20.0]] },
-            Route { revetement: 0, genre: GRANDE, largeur: 8.0, points: vec![[100.0, 11.0, 20.0], [0.0, 11.0, 20.0]] },
+            Route { revetement: 0, files: Default::default(), genre: GRANDE, largeur: 8.0, points: vec![[0.0, 0.0, 20.0], [100.0, 0.0, 20.0]] },
+            Route { revetement: 0, files: Default::default(), genre: GRANDE, largeur: 8.0, points: vec![[100.0, 11.0, 20.0], [0.0, 11.0, 20.0]] },
         ];
         let d = Donnees::new(Lieu::sur("P", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), Vec::new(), ponts));
         assert_eq!(d.tabliers.len(), 1);
@@ -1745,7 +1815,7 @@ mod tests {
         let h = vec![10.0; g.points()];
         let d0 = Donnees::new(Lieu::sur("V", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], Vec::new(), Vec::new(), Vec::new()));
         let (x0, z0, c) = d0.monde();
-        let route = Route { revetement: 0, genre: GRANDE, largeur: 8.0, points: vec![[x0, z0 + c * 0.53, 11.0], [x0 + c, z0 + c * 0.55, 11.0]] };
+        let route = Route { revetement: 0, files: Default::default(), genre: GRANDE, largeur: 8.0, points: vec![[x0, z0 + c * 0.53, 11.0], [x0 + c, z0 + c * 0.55, 11.0]] };
         let d = Donnees::new(Lieu::sur("V", 49.0, 1.0, 0.0, 0.0, pas, g, 0.0, &h, &vec![false; g.points()], vec![route], Vec::new(), Vec::new()));
         // Une tuile fine sur la route (cases de moins de VOIRIE_CASE m), et une grossière
         let z = (0..=NIVEAU_MAX).find(|&z| c / (1u32 << z) as f32 / COTES as f32 <= VOIRIE_CASE).unwrap();
