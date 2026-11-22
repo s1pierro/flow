@@ -1103,6 +1103,68 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
     f
 }
 
+/// Ce que le dessus d'une défonce de place dépasse le sol (m) : de quoi couper le
+/// terrain sans entamer les bâtiments qui la bordent.
+const PLACE_HAUT: f32 = 0.6;
+
+/// Les places piétonnes du lieu qui touchent la boîte `b`, en volumes de défonce : le
+/// contour de la place triangulé (Delaunay, points intérieurs tous les
+/// `carrefours::PAS` mètres), posé sur la voirie (`champ`) où elle passe, sur le relief
+/// ailleurs ; le fond, `DEFONCE_SOUS` sous ce sol, dans le revêtement de la place, les
+/// bords en béton clair.
+fn places(d: &Donnees, champ: &crate::champ_voirie::Champ, b: [f32; 4], terre: impl Fn([f32; 2]) -> f32) -> Vec<Forme> {
+    let mut v = Vec::new();
+    for p in &d.lieu.places {
+        let Some(a) = p.anneaux.first() else { continue };
+        let (mut x0, mut z0, mut x1, mut z1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for q in a {
+            (x0, z0, x1, z1) = (x0.min(q[0]), z0.min(q[1]), x1.max(q[0]), z1.max(q[1]));
+        }
+        if x1 < b[0] - 1.0 || x0 > b[2] + 1.0 || z1 < b[1] - 1.0 || z0 > b[3] + 1.0 {
+            continue;
+        }
+        // Le contour sans points doublés, dans les deux sens au besoin
+        let mut c: Vec<[f32; 2]> = Vec::with_capacity(a.len());
+        for &q in a {
+            if c.last().is_none_or(|l: &[f32; 2]| (l[0] - q[0]).hypot(l[1] - q[1]) > 0.05) {
+                c.push(q);
+            }
+        }
+        while c.len() > 3 && (c[0][0] - c[c.len() - 1][0]).hypot(c[0][1] - c[c.len() - 1][1]) <= 0.05 {
+            c.pop();
+        }
+        if c.len() < 3 {
+            continue;
+        }
+        let mut r = c.clone();
+        r.reverse();
+        let Some((xz, tris, ext)) = maillage_delaunay(&[c.clone()]).or_else(|| maillage_delaunay(&[r])) else { continue };
+        let sol = |q: [f32; 2]| {
+            let t = terre(q);
+            champ.h(q[0], q[1], t).unwrap_or(t)
+        };
+        let nv = xz.len() as u32;
+        let mut f = Forme::default();
+        let hs: Vec<f32> = xz.iter().map(|&q| sol(q)).collect();
+        f.sommets.extend(xz.iter().zip(&hs).map(|(q, h)| [q[0], h + PLACE_HAUT, q[1]]));
+        f.sommets.extend(xz.iter().zip(&hs).map(|(q, h)| [q[0], h - DEFONCE_SOUS, q[1]]));
+        for [a, b, c] in tris {
+            f.faces.push(vec![a, b, c]);
+            f.faces.push(vec![c + nv, b + nv, a + nv]);
+        }
+        let n = ext.len();
+        for k in 0..n {
+            let (u, w) = (ext[k], ext[(k + 1) % n]);
+            f.faces.push(vec![w, u, u + nv, w + nv]);
+        }
+        if f.volume() < 0.0 {
+            f.faces.iter_mut().for_each(|p| p.reverse());
+        }
+        v.push(revetir_tout(chaussee(f), p.nature));
+    }
+    v
+}
+
 /// Ce qu'une génération de carte (`generer_carte`) garde d'une tuile à l'autre : les
 /// volumes fermés des bâtiments (un bâtiment à cheval sur plusieurs tuiles n'est monté
 /// qu'une fois, puis oublié après la dernière tuile qui le touche) et les tracés lissés
@@ -1312,6 +1374,9 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
             defonces.push(sous_terre(chaussee_en(ruban(&t, [None, None], Some(&*champ), |h| h + DEFONCE_HAUT, bas_bus), mq::matiere::CHAUSSEE_BUS), &t, terre));
         }
     }
+    // Les places piétonnes : une plaque de chaussée chacune, ôtée du terrain comme les
+    // voies
+    defonces.extend(places(d, &champ, b, terre));
     noter("rubans et dalles des routes");
     // Les bâtiments qui touchent la tuile, en volumes fermés (`bati_ferme`), enfoncés de
     // `SOUBASSEMENT` : unis avant les routes, dont les défonces (un tunnel) recoupent
