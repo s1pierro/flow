@@ -99,6 +99,13 @@ impl Reseau for ReseauFlow {
             None => generer::Curl.telecharger(url, post, sortie),
         }
     }
+
+    fn sonder(&self, url: &str) -> Option<bool> {
+        match crate::acces::sonder(url) {
+            Some(e) => Some(e.is_empty()),
+            None => generer::Curl.sonder(url),
+        }
+    }
 }
 
 /// Une liste du lieu : les bâtiments, les routes, les ponts.
@@ -174,6 +181,9 @@ pub struct Lieux {
     chargement: Option<(PathBuf, JoinHandle<Result<Lieu, String>>)>,
     enregistrement: Option<(PathBuf, JoinHandle<Result<(), String>>)>,
     liste: Option<Vec<(PathBuf, u64)>>,
+    /// Les générations inachevées (un cache `<lieu>.reel.cache` sans son `.reel`) : la
+    /// sortie, la demande à reprendre (si son cache la dit), et où elle s'est arrêtée.
+    inachevees: Vec<(PathBuf, Option<Demande>, String)>,
     // L'édition
     choix: Option<Choix>,
     trace: Option<Vec<[f32; 2]>>,
@@ -281,6 +291,7 @@ impl Default for Lieux {
             chargement: None,
             enregistrement: None,
             liste: None,
+            inachevees: Vec::new(),
             choix: None,
             trace: None,
             pinceau: 0,
@@ -534,6 +545,24 @@ impl Lieux {
         }
         v.sort();
         self.liste = Some(v);
+        // Les générations inachevées
+        let mut w = Vec::new();
+        if let Some(d) = Lieux::dossier(c) {
+            if let Ok(rd) = std::fs::read_dir(&d) {
+                for e in rd.flatten() {
+                    let nom = e.file_name().to_string_lossy().into_owned();
+                    let Some(lieu) = nom.strip_suffix(".reel.cache") else { continue };
+                    let sortie = d.join(format!("{lieu}.reel"));
+                    if sortie.exists() || !e.path().is_dir() {
+                        continue;
+                    }
+                    let ou = std::fs::read_to_string(e.path().join("etat.txt")).ok().and_then(|t| t.lines().next().map(str::to_string)).unwrap_or_default();
+                    w.push((sortie.clone(), generer::Demande::reprendre(&sortie), ou));
+                }
+            }
+        }
+        w.sort_by(|a, b| a.0.cmp(&b.0));
+        self.inachevees = w;
     }
 
     fn charger(&mut self, chemin: PathBuf) {
@@ -2363,6 +2392,33 @@ impl Lieux {
                 self.charger(p.clone());
             }
         }
+        // Les générations inachevées : à reprendre (le cache garde ce qui est fait)
+        let en_cours = self.generation.as_ref().map(|g| g.sortie.clone());
+        let inachevees: Vec<_> = self.inachevees.iter().filter(|(p, _, _)| Some(p) != en_cours.as_ref()).cloned().collect();
+        if !inachevees.is_empty() {
+            cx.section(&mut b, "Générations inachevées");
+            for (i, (p, d, ou)) in inachevees.iter().enumerate() {
+                let nom = p.file_stem().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                let info = match (d, ou.is_empty()) {
+                    (None, _) => "paramètres inconnus".to_string(),
+                    (Some(_), true) => "à reprendre".to_string(),
+                    (Some(_), false) => format!("arrêtée : {ou}"),
+                };
+                if super::ligne_fichier(cx, &mut b, sub_id(base, 900 + i), super::Puce::Icone(Icon::Carte), &nom, &info, false) {
+                    match d {
+                        Some(_) if self.generation.is_some() => self.message = Some(("une génération est déjà en cours".into(), true)),
+                        Some(d) => self.lancer_generation(d.clone()),
+                        None => {
+                            // Trop ancienne pour dire où elle était : le nom est repris,
+                            // la position et l'emprise sont à redonner
+                            self.nom.texte = nom.clone();
+                            self.message = Some((format!("« {nom} » : sa position n'a pas été gardée ; redonnez-la et générez sous ce nom pour reprendre ce qui est téléchargé"), false));
+                        }
+                    }
+                }
+            }
+            cx.paragraph(&mut b, "Toucher une génération la reprend où elle s'était arrêtée : ce qui est déjà téléchargé est gardé.");
+        }
         if self.generation.is_none() {
             cx.section(&mut b, "Nouveau lieu");
             clavier::champ(cx, &mut b, sub_id(NOM, k), "Nom du lieu", &mut self.nom, &mut c.clavier);
@@ -2381,7 +2437,7 @@ impl Lieux {
             cx.toggle(&mut b, sub_id(base, 711), "Toits mesurés au LiDAR", &mut self.toits);
             let g = self.grille();
             let zone = if g.est_entiere(self.pas as f64) { "La carte entière, 20 km de côté".to_string() } else { format!("{} × {} km autour du point", self.largeur, self.longueur).replace('.', ",") };
-            cx.paragraph(&mut b, &format!("{zone} : {} × {} points (le lieu vierge aussi). Le relief et le LiDAR viennent de l'IGN, le reste d'OpenStreetMap ; les toits demandent ~0,4 Go de téléchargements dans une ville. Relancer reprend ce qui est déjà téléchargé.", g.nx, g.nz));
+            cx.paragraph(&mut b, &format!("{zone} : {} × {} points (le lieu vierge aussi). Le relief, le LiDAR, les bâtiments et l'occupation du sol viennent de l'IGN (OpenStreetMap en secours), l'eau, les routes et les transports d'OpenStreetMap ; les toits demandent ~0,4 Go de téléchargements dans une ville. Relancer reprend ce qui est déjà téléchargé.", g.nx, g.nz));
             if cx.button(&mut b, sub_id(base, 712), "Générer") {
                 c.clavier.fermer();
                 self.generer(c);

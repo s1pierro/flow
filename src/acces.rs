@@ -435,6 +435,12 @@ pub fn reseau(arg: &str) -> Option<String> {
     appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "telecharger", Some(arg))
 }
 
+/// Sonde un serveur par `fr.s1pierro.flow.Reseau.sonder` : "" s'il répond en dix
+/// secondes, l'erreur sinon ; rien hors d'Android.
+pub fn sonder(url: &str) -> Option<String> {
+    appeler("fr.s1pierro.flow.Reseau", &CONTEXTE, "sonder", Some(url))
+}
+
 /// Garde l'appareil éveillé (processeur, Wi-Fi à pleine vitesse) pour un long travail
 /// (`renfort::eveil`) : pris (`true`) ou rendu.
 pub fn eveil(pris: bool) -> Option<String> {

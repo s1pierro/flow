@@ -126,6 +126,27 @@ public class Reseau {
     }
 
     /**
+     * Le serveur de `url` répond-il vite ? Un GET qui n'attend que dix secondes la
+     * connexion et l'en-tête : "" s'il a répondu (quoi qu'il dise), l'erreur sinon.
+     */
+    public static String sonder(Context c, String url) {
+        HttpURLConnection h = null;
+        try {
+            h = (HttpURLConnection) new URL(url).openConnection();
+            h.setConnectTimeout(10000);
+            h.setReadTimeout(10000);
+            h.setRequestProperty("User-Agent", "flow-lieux/1.0");
+            h.getResponseCode();
+            return "";
+        } catch (Throwable e) {
+            String m = e.getMessage();
+            return e.getClass().getSimpleName() + (m == null ? "" : " : " + m);
+        } finally {
+            if (h != null) h.disconnect();
+        }
+    }
+
+    /**
      * « url\nchemin[\nformulaire] » : télécharge l'adresse dans le fichier (d'abord à
      * côté, puis renommé : il est entier ou absent), par GET, ou par POST du formulaire
      * déjà encodé. Rend "" si tout va bien, sinon l'erreur.
