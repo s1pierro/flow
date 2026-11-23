@@ -39,6 +39,13 @@ const FONTE_ECART: f32 = 8.0;
 const FONTE_MAX: f32 = 90.0;
 /// Le pas des points de la partie fondue (m).
 const FONTE_PAS: f32 = 1.0;
+/// Une voie courte et presque droite : ses files vont en ligne droite d'un nœud de
+/// files à l'autre (longueur au plus, écart de l'axe à sa corde au plus, m).
+const DROIT_LONGUEUR: f32 = 60.0;
+const DROIT_ECART: f32 = 3.0;
+/// Le trait d'un nœud de files : de tant sous la file à tant au-dessus (m).
+const MARQUE_BAS: f32 = 0.5;
+const MARQUE_HAUT: f32 = 3.0;
 
 /// Un fil : ses points ; s'il est la partie fondue qui prolonge une autre file, un
 /// virage d'une voie à une autre, ou une file réservée au bus.
@@ -47,6 +54,8 @@ pub struct Fil {
     pub raccord: bool,
     pub virage: bool,
     pub bus: bool,
+    /// Un nœud de files : un trait vertical, là où une file arrive à un nœud.
+    pub marque: bool,
 }
 
 /// Un bout d'arête à un nœud.
@@ -475,7 +484,7 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
             let sd = if continue_[d] { r.aretes[bs[e].arete].largeur * 0.5 + VIRAGE_MARGE } else { recul[d] };
             let (a, da) = point_dir(&depuis_noeud(r, bs[e], pa.file), se);
             let (b, db) = point_dir(&depuis_noeud(r, bs[d], pq.file), sd);
-            virages.push(Fil { points: courbe(a, [-da[0], -da[1]], b, db), raccord: false, virage: true, bus: false });
+            virages.push(Fil { points: courbe(a, [-da[0], -da[1]], b, db), raccord: false, virage: true, bus: false, marque: false });
             if let Some(jl) = journal.as_mut() {
                 jl.push(format!("virage à {} : a{}·f{} vers a{}·f{}", if a_gauche { "gauche" } else { "droite" }, pa.arete, pa.file, pq.arete, pq.file));
             }
@@ -484,9 +493,9 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
 }
 
 /// La partie fondue d'une file au départ de `q` (orientée en s'éloignant du nœud) :
-/// une courbe de Bézier qui ne dépend que des deux fils, sans l'axe de la voie. Elle
-/// part de `f.p` dans le prolongement de l'autre file (à l'opposé de `f.o`) et rejoint
-/// `q` à `l` mètres de son début, tangente à elle. Rend la partie fondue et le reste de `q`.
+/// une ligne droite du bout de l'autre file (`f.p`) au point de `q` à `l` mètres de son
+/// début, sans l'axe de la voie. La hauteur suit `q` au même avancement. Rend la partie
+/// fondue et le reste de `q`.
 fn fondre(q: &[[f32; 3]], f: Fonte, lmax: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
     let ecart = (q[0][0] - f.p[0]).hypot(q[0][1] - f.p[1]);
     if ecart < 0.02 {
@@ -496,25 +505,13 @@ fn fondre(q: &[[f32; 3]], f: Fonte, lmax: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>)
     if l < 0.5 {
         return (Vec::new(), q.to_vec());
     }
-    // L'arrivée sur le fil propre, et sa direction là (sur un mètre plus loin)
     let b = point_a(q, l);
-    let b2 = point_a(q, l + 1.0);
-    let (dx, dz) = (b2[0] - b[0], b2[1] - b[1]);
-    let n = dx.hypot(dz);
-    let db = if n > 1e-6 { [dx / n, dz / n] } else { [-f.o[0], -f.o[1]] };
-    let da = [-f.o[0], -f.o[1]];
-    let c = (b[0] - f.p[0]).hypot(b[1] - f.p[1]) / 3.0;
-    let p1 = [f.p[0] + da[0] * c, f.p[1] + da[1] * c];
-    let p2 = [b[0] - db[0] * c, b[1] - db[1] * c];
-    let pas = ((l / FONTE_PAS).ceil() as usize).max(8);
+    let pas = ((l / FONTE_PAS).ceil() as usize).max(2);
     let fondue: Vec<[f32; 3]> = (0..=pas)
         .map(|j| {
             let t = j as f32 / pas as f32;
-            let u = 1.0 - t;
-            let (k0, k1, k2, k3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-            // La hauteur : celle du fil propre au même avancement
             let h = point_a(q, l * t)[2];
-            [k0 * f.p[0] + k1 * p1[0] + k2 * p2[0] + k3 * b[0], k0 * f.p[1] + k1 * p1[1] + k2 * p2[1] + k3 * b[1], h]
+            [f.p[0] + (b[0] - f.p[0]) * t, f.p[1] + (b[1] - f.p[1]) * t, h]
         })
         .collect();
     (fondue, rogner(q, l, 0.0))
@@ -530,12 +527,31 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
     if p.len() < 2 {
         return;
     }
+    // Les nœuds de files à ses bouts : le bout de l'autre file qu'elle prolonge, ou le sien
+    let n0 = fontes.get(&(k, i, true)).map_or(p[0], |f| f.p);
+    let n1 = fontes.get(&(k, i, false)).map_or(p[p.len() - 1], |f| f.p);
+    for n in [n0, n1] {
+        sortie.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true });
+    }
+    // Une voie courte et presque droite : en ligne droite d'un nœud de files à l'autre
+    if droite(&r.aretes[k].points) {
+        let l = longueur(&p);
+        let pas = ((l / 4.0).ceil() as usize).max(1);
+        let pts = (0..=pas)
+            .map(|j| {
+                let t = j as f32 / pas as f32;
+                [n0[0] + (n1[0] - n0[0]) * t, n0[1] + (n1[1] - n0[1]) * t, point_a(&p, l * t)[2]]
+            })
+            .collect();
+        sortie.push(Fil { points: pts, raccord: false, virage: false, bus, marque: false });
+        return;
+    }
     let lmax = PART_MAX * longueur(&p);
     let mut reste = p;
     if let Some(&f) = fontes.get(&(k, i, true)) {
         let (fondue, r2) = fondre(&reste, f, lmax);
         if fondue.len() >= 2 {
-            sortie.push(Fil { points: fondue, raccord: true, virage: false, bus });
+            sortie.push(Fil { points: fondue, raccord: true, virage: false, bus, marque: false });
         }
         reste = r2;
     }
@@ -544,14 +560,29 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
             let envers: Vec<[f32; 3]> = reste.iter().rev().copied().collect();
             let (fondue, r2) = fondre(&envers, f, lmax);
             if fondue.len() >= 2 {
-                sortie.push(Fil { points: fondue, raccord: true, virage: false, bus });
+                sortie.push(Fil { points: fondue, raccord: true, virage: false, bus, marque: false });
             }
             reste = r2.into_iter().rev().collect();
         }
     }
     if reste.len() >= 2 {
-        sortie.push(Fil { points: reste, raccord: false, virage: false, bus });
+        sortie.push(Fil { points: reste, raccord: false, virage: false, bus, marque: false });
     }
+}
+
+/// Une voie courte et presque droite : au plus `DROIT_LONGUEUR`, et son axe à moins de
+/// `DROIT_ECART` de la corde entre ses bouts.
+fn droite(p: &[[f32; 3]]) -> bool {
+    if longueur(p) > DROIT_LONGUEUR {
+        return false;
+    }
+    let (a, b) = (p[0], p[p.len() - 1]);
+    let (dx, dz) = (b[0] - a[0], b[1] - a[1]);
+    let l = dx.hypot(dz);
+    if l < 1e-3 {
+        return false;
+    }
+    p.iter().all(|q| ((q[0] - a[0]) * dz - (q[1] - a[1]) * dx).abs() / l <= DROIT_ECART)
 }
 
 /// Les fils dans la boîte `b` (x0, z0, x1, z1) : ceux des arêtes qui la touchent.

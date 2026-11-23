@@ -1574,6 +1574,8 @@ const TRACE_RACCORD: [f32; 3] = [0.8, 1.0, 0.1];
 /// Les virages d'une voie à une autre, et les files réservées au bus.
 const TRACE_VIRAGE: [f32; 3] = [0.35, 0.65, 1.0];
 const TRACE_FIL_BUS: [f32; 3] = [0.95, 0.2, 0.5];
+/// Les nœuds de files : des traits verticaux.
+const TRACE_MARQUE: [f32; 3] = [0.95, 0.95, 0.75];
 /// Les fils passent d'autant au-dessus des tracés (m).
 const FILS_DESSUS: f32 = 0.15;
 
@@ -1635,7 +1637,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
         }
         i.extend_from_slice(&[n, n + 1]);
     };
-    let mut listes: [(Vec<f32>, Vec<u32>); 11] = Default::default();
+    let mut listes: [(Vec<f32>, Vec<u32>); 12] = Default::default();
     for (ka, a) in r.aretes.iter().enumerate() {
         let k = match a.passage {
             Passage::Sol => 0,
@@ -1724,7 +1726,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
     // Les fils de circulation d'essai : un peu au-dessus des lignes des files
     if fils {
         for f in crate::fils::dans(r, b) {
-            let k = if f.virage { 9 } else if f.bus { 10 } else if f.raccord { 8 } else { 7 };
+            let k = if f.marque { 11 } else if f.virage { 9 } else if f.bus { 10 } else if f.raccord { 8 } else { 7 };
             for w in f.points.windows(2) {
                 let (p, q) = ([w[0][0], w[0][1], w[0][2] + FILS_DESSUS], [w[1][0], w[1][1], w[1][2] + FILS_DESSUS]);
                 if let Some((p, q)) = couper(p, q, b) {
@@ -1735,7 +1737,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
         }
     }
     let base = 0x7472_0000_0000_0000u64 ^ (num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
-    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0), (TRACE_FIL, 2.5), (TRACE_RACCORD, 3.0), (TRACE_VIRAGE, 2.5), (TRACE_FIL_BUS, 3.0)];
+    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0), (TRACE_FIL, 2.5), (TRACE_RACCORD, 3.0), (TRACE_VIRAGE, 2.5), (TRACE_FIL_BUS, 3.0), (TRACE_MARQUE, 4.0)];
     listes
         .into_iter()
         .zip(reglages)
