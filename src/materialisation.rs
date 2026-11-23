@@ -932,9 +932,13 @@ fn maillage_delaunay(anneaux: &[Vec<[f32; 2]>]) -> Option<Maillage> {
         somme += s.abs();
         tris.push([a, b, c]);
     }
+    // Relative au premier point : loin de l'origine (des milliers de mètres), les
+    // produits en f32 perdaient des mètres carrés (0.177 : des plaques refusées à tort)
+    let o = contour[0];
     let mut cible = 0.0f32;
     for i in 0..nc {
         let (a, b) = (contour[i], contour[voisin(i, 1)]);
+        let (a, b) = ([a[0] - o[0], a[1] - o[1]], [b[0] - o[0], b[1] - o[1]]);
         cible += 0.5 * (a[0] * b[1] - b[0] * a[1]);
     }
     if cible <= 0.0 || (somme - cible).abs() > 0.01 * cible {
@@ -1054,6 +1058,18 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
     let Some((xz, tris, ext)) = maillage else { return Forme::default() };
     let nv = xz.len() as u32;
     let sur_contour: HashMap<u32, usize> = ext.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    // L'aplanissement (0.178) : le plan ajusté aux hauteurs des bouches (moindres
+    // carrés), si elles s'en écartent peu ; les sommets libres y sont posés, raccordés
+    // en douceur à la voirie sur `APLANIR_BORD` mètres autour des bouches
+    let bouches_pts: Vec<([f32; 2], f32)> = impose.iter().map(|(&k, &(h, _))| (contour[k], h)).collect();
+    let plan_plaque = plan_moindres_carres(&bouches_pts).filter(|_| car.aplanir).filter(|pl| bouches_pts.iter().all(|&(p, h)| (pl(p) - h).abs() <= APLANIR_ECART));
+    let aplanir = |p: [f32; 2], h: f32| -> f32 {
+        let Some(pl) = &plan_plaque else { return h };
+        let d = bouches_pts.iter().map(|&(q, _)| (q[0] - p[0]).hypot(q[1] - p[1])).fold(f32::MAX, f32::min);
+        let u = (d / APLANIR_BORD).clamp(0.0, 1.0);
+        let w = u * u * (3.0 - 2.0 * u);
+        h + (pl(p) - h) * w
+    };
     let mut f = Forme::default();
     let mut dessous = Vec::with_capacity(xz.len());
     for (i, &p) in xz.iter().enumerate() {
@@ -1061,7 +1077,7 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
             Some(&e) => e,
             None => {
                 let propre = car.plan(p[0], p[1]).h(p[0], p[1]);
-                let h = champ.h(p[0], p[1], propre).unwrap_or(propre);
+                let h = aplanir(p, champ.h(p[0], p[1], propre).unwrap_or(propre));
                 (h, bas_libre(p, h))
             }
         };
@@ -1106,6 +1122,145 @@ fn plaque(car: &Carrefour, champ: &crate::champ_voirie::Champ, haut: impl Fn(f32
         f.faces.iter_mut().for_each(|p| p.reverse());
     }
     f
+}
+
+/// Les tranchées ouvertes (0.181) : là où une voie au sol passe plus bas que le
+/// terrain de plus que sa défonce (la rampe d'un tunnel, une trémie), le terrain
+/// au-dessus est ôté jusqu'à `TRANCHEE_DESSUS` au-dessus de lui, entre deux murs droits
+/// au bord de la chaussée (avant, il restait une croûte de terrain irrégulière
+/// au-dessus de la défonce) ; en travers, tous les `ETAI_PAS` mètres là où la tranchée
+/// a plus de `ETAI_PROFONDEUR` mètres, un étai de béton d'un mur à l'autre, au ras du
+/// terrain. Rend les volumes ôtés et les étais.
+fn tranchees(t: &[Pt], champ: &crate::champ_voirie::Champ, terre: impl Fn([f32; 2]) -> f32) -> (Vec<Forme>, Vec<Forme>) {
+    let n = t.len();
+    let (mut ouvertes, mut etais) = (Vec::new(), Vec::new());
+    // Seulement les chaînes qui passent en tunnel : leurs rampes d'accès
+    if n < 2 || !t.iter().any(|p| p[5] > 1.5) {
+        return (ouvertes, etais);
+    }
+    let dir = |i: usize| {
+        let (a, b) = (t[i.saturating_sub(1)], t[(i + 1).min(n - 1)]);
+        let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-6);
+        [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
+    };
+    // Par point : la chaussée à l'axe, le terrain le plus haut et le plus bas en travers
+    let mut h = vec![0.0f32; n];
+    let mut ter = vec![(0.0f32, 0.0f32); n];
+    let mut ouvert = vec![false; n];
+    for i in 0..n {
+        let p = t[i];
+        let d = dir(i);
+        let g = [-d[1], d[0]];
+        h[i] = hauteur_voirie(Some(champ), &p, [p[0], p[1]]);
+        let w = p[6] + 0.5;
+        let ts: Vec<f32> = [-w, -w * 0.5, 0.0, w * 0.5, w].iter().map(|&o| terre([p[0] + g[0] * o, p[1] + g[1] * o])).collect();
+        ter[i] = (ts.iter().copied().fold(f32::MIN, f32::max), ts.iter().copied().fold(f32::MAX, f32::min));
+        ouvert[i] = p[5] < 0.5 && ter[i].0 > h[i] + DEFONCE_HAUT + TRANCHEE_SEUIL;
+    }
+    // Les suites de points ouverts, élargies d'un point de chaque côté
+    let mut i = 0;
+    while i < n {
+        if !ouvert[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < n && ouvert[j + 1] {
+            j += 1;
+        }
+        let (a, b) = (i.saturating_sub(1), (j + 1).min(n - 1));
+        i = j + 1;
+        if b <= a {
+            continue;
+        }
+        // Le dessus : le terrain le plus haut alentour (deux points de part et d'autre)
+        let dessus: Vec<f32> = (a..=b).map(|k| (k.saturating_sub(2)..=(k + 2).min(n - 1)).map(|m| ter[m].0).fold(f32::MIN, f32::max) + TRANCHEE_DESSUS).collect();
+        let t2: Vec<Pt> = (a..=b).zip(&dessus).map(|(k, &y)| [t[k][0], t[k][1], y, 0.0, 0.0, 0.0, t[k][6]]).collect();
+        let fond = |m: [f32; 2]| {
+            let k = (a..=b).min_by(|&x, &y| (t[x][0] - m[0]).hypot(t[x][1] - m[1]).total_cmp(&(t[y][0] - m[0]).hypot(t[y][1] - m[1]))).unwrap_or(a);
+            h[k] + DEFONCE_HAUT - 0.3
+        };
+        let bas = |g: [f32; 2], d: [f32; 2], m: [f32; 2], _: [f32; 3], _: bool| [fond(g), fond(m), fond(d)];
+        ouvertes.push(ruban(&t2, [None, None], None, |y| y, bas).en(mq::matiere::BETON));
+        // Les étais
+        let mut s = 0.0f32;
+        let mut prochain = ETAI_PAS * 0.5;
+        for k in a..=b {
+            if k > a {
+                s += (t[k][0] - t[k - 1][0]).hypot(t[k][1] - t[k - 1][1]);
+            }
+            if s < prochain {
+                continue;
+            }
+            prochain = s + ETAI_PAS;
+            if ter[k].1 - h[k] < ETAI_PROFONDEUR {
+                continue;
+            }
+            let haut = ter[k].1;
+            etais.push(poutre([t[k][0], t[k][1]], dir(k), ETAI_EPAISSEUR * 0.5, t[k][6] + 0.6, haut - ETAI_HAUTEUR, haut).en(mq::matiere::BETON));
+        }
+    }
+    (ouvertes, etais)
+}
+
+/// Une poutre couchée : centrée en `c`, de demi-longueur `l` le long de `d`, de
+/// demi-largeur `w` en travers, de `y0` à `y1`.
+fn poutre(c: [f32; 2], d: [f32; 2], l: f32, w: f32, y0: f32, y1: f32) -> Forme {
+    let g = [-d[1], d[0]];
+    let p = |i: usize| {
+        let a = if i & 1 == 0 { -l } else { l };
+        let b = if i & 4 == 0 { -w } else { w };
+        let y = if i & 2 == 0 { y0 } else { y1 };
+        [c[0] + d[0] * a + g[0] * b, y, c[1] + d[1] * a + g[1] * b]
+    };
+    let mut f = Forme { sommets: (0..8).map(p).collect(), faces: vec![vec![0, 4, 6, 2], vec![1, 3, 7, 5], vec![0, 1, 5, 4], vec![2, 6, 7, 3], vec![0, 2, 3, 1], vec![4, 5, 7, 6]], matieres: Vec::new() };
+    if f.volume() < 0.0 {
+        f.faces.iter_mut().for_each(|p| p.reverse());
+    }
+    f
+}
+
+/// Une tranchée s'ouvre où le terrain dépasse la défonce de tant (m) ; son dessus à
+/// tant au-dessus du terrain. Les étais : leur pas, la profondeur à partir de laquelle
+/// il y en a, leur épaisseur (le long de la voie) et leur hauteur.
+/// (0.182 : −1 m ; à +0,3 m, au début de la tranchée restait une lame de terrain au ras
+/// du dessus de la défonce, déchirée)
+const TRANCHEE_SEUIL: f32 = -1.0;
+const TRANCHEE_DESSUS: f32 = 1.0;
+const ETAI_PAS: f32 = 5.0;
+const ETAI_PROFONDEUR: f32 = 3.5;
+const ETAI_EPAISSEUR: f32 = 0.6;
+const ETAI_HAUTEUR: f32 = 0.8;
+
+/// L'aplanissement des plaques : les bouches à au plus tant (m) du plan ajusté, et la
+/// largeur du raccord autour des bouches.
+const APLANIR_ECART: f32 = 0.6;
+const APLANIR_BORD: f32 = 5.0;
+
+/// Le plan h = a + b·x + c·z le plus proche des points (x, z, h), s'il y en a assez et
+/// qu'ils ne sont pas alignés.
+fn plan_moindres_carres(pts: &[([f32; 2], f32)]) -> Option<impl Fn([f32; 2]) -> f32> {
+    if pts.len() < 3 {
+        return None;
+    }
+    let n = pts.len() as f64;
+    let (mx, mz, mh) = pts.iter().fold((0.0, 0.0, 0.0), |a, &(p, h)| (a.0 + p[0] as f64 / n, a.1 + p[1] as f64 / n, a.2 + h as f64 / n));
+    let (mut sxx, mut sxz, mut szz, mut sxh, mut szh) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+    for &(p, h) in pts {
+        let (x, z, h) = (p[0] as f64 - mx, p[1] as f64 - mz, h as f64 - mh);
+        sxx += x * x;
+        sxz += x * z;
+        szz += z * z;
+        sxh += x * h;
+        szh += z * h;
+    }
+    let det = sxx * szz - sxz * sxz;
+    if det.abs() < 1e-6 * (sxx + szz).max(1e-9).powi(2) {
+        return None;
+    }
+    let b = (sxh * szz - szh * sxz) / det;
+    let c = (szh * sxx - sxh * sxz) / det;
+    Some(move |p: [f32; 2]| (mh + b * (p[0] as f64 - mx) + c * (p[1] as f64 - mz)) as f32)
 }
 
 /// Ce que le dessus d'une défonce de place dépasse le sol (m) : de quoi couper le
@@ -1335,6 +1490,8 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     let champ = d.champ_voirie();
     noter("champ de hauteur de la voirie (une fois)");
     let (mut remblais, mut defonces) = (Vec::new(), Vec::new());
+    // Les étais des tranchées ouvertes : unis après les défonces
+    let mut etais: Vec<Forme> = Vec::new();
     // Les rubans des chaînes de voies : au sol posés sur le champ de la voirie, une
     // section tous les PAS_RUBAN mètres ; en pont et en tunnel, leur profil et une dalle
     // de OUVRAGE mètres dessous
@@ -1357,6 +1514,9 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
         remblais.push(rem.en(mq::matiere::REMBLAI));
         let fond = if bus { mq::matiere::CHAUSSEE_BUS } else { mq::matiere::CHAUSSEE };
         defonces.push(sous_terre(revetir(chaussee_en(ruban_net(&t, bouts, nets, Some(&*champ), |h| h + DEFONCE_HAUT, bas_defonce), fond), &chaine.revetements), &t, terre));
+        let (ouvertes, poutres) = tranchees(&t, &champ, terre);
+        defonces.extend(ouvertes);
+        etais.extend(poutres);
     }
     // Les carrefours simples : une plaque chacun
     for car in champ.carrefours_dans(b, 10.0) {
@@ -1409,6 +1569,9 @@ fn faire(d: &Donnees, cle: Cle, defonces_a_part: bool, memoire: Option<&Memoire>
     familles.push(Famille { op: Op::Union, formes: batiments.iter().map(|f| &**f).collect(), arbre: true });
     familles.push(Famille { op: Op::Union, formes: remblais.iter().filter(|f| !f.vide()).collect(), arbre: true });
     familles.push(Famille { op: Op::Difference, formes: defonces.iter().filter(|f| !f.vide()).collect(), arbre: true });
+    if !etais.is_empty() {
+        familles.push(Famille { op: Op::Union, formes: etais.iter().collect(), arbre: true });
+    }
     familles.push(Famille { op: Op::Intersection, formes: vec![&boite], arbre: false });
     let simple = batiments.is_empty() && remblais.iter().all(|f| f.vide()) && rem.iter().all(|f| f.vide()) && epa.iter().all(|f| f.vide()) && def.vide();
     if let Some(m) = memoire {

@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const BARRE: Id = id("barre-application");
+const PILOTE: Id = id("barre-pilote");
 const LOGO: Id = id("logo");
 const TACHES: Id = id("barre-taches");
 const LANCEUR: Id = id("lanceur");
@@ -515,6 +516,20 @@ impl App {
             cx.text_at(x, r.cy(), &s, 15.0, col.texte);
             x -= cx.pad();
         }
+        // Le pilotage, à gauche de l'heure : le petit personnage, orange armé, pâle
+        // désarmé ; un appui l'arme ou le désarme
+        let z = Rect::new(x - r.h, r.y, r.h, r.h);
+        if cx.ui.click(PILOTE, z, None) {
+            let arme = !crate::pilote::arme();
+            if let Err(e) = crate::pilote::armer(arme, self.commun.dossier.as_deref()) {
+                crate::android::log(&format!("pilotage : {e}"));
+            }
+        }
+        if cx.ui.pressed(PILOTE) {
+            cx.dl.rrect(z, 0.0, col.puce);
+        }
+        dessiner_pilote(cx, z, crate::pilote::arme());
+        x -= r.h;
         let mut debut = r.x + r.h + cx.pad();
         // En fenêtres libres, la barre des tâches : une case par fenêtre, à droite du
         // logo ; elle prend au plus la moitié de la place
@@ -1179,5 +1194,34 @@ mod tests {
         let z = r.app.applets.zones().iter().find(|(k, _)| *k == "orchestre").unwrap().1;
         r.tap(z.cx(), z.cy());
         assert_eq!(r.app.applets.ouvert, Some("orchestre"));
+    }
+}
+
+/// Le petit personnage du pilotage, en pixels, centré dans `z` : orange quand le
+/// pilotage est armé, pâle sinon.
+fn dessiner_pilote(cx: &mut Cx, z: Rect, arme: bool) {
+    // 9 × 6 cases : la tête et le corps, les yeux (o), les bras (de chaque côté), les pattes
+    const MOTIF: [&str; 6] = [
+        ".#######.",
+        ".#o###o#.",
+        "#########",
+        ".#######.",
+        ".#.#.#.#.",
+        ".#.#.#.#.",
+    ];
+    let col = cx.couleurs();
+    let corps = if arme { [217, 119, 87, 255] } else { col.pale };
+    let case = (z.h * 0.5 / MOTIF.len() as f32).max(1.0).round();
+    let (w, h) = (9.0 * case, MOTIF.len() as f32 * case);
+    let (x0, y0) = ((z.cx() - w / 2.0).round(), (z.cy() - h / 2.0).round());
+    for (j, ligne) in MOTIF.iter().enumerate() {
+        for (i, c) in ligne.chars().enumerate() {
+            let couleur = match c {
+                '#' => corps,
+                'o' => col.surface,
+                _ => continue,
+            };
+            cx.dl.rrect(Rect::new(x0 + i as f32 * case, y0 + j as f32 * case, case, case), 0.0, couleur);
+        }
     }
 }

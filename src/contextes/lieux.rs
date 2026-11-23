@@ -506,7 +506,7 @@ fn voie_neuve(l: &Lieu, trace: &[[f32; 2]], pont: bool, genre: u8, largeur: f32)
             sol[a..b].iter().sum::<f32>() / (b - a) as f32
         }).collect()
     };
-    Route { revetement: 0, files: sage_reel::Files::deduire(genre, largeur, 0), genre, largeur, points: pts.iter().zip(&hs).map(|(p, h)| [p[0], p[1], *h]).collect() }
+    Route { niveau: 0, revetement: 0, files: sage_reel::Files::deduire(genre, largeur, 0), genre, largeur, points: pts.iter().zip(&hs).map(|(p, h)| [p[0], p[1], *h]).collect() }
 }
 
 impl Lieux {
@@ -1368,10 +1368,14 @@ impl Lieux {
                 }
                 // En Maquette, un toucher ajoute la tuile sous le doigt à la sélection, ou
                 // l'en retire
+                // La sphère d'un nœud du réseau : le choisit (ou le laisse, touchée de
+                // nouveau)
                 Geste::Tap { x, y, .. } if self.maquette3d => {
                     if let Some(carte) = &self.carte {
                         if let Ok(d) = carte.donnees.read() {
-                            if let Some(c) = r.tuile_touchee(&d, zone, x, y) {
+                            if let Some(n) = r.noeud_touche(&d, zone, x, y, 24.0 * dp) {
+                                r.noeud_choisi = if r.noeud_choisi == Some(n) { None } else { Some(n) };
+                            } else if let Some(c) = r.tuile_touchee(&d, zone, x, y) {
                                 self.selection.basculer(c);
                             }
                         }
@@ -1488,6 +1492,43 @@ impl Lieux {
             cx.dl.rrect(Rect::new(bx, by, bw, bh), bh / 2.0, c.puce);
             let f = faites as f32 / total.max(1) as f32;
             cx.dl.rrect(Rect::new(bx, by, (bw * f).max(bh), bh), bh / 2.0, c.accent);
+        }
+        // Le nœud choisi : ce qu'on en sait, en bas à gauche (au-dessus de la génération)
+        if let (true, Some(n), Some(carte)) = (self.maquette3d, r.noeud_choisi, &self.carte) {
+            let lignes = carte.donnees.read().ok().and_then(|d| d.reseau_pret()).map(|res| crate::fils::decrire(&res, n));
+            if let Some(lignes) = lignes {
+                let c = cx.couleurs();
+                let (taille, pad) = (12.0, cx.pad());
+                let lh = 17.0 * cx.dp;
+                // Les longues lignes passent à la ligne (au plus 520 dp, et la vue)
+                let largeur = (520.0 * cx.dp).min(zone.w - 2.0 * m - 2.0 * pad).max(40.0 * cx.dp);
+                let mut coupees: Vec<(usize, String)> = Vec::new();
+                for (k, l) in lignes.iter().enumerate() {
+                    let mut cours = String::new();
+                    for mot in l.split(' ') {
+                        let essai = if cours.is_empty() { mot.to_string() } else { format!("{cours} {mot}") };
+                        if !cours.is_empty() && cx.measure(&essai, taille) > largeur {
+                            coupees.push((k, std::mem::take(&mut cours)));
+                            cours = format!("   {mot}");
+                        } else {
+                            cours = essai;
+                        }
+                    }
+                    coupees.push((k, cours));
+                }
+                coupees.push((usize::MAX, "Toucher de nouveau sa sphère pour fermer".into()));
+                let lignes = coupees;
+                let w = lignes.iter().map(|l| cx.measure(&l.1, taille)).fold(0.0f32, f32::max).min(largeur) + 2.0 * pad;
+                let h = lignes.len() as f32 * lh + 2.0 * pad * 0.6;
+                let bas = zone.y + zone.h - m - if r.generation.is_some() { cx.commande() + m } else { 0.0 };
+                let p = Rect::new(zone.x + m, bas - h, w, h);
+                cx.ombre(p, 6.0 * cx.dp, 6.0);
+                cx.dl.rrect(p, 6.0 * cx.dp, c.surface);
+                for (i, (k, l)) in lignes.iter().enumerate() {
+                    let teinte = if *k == 0 { c.accent } else if *k == usize::MAX { c.pale } else { c.texte };
+                    cx.text_at(p.x + pad, p.y + pad * 0.6 + (i as f32 + 0.7) * lh, l, taille, teinte);
+                }
+            }
         }
         if self.maquette3d && self.suivi3d {
             let haut = y + cx.commande() + m;
@@ -1830,7 +1871,12 @@ impl Lieux {
                         if s.files {
                             cx.paragraph(&mut b, "En cyan, les lignes entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens.");
                         }
-                        if s.files != avant {
+                        let avant_fils = s.fils;
+                        cx.toggle(&mut b, sub_id(base, 668), "Fils de circulation (essai)", &mut s.fils);
+                        if s.fils {
+                            cx.paragraph(&mut b, "En vert, un fil par file sur son axe (en rose, réservée au bus) ; en jaune vert, la partie qui glisse pour prolonger une autre file ; en bleu, les virages d'une voie à une autre. Touchez la sphère d'un nœud pour son détail. Un réseau d'essai : la chaussée et les files ne changent pas.");
+                        }
+                        if s.files != avant || s.fils != avant_fils {
                             if let Some(r) = self.trois_d.as_mut() {
                                 r.refaire_traces();
                             }
@@ -2742,8 +2788,13 @@ impl Contexte for Lieux {
                         self.sur.files = m.get(2).is_none_or(|v| v != "non");
                         r.refaire_traces();
                     }
+                    (Some("noeud"), n) => r.noeud_choisi = n.map(|x| x as usize),
+                    (Some("fils"), _) => {
+                        self.sur.fils = m.get(2).is_none_or(|v| v != "non");
+                        r.refaire_traces();
+                    }
                     (None, _) => {}
-                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire | files [oui | non]]".into())),
+                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire | files [oui | non] | fils [oui | non]]".into())),
                 }
                 Ok(format!("traces distance {} rayon {} tuiles {} · remblai distance {} rayon {} · {}", self.sur.traces_distance, self.sur.traces_rayon, r.traces_tuiles, self.sur.remblai_distance, self.sur.remblai_rayon, r.traces_bilan))
             }
@@ -3110,7 +3161,7 @@ mod tests {
         let mut lieu = Lieu::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 0.0, &vec![10.0; n * n], &vec![false; n * n], Vec::new(), Vec::new(), Vec::new());
         let ligne = |numero: &str, arrets: Vec<u32>| Ligne { mode: BUS, numero: numero.into(), nom: String::new(), couleur: None, arrets, trace: vec![Morceau { ou: SOL, points: vec![[0.0, 0.0], [100.0, 0.0]] }] };
         lieu.transports = Transports {
-            tunnels: vec![Route { revetement: 0, files: Default::default(), genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
+            tunnels: vec![Route { niveau: 0, revetement: 0, files: Default::default(), genre: sage_reel::ROUTE, largeur: 6.0, points: vec![[0.0, 200.0, 4.0], [100.0, 200.0, 4.0]] }],
             rails: vec![Rail { mode: METRO, ou: TUNNEL, niveau: -2, points: vec![[0.0, 400.0, 2.0], [100.0, 400.0, 2.0]] }],
             arrets: vec![Arret { modes: 1 << BUS, x: 50.0, z: 0.0, nom: "Mairie".into(), abri: true, niveau: 0 }, Arret { modes: 1 << METRO, x: 50.0, z: 410.0, nom: "Théâtre".into(), abri: false, niveau: -1 }],
             lignes: vec![ligne("10", vec![0]), ligne("2", vec![0]), ligne("2", vec![0]), Ligne { mode: METRO, ..ligne("M", vec![]) }],

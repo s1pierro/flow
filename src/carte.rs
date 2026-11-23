@@ -155,7 +155,7 @@ impl Donnees {
         self.traces = par_boites(&mut self.morceaux.iter().map(|&(k, j)| elargir(boite(t.lignes[k as usize].trace[j as usize].points.iter().map(|p| &p[..])), 4.0)));
         // Les tabliers des ponts, et ceux des voies ferrées (une voie sans trottoirs)
         let mut ponts_3d = self.lieu.ponts.clone();
-        ponts_3d.extend(self.lieu.transports.rails.iter().filter(|r| r.ou == sage_reel::transports::PONT).map(|r| Route { revetement: 0, files: Default::default(), genre: CHEMIN, largeur: sage_reel::transports::largeur(r.mode) + 2.0, points: r.points.clone() }));
+        ponts_3d.extend(self.lieu.transports.rails.iter().filter(|r| r.ou == sage_reel::transports::PONT).map(|r| Route { niveau: 0, revetement: 0, files: Default::default(), genre: CHEMIN, largeur: sage_reel::transports::largeur(r.mode) + 2.0, points: r.points.clone() }));
         self.tabliers = sage_reel::tabliers::tabliers(&ponts_3d);
         self.voirie_demandee += 1;
         let (n, routes, ponts, tabliers, prete) = (self.voirie_demandee, self.lieu.routes.clone(), self.lieu.ponts.clone(), self.tabliers.clone(), self.voirie_prete.clone());
@@ -237,6 +237,11 @@ impl Donnees {
     /// besoin.
     /// Le réseau des voies nivelé (quelques secondes pour une ville, la première fois).
     /// Le champ de hauteur de la voirie au sol (sur le réseau nivelé).
+    /// Le champ de la voirie s'il est déjà fait (sans le calculer).
+    pub fn champ_voirie_pret(&self) -> Option<Arc<crate::champ_voirie::Champ>> {
+        self.champ_voirie.get().cloned()
+    }
+
     pub fn champ_voirie(&self) -> Arc<crate::champ_voirie::Champ> {
         self.champ_voirie
             .get_or_init(|| {
@@ -1253,7 +1258,7 @@ mod tests {
         let h: Vec<f32> = (0..n * n).map(|i| ((i % n) as f32 * 0.3).sin() * 20.0 + 50.0).collect();
         let eau: Vec<bool> = (0..n * n).map(|i| i % n < 20).collect();
         let b = Batiment::plat(MAISON, 49.0, 60.0, vec![[0.0, 0.0], [40.0, 0.0], [40.0, 30.0], [0.0, 30.0]]);
-        let r = Route { revetement: 0, files: Default::default(), genre: ROUTE, largeur: 8.0, points: vec![[-300.0, 50.0, 50.0], [300.0, 50.0, 50.0]] };
+        let r = Route { niveau: 0, revetement: 0, files: Default::default(), genre: ROUTE, largeur: 8.0, points: vec![[-300.0, 50.0, 50.0], [300.0, 50.0, 50.0]] };
         let m = cote_sol(n);
         Lieu::new("Essai", 49.0, 1.0, 0.0, 0.0, pas, 40.0, &h, &eau, vec![r], vec![b], Vec::new()).avec_sol(vec![BOIS; m * m])
     }
@@ -1293,7 +1298,7 @@ mod tests {
     fn l_ordre_des_couches_se_regle() {
         // Une route et une voie de bus qui se croisent en (100, 50), dans les bois
         let mut l = lieu();
-        l.routes.push(Route { revetement: 0, files: Default::default(), genre: BUS, largeur: 8.0, points: vec![[100.0, -200.0, 50.0], [100.0, 300.0, 50.0]] });
+        l.routes.push(Route { niveau: 0, revetement: 0, files: Default::default(), genre: BUS, largeur: 8.0, points: vec![[100.0, -200.0, 50.0], [100.0, 300.0, 50.0]] });
         let mut d = Donnees::new(l);
         let (x0, _, c) = d.monde();
         let t = c / 256.0;
@@ -1342,7 +1347,7 @@ mod tests {
     fn les_transports_se_peignent() {
         use sage_reel::transports::*;
         let mut l = lieu();
-        l.transports.tunnels.push(Route { revetement: 0, files: Default::default(), genre: GRANDE, largeur: 10.0, points: vec![[100.0, -200.0, 40.0], [100.0, 300.0, 40.0]] });
+        l.transports.tunnels.push(Route { niveau: 0, revetement: 0, files: Default::default(), genre: GRANDE, largeur: 10.0, points: vec![[100.0, -200.0, 40.0], [100.0, 300.0, 40.0]] });
         l.transports.rails.push(Rail { mode: METRO, ou: SOL, niveau: 0, points: vec![[-200.0, 50.0, 50.0], [300.0, 50.0, 50.0]] });
         l.transports.arrets.push(Arret { modes: 1 << BUS, x: 0.0, z: 0.0, nom: "Essai".into(), abri: true, niveau: 0 });
         let d = Donnees::new(l);
@@ -1372,7 +1377,7 @@ mod tests {
         // Un pont sur l'eau, à l'ouest
         let mut l = lieu();
         let xo = origine() as f32 + 64.0 * 5.0;
-        l.ponts.push(Route { revetement: 0, files: Default::default(), genre: GRANDE, largeur: 20.0, points: vec![[xo - 200.0, 0.0, 60.0], [xo + 200.0, 0.0, 60.0]] });
+        l.ponts.push(Route { niveau: 0, revetement: 0, files: Default::default(), genre: GRANDE, largeur: 20.0, points: vec![[xo - 200.0, 0.0, 60.0], [xo + 200.0, 0.0, 60.0]] });
         let d = Donnees::new(l);
         let (x0, _, c) = d.monde();
         let t = c / 256.0;

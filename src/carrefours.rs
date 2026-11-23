@@ -62,6 +62,9 @@ pub struct Carrefour {
     pub trous: Vec<Vec<[f32; 2]>>,
     pub bouches: Vec<(usize, Bouche)>,
     pub boite: [f32; 4],
+    /// Le dessus posé sur un plan (`materialisation::plaque`) : les carrefours, pas les
+    /// fourches (longues, elles suivent la pente de leurs voies ; 0.183).
+    pub aplanir: bool,
 }
 
 impl Carrefour {
@@ -137,8 +140,13 @@ impl Bras {
 /// `bouts` : début, fin), ses coupes : (abscisse depuis le bout, bouche) au début et à
 /// la fin.
 #[allow(clippy::type_complexity)]
-pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)], fourches: &std::collections::HashSet<usize>) -> (Vec<Carrefour>, Vec<[Option<(f32, Bouche)>; 2]>, Vec<bool>) {
+pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)], fourches: &std::collections::HashSet<usize>, deja: &[(usize, bool, f32, Bouche)]) -> (Vec<Carrefour>, Vec<[Option<(f32, Bouche)>; 2]>, Vec<bool>) {
     let mut coupes: Vec<[Option<(f32, Bouche)>; 2]> = vec![[None, None]; voies.len()];
+    // Les coupes déjà faites (les plaques des fourches) : les bouches des autres
+    // carrefours en tiennent compte
+    for &(k, debut, s, bo) in deja {
+        coupes[k][usize::from(!debut)] = Some((s, bo));
+    }
     // Les bouts des chaînes à chaque nœud
     let mut aux: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
     for (k, &(a, b)) in bouts.iter().enumerate() {
@@ -376,7 +384,7 @@ pub fn construire(r: &Reseau, voies: &[Chaine], bouts: &[(usize, usize)], fourch
             bouches.push((k, bo));
             coupes[b.k][usize::from(!b.debut)] = Some((b.s, bo));
         }
-        carrefours.push(Carrefour { noeuds: vec![n], c, plans: vec![pl], contour, trous: Vec::new(), bouches, boite });
+        carrefours.push(Carrefour { noeuds: vec![n], c, plans: vec![pl], contour, trous: Vec::new(), bouches, boite, aplanir: true });
     }
     (carrefours, coupes, absorbees)
 }
@@ -402,4 +410,263 @@ pub fn couper(points: &[Pt], coupes: &[Option<(f32, Bouche)>; 2]) -> Vec<Pt> {
         v.push(bo.q);
     }
     v
+}
+
+/// Une fourche en plaque (0.176) : du tronc (coupé à `S_MIN` du nœud) jusqu'au nez,
+/// là où les rubans des deux branches cessent de se chevaucher ; les branches coupées
+/// au nez. Les bords extérieurs passent en douceur de ceux du tronc à ceux des
+/// branches. Rend la plaque et les coupes (chaîne, au début, abscisse, bouche), ou rien
+/// (pas de nez assez tôt, contour qui ne fait pas l'étoile) : la fourche se fait alors
+/// en décalant les branches.
+pub fn plaque_fourche(r: &Reseau, voies: &[Chaine], n: usize, tronc: (usize, bool), b1: (usize, bool), b2: (usize, bool), autre: &dyn Fn(usize, bool) -> f32) -> Option<(Carrefour, Vec<(usize, bool, f32, Bouche)>)> {
+    let c = [r.noeuds[n].p[0], r.noeuds[n].p[1]];
+    let bras_de = |(k, debut): (usize, bool)| -> Option<Bras> {
+        let v = &voies[k];
+        let pts: Vec<Pt> = if debut { v.points.clone() } else { v.points.iter().rev().copied().collect() };
+        if pts.len() < 2 || dist([pts[0][0], pts[0][1]], c) > 0.5 {
+            return None;
+        }
+        let mut s0 = vec![0.0f32; pts.len()];
+        for i in 1..pts.len() {
+            s0[i] = s0[i - 1] + (pts[i][0] - pts[i - 1][0]).hypot(pts[i][1] - pts[i - 1][1]);
+        }
+        let w = pts[0][6];
+        let mut b = Bras { k, debut, pts, s0, u: [1.0, 0.0], w, ang: 0.0, s: S_MIN };
+        let (q, _) = b.a(6.0f32.min(b.longueur()));
+        b.u = norm([q[0] - c[0], q[1] - c[1]]);
+        b.ang = b.u[1].atan2(b.u[0]);
+        Some(b)
+    };
+    let Some(bt) = bras_de(tronc) else { echec(0); return None };
+    let (Some(mut x1), Some(mut x2)) = (bras_de(b1), bras_de(b2)) else { echec(0); return None };
+    let trace = std::env::var("FLOW_FOURCHE").is_ok_and(|v| {
+        let x: Vec<f32> = v.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        x.len() == 2 && dist([x[0], x[1]], c) < 3.0
+    });
+    // La place de chaque bras : sa longueur moins la coupe de son autre bout
+    let place = |b: &Bras| b.longueur() - autre(b.k, !b.debut) - RESTE_FOURCHE;
+    if place(&bt) < 0.5 {
+        if trace {
+            eprintln!("  plaque : tronc trop court ({:.1} m)", bt.longueur());
+        }
+        echec(1); return None;
+    }
+    // Le nez : le premier pas où les deux rubans se quittent
+    let lmax = NEZ_MAX.min(place(&x1)).min(place(&x2));
+    if lmax < S_MIN + 2.0 {
+        if trace {
+            eprintln!("  plaque : pas de place pour le nez ({lmax:.1} m)");
+        }
+        echec(2); return None;
+    }
+    let mut s = S_MIN;
+    let mut nez = None;
+    while s <= lmax {
+        let (p, _) = x1.a(s);
+        let (q, _) = x2.a(s);
+        // Les rubans se quittent à plat, ou l'un descend (ou monte) loin de l'autre :
+        // une rampe qui longe sa voie (0.184 ; avant, la plaque la couvrait jusqu'à
+        // `NEZ_MAX` et bouchait la descente)
+        if dist([p[0], p[1]], [q[0], q[1]]) >= p[6] + q[6] || (p[2] - q[2]).abs() > NEZ_DENIVELE {
+            nez = Some(s);
+            break;
+        }
+        s += 1.0;
+    }
+    if trace {
+        eprintln!("  plaque : nez {nez:?} (au plus {lmax:.1} m)");
+    }
+    // Pas de nez avant la fin de la place : la plaque s'arrête là, les deux bouches
+    // rognées du côté où les rubans se chevauchent encore
+    let s_nez = nez.map_or(lmax, |s| (s + NEZ_MARGE).min(lmax));
+    x1.s = s_nez;
+    x2.s = s_nez;
+    let mut bt = bt;
+    bt.s = S_MIN.min(place(&bt));
+    let Some(pl) = plan(r, n) else { echec(3); return None };
+    let ut = bt.u;
+    let wt = bt.w;
+    let it_tronc = 0usize;
+    let mut bras = vec![bt, x1, x2];
+    // Le tronc d'abord, puis les branches dans le sens direct
+    let a0 = bras[0].ang;
+    bras[1..].sort_by(|a, b| apres(a0, a.ang).total_cmp(&apres(a0, b.ang)));
+    let m = 3;
+    let coupes_n: Vec<(Pt, [f32; 2], [f32; 2], [f32; 2])> = bras
+        .iter()
+        .map(|b| {
+            let (q, d) = b.a(b.s);
+            let o = [q[0], q[1]];
+            (q, d, plus(o, droite(d), q[6]), plus(o, gauche(d), q[6]))
+        })
+        .collect();
+    let mut coupes_n = coupes_n;
+    {
+        // Les bords intérieurs des deux branches (bras 1 et 2), rognés s'ils se croisent
+        let (p1, p2) = (coupes_n[1].0, coupes_n[2].0);
+        let (a, b) = ([p1[0], p1[1]], [p2[0], p2[1]]);
+        let d = dist(a, b);
+        if d < p1[6] + p2[6] {
+            let u = norm([b[0] - a[0], b[1] - a[1]]);
+            let t = d * p1[6] / (p1[6] + p2[6]);
+            coupes_n[1].3 = plus(a, u, (t - 0.05).max(0.05));
+            coupes_n[2].2 = plus(a, u, (t + 0.05).min(d - 0.05));
+        }
+    }
+    let lisse = |u: f32| {
+        let u = u.clamp(0.0, 1.0);
+        u * u * (3.0 - 2.0 * u)
+    };
+    let mut v: Vec<([f32; 2], bool)> = Vec::new();
+    let mut indices_bouches = Vec::new();
+    for i in 0..m {
+        let j = (i + 1) % m;
+        let (_, _, bdi, bgi) = coupes_n[i];
+        indices_bouches.push(v.len());
+        v.push((bdi, true));
+        v.push(([coupes_n[i].0[0], coupes_n[i].0[1]], true));
+        v.push((bgi, false));
+        if i == it_tronc {
+            // Du bord gauche du tronc au bord droit de la branche j, jusqu'au nez
+            let bord = plus(c, gauche(ut), wt);
+            v.push((bord, false));
+            let b = &bras[j];
+            let mut s = 1.0;
+            while s < b.s - 0.5 {
+                let (p, d) = b.a(s);
+                let propre = plus([p[0], p[1]], droite(d), p[6]);
+                let cible = plus(bord, ut, -s);
+                let k = 1.0 - lisse(s / b.s);
+                v.push(([propre[0] + (cible[0] - propre[0]) * k, propre[1] + (cible[1] - propre[1]) * k], false));
+                s += 1.0;
+            }
+        } else if j == it_tronc {
+            // Du nez, le long du bord gauche de la branche i, au bord droit du tronc
+            let bord = plus(c, droite(ut), wt);
+            let b = &bras[i];
+            let mut s = (b.s - 1.0).floor();
+            while s >= 1.0 {
+                let (p, d) = b.a(s);
+                let propre = plus([p[0], p[1]], gauche(d), p[6]);
+                let cible = plus(bord, ut, -s);
+                let k = 1.0 - lisse(s / b.s);
+                v.push(([propre[0] + (cible[0] - propre[0]) * k, propre[1] + (cible[1] - propre[1]) * k], false));
+                s -= 1.0;
+            }
+            v.push((bord, false));
+        }
+        // Entre les deux branches : le nez, d'une bouche à l'autre
+    }
+    // Les côtés recoupés tous les PAS mètres, les points confondus ôtés
+    let nv = v.len();
+    let mut contour: Vec<[f32; 2]> = Vec::with_capacity(nv * 2);
+    let mut bouches_k = Vec::new();
+    for i in 0..nv {
+        let (p, cote_bouche) = v[i];
+        let est_bouche = indices_bouches.iter().any(|&b| i >= b && i <= b + 2);
+        if indices_bouches.contains(&i) {
+            bouches_k.push(contour.len());
+        } else if !est_bouche && contour.last().is_some_and(|&l| dist(l, p) < 0.05) {
+            continue;
+        }
+        contour.push(p);
+        if cote_bouche {
+            continue;
+        }
+        let q = v[(i + 1) % nv].0;
+        let k = (dist(p, q) / PAS).ceil() as usize;
+        for t in 1..k {
+            contour.push(plus(p, [q[0] - p[0], q[1] - p[1]], t as f32 / k as f32));
+        }
+    }
+    // Un polygone simple, dans le sens direct (maillé par Delaunay, pas en anneaux)
+    if !polygone_simple(&contour) {
+        if trace {
+            eprintln!("  plaque : contour qui se croise");
+        }
+        echec(4);
+        return None;
+    }
+    let o = contour[0];
+    let aire: f32 = (0..contour.len()).map(|i| {
+        let (p, q) = (contour[i], contour[(i + 1) % contour.len()]);
+        (p[0] - o[0]) * (q[1] - o[1]) - (q[0] - o[0]) * (p[1] - o[1])
+    }).sum();
+    if aire <= 0.0 {
+        echec(5);
+        return None;
+    }
+    if !crate::materialisation::maillage_valide(&[contour.clone()]) {
+        if std::env::var_os("FLOW_DIAG").is_some() {
+            eprintln!("maillage refusé : fourche en ({:.1} ; {:.1}), {} points", c[0], c[1], contour.len());
+        }
+        echec(6);
+        return None;
+    }
+    let mut boite = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for p in &contour {
+        boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
+    }
+    let mut bouches = Vec::new();
+    let mut coupes = Vec::new();
+    for (i, b) in bras.iter().enumerate() {
+        let (q, _, bd, bg) = coupes_n[i];
+        let (g, d) = if b.debut { (bg, bd) } else { (bd, bg) };
+        let bo = Bouche { q, g, m: [q[0], q[1]], d };
+        bouches.push((bouches_k[i], bo));
+        coupes.push((b.k, b.debut, b.s, bo));
+    }
+    Some((Carrefour { noeuds: vec![n], c, plans: vec![pl], contour, trous: Vec::new(), bouches, boite, aplanir: false }, coupes))
+}
+
+/// Le nez d'une fourche : au plus à tant de mètres du nœud, et ce qu'il laisse au-delà
+/// du point où les rubans se quittent.
+const NEZ_MAX: f32 = 60.0;
+const NEZ_MARGE: f32 = 1.0;
+/// Le dénivelé (m) entre les deux branches qui arrête la plaque d'une fourche.
+const NEZ_DENIVELE: f32 = 0.3;
+/// Ce qu'il doit rester (m) d'une chaîne au-delà de la coupe d'une fourche.
+const RESTE_FOURCHE: f32 = 3.0;
+/// La coupe supposée (m) à l'autre bout d'une branche ou d'un tronc, s'il n'y en a pas
+/// déjà une (un carrefour la règle ensuite sur la place qui reste).
+pub const AUTRE_FOURCHE: f32 = 6.0;
+
+/// Les fourches sans plaque, par raison : bras, tronc trop court, pas de place pour le
+/// nez, pas de plan, contour qui se croise, à l'envers ou non maillable (pour le diagnostic).
+pub static ECHECS: std::sync::Mutex<[usize; 7]> = std::sync::Mutex::new([0; 7]);
+fn echec(i: usize) {
+    if let Ok(mut e) = ECHECS.lock() {
+        e[i] += 1;
+    }
+}
+
+/// Le contour fermé ne se croise pas (deux côtés non voisins ne se coupent pas).
+fn polygone_simple(c: &[[f32; 2]]) -> bool {
+    let n = c.len();
+    if n < 3 {
+        return false;
+    }
+    let cote = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+    let boites: Vec<[f32; 4]> = (0..n).map(|i| {
+        let (p, q) = (c[i], c[(i + 1) % n]);
+        [p[0].min(q[0]), p[1].min(q[1]), p[0].max(q[0]), p[1].max(q[1])]
+    }).collect();
+    for i in 0..n {
+        let (a, b) = (c[i], c[(i + 1) % n]);
+        for j in i + 2..n {
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            let (bi, bj) = (boites[i], boites[j]);
+            if bi[2] < bj[0] || bj[2] < bi[0] || bi[3] < bj[1] || bj[3] < bi[1] {
+                continue;
+            }
+            let (p, q) = (c[j], c[(j + 1) % n]);
+            let (d1, d2, d3, d4) = (cote(a, b, p), cote(a, b, q), cote(p, q, a), cote(p, q, b));
+            if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+                return false;
+            }
+        }
+    }
+    true
 }

@@ -53,6 +53,10 @@ pub struct Chaine {
     /// Les bouts (début, fin) qui ne sont pas prolongés : le tronc d'une fourche
     /// (`fourches`), que ses deux branches continuent bord à bord.
     pub nets: [bool; 2],
+    /// Les files des tronçons à ses bouts (début, fin) : `sage_reel::Files`.
+    pub files: [sage_reel::Files; 2],
+    /// Ses arêtes du réseau, du début à la fin.
+    pub aretes: Vec<usize>,
     /// Une voie de bus en site propre (le TEOR à Rouen) : chaussée en bitume bordeaux,
     /// unie à sa voie soeur de l'autre sens (`unir_bus`).
     pub bus: bool,
@@ -74,6 +78,30 @@ pub struct Champ {
     simples: std::collections::HashSet<usize>,
     /// Les nœuds des fourches (`fourches`) : sans dalle.
     fourches: std::collections::HashSet<usize>,
+    deports: Vec<Deport>,
+}
+
+/// Une branche de fourche déportée : ses arêtes du réseau près du nœud `c`, décalées de
+/// `decal` au nœud, en douceur jusqu'à rien à `l` mètres (le tracé en surimpression).
+#[derive(Clone, Debug)]
+pub struct Deport {
+    pub aretes: Vec<usize>,
+    pub c: [f32; 2],
+    pub decal: [f32; 2],
+    pub l: f32,
+}
+
+impl Deport {
+    /// Le décalage d'un point (x, z) : selon sa distance au nœud.
+    pub fn en(&self, p: [f32; 2]) -> [f32; 2] {
+        let s = (p[0] - self.c[0]).hypot(p[1] - self.c[1]);
+        if s >= self.l {
+            return [0.0, 0.0];
+        }
+        let u = s / self.l;
+        let k = 1.0 - u * u * (3.0 - 2.0 * u);
+        [self.decal[0] * k, self.decal[1] * k]
+    }
 }
 
 /// Le côté (m) des cases de l'index des chaînes.
@@ -358,7 +386,7 @@ const FOURCHE_ANGLE: f32 = 45.0;
 const FOURCHE_L_MIN: f32 = 15.0;
 const FOURCHE_L_MAX: f32 = 40.0;
 
-fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)]) -> Vec<(usize, [f32; 2], f32)> {
+fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)], deports: &mut Vec<Deport>, plaque: &mut dyn FnMut(&[Chaine], usize, (usize, bool), (usize, bool), (usize, bool)) -> Option<f32>) -> Vec<(usize, [f32; 2], f32)> {
     let mut aux: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
     for (k, &(a, b)) in bouts.iter().enumerate() {
         aux.entry(a).or_default().push((k, true));
@@ -367,6 +395,8 @@ fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)]) -> Vec<(
     let longueur = |p: &[Pt]| p.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum::<f32>();
     let mut v = Vec::new();
     let mut prises = std::collections::HashSet::new();
+    // Les fourches : par les largeurs, par les files déduites, par les files lues
+    let mut bilan = [0usize; 4];
     let mut noeuds: Vec<usize> = aux.keys().copied().collect();
     noeuds.sort_unstable();
     // FLOW_FOURCHE="x z" : pourquoi le nœud le plus proche est (ou n'est pas) une fourche
@@ -441,14 +471,49 @@ fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)]) -> Vec<(
         if cote(b1.2) < cote(b2.2) {
             std::mem::swap(&mut b1, &mut b2);
         }
+        // En plaque, si le nez se trouve (0.176) : rien n'est décalé
+        if let Some(s_nez) = plaque(voies, n, (tronc.0, tronc.1), (b1.0, b1.1), (b2.0, b2.1)) {
+            if suivi == Some(n) {
+                eprintln!("  fourche en plaque : tronc {}, branches {} et {}, nez à {s_nez:.1} m", tronc.0, b1.0, b2.0);
+            }
+            for b in [tronc, b1, b2] {
+                prises.insert((b.0, b.1));
+            }
+            bilan[3] += 1;
+            v.push((n, c, s_nez));
+            continue;
+        }
         // b1 à gauche (vers +g), b2 à droite ; élargies pour couvrir le tronc
         let w = tronc.3;
-        let e = (w - b1.3 - b2.3).max(0.0);
-        let (w1, w2) = if e > 0.0 { (b1.3 + e / 2.0 + 0.05, b2.3 + e / 2.0 + 0.05) } else { (b1.3, b2.3) };
-        let (o1, o2) = (w - w1, w - w2);
+        // Les files du tronc (lues ou déduites) : la branche qui dévie (le moins de
+        // files ; à égalité, la plus écartée du tronc) part du centre des files du bord
+        // de son côté, la branche qui continue du centre des autres. Sans files (moins
+        // de 2 au tronc) : les bords extérieurs des branches prolongent ceux du tronc
+        let fichier = |b: &(usize, bool, [f32; 2], f32, f32)| voies[b.0].files[if b.1 { 0 } else { 1 }];
+        let (ft, f1, f2) = (fichier(&tronc), fichier(&b1), fichier(&b2));
+        let t_files = ft.total as usize;
+        let (o1, o2, w1, w2) = if t_files >= 2 {
+            let lw = 2.0 * w / t_files as f32;
+            let devie1 = match f1.total.cmp(&f2.total) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => dot(f, b1.2) < dot(f, b2.2),
+            };
+            let fd = if devie1 { f1.total } else { f2.total } as usize;
+            let kd = fd.clamp(1, t_files - 1);
+            let kc = t_files - kd;
+            let (k1, k2) = if devie1 { (kd, kc) } else { (kc, kd) };
+            let demi = |k: usize| k as f32 * lw / 2.0;
+            (w - demi(k1), w - demi(k2), demi(k1), demi(k2))
+        } else {
+            let e = (w - b1.3 - b2.3).max(0.0);
+            let (w1, w2) = if e > 0.0 { (b1.3 + e / 2.0 + 0.05, b2.3 + e / 2.0 + 0.05) } else { (b1.3, b2.3) };
+            (w - w1, w - w2, w1, w2)
+        };
+        bilan[if t_files < 2 { 0 } else if ft.osm { 2 } else { 1 }] += 1;
         let l = (5.0 * o1.max(o2)).clamp(FOURCHE_L_MIN, FOURCHE_L_MAX).min(0.45 * b1.4.min(b2.4));
         if suivi == Some(n) {
-            eprintln!("  fourche : tronc {} (w {w}), branches {} et {} → décalages {o1:.2} {o2:.2}, l {l:.1}", tronc.0, b1.0, b2.0);
+            eprintln!("  fourche : tronc {} (w {w}, {:?}), branches {} ({:?}) et {} ({:?}) → décalages {o1:.2} {o2:.2}, demi-largeurs {w1:.2} {w2:.2}, l {l:.1}", tronc.0, ft, b1.0, f1, b2.0, f2);
         }
         if l < 6.0 {
             continue;
@@ -486,6 +551,20 @@ fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)]) -> Vec<(
                 p[i][1] += g[1] * sens * o * k1;
                 p[i][6] += (wn - p[i][6]) * k1;
             }
+            // Le déport, pour la surimpression : les arêtes du réseau sur `l` depuis le
+            // nœud
+            let ch = &voies[k].aretes;
+            let mut aretes = Vec::new();
+            let mut s = 0.0f32;
+            let ordre: Vec<usize> = if debut { ch.clone() } else { ch.iter().rev().copied().collect() };
+            for a in ordre {
+                aretes.push(a);
+                s += r.aretes[a].points.windows(2).map(|q| (q[1][0] - q[0][0]).hypot(q[1][1] - q[0][1])).sum::<f32>();
+                if s >= l {
+                    break;
+                }
+            }
+            deports.push(Deport { aretes, c, decal: [g[0] * sens * o, g[1] * sens * o], l });
             if !debut {
                 p.reverse();
             }
@@ -500,6 +579,10 @@ fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)]) -> Vec<(
         voies[tronc.0].nets[if tronc.1 { 0 } else { 1 }] = true;
         prises.insert((tronc.0, tronc.1));
         v.push((n, c, l));
+    }
+    if std::env::var("FLOW_FOURCHE").is_ok() {
+        eprintln!("plaques refusées (bras, tronc court, place, plan, croisé, envers, maillage) : {:?}", crate::carrefours::ECHECS.lock().map(|e| *e).unwrap_or_default());
+        eprintln!("fourches : {} faites ; en plaque {} ; décalées par les largeurs {}, par les files déduites {}, lues dans OSM {}", v.len(), bilan[3], bilan[0], bilan[1], bilan[2]);
     }
     v
 }
@@ -691,13 +774,32 @@ impl Champ {
             for p in &points {
                 boite = [boite[0].min(p[0]), boite[1].min(p[1]), boite[2].max(p[0]), boite[3].max(p[1])];
             }
-            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], nets: [false, false], bus, revetements });
+            voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], nets: [false, false], files: [r.aretes[suite[0].0].files, r.aretes[suite[suite.len() - 1].0].files], aretes: suite.iter().map(|x| x.0).collect(), bus, revetements });
         }
-        let fourches = fourches(r, &mut voies, &bouts);
+        let mut deports = Vec::new();
+        // Les fourches en plaque d'abord ; les autres, branches décalées
+        let mut plaques_fourches = Vec::new();
+        let mut coupees: HashMap<(usize, bool), f32> = HashMap::new();
+        let fourches = fourches(r, &mut voies, &bouts, &mut deports, &mut |voies, n, t, b1, b2| {
+            let (car, coupes) = crate::carrefours::plaque_fourche(r, voies, n, t, b1, b2, &|k, debut| coupees.get(&(k, debut)).copied().unwrap_or(crate::carrefours::AUTRE_FOURCHE))?;
+            for c in &coupes {
+                coupees.insert((c.0, c.1), c.2);
+            }
+            let s = coupes.iter().map(|c| c.2).fold(0.0f32, f32::max);
+            plaques_fourches.push((car, coupes));
+            Some(s)
+        });
         desserrer(&mut voies, &bouts, &fourches);
         unir_bus(&mut voies);
         // Les carrefours simples : les chaînes coupées à leurs bouches
-        let (carrefours, coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts, &fourches.iter().map(|f| f.0).collect());
+        let deja: Vec<_> = plaques_fourches.iter().flat_map(|p| p.1.iter().copied()).collect();
+        let (mut carrefours, mut coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts, &fourches.iter().map(|f| f.0).collect(), &deja);
+        for (car, cs) in plaques_fourches {
+            for (k, debut, s, bo) in cs {
+                coupes[k][usize::from(!debut)] = Some((s, bo));
+            }
+            carrefours.push(car);
+        }
         for ((v, c), &ab) in voies.iter_mut().zip(&coupes).zip(&absorbees) {
             // Une chaîne absorbée dans la plaque d'un groupe n'a plus de ruban
             v.trace = if ab { Vec::new() } else { crate::carrefours::couper(&v.points, c) };
@@ -734,10 +836,15 @@ impl Champ {
             }
         }
         let fourches = fourches.iter().map(|f| f.0).filter(|n| !simples.contains(n)).collect();
-        Champ { voies, index, chaines, carrefours, simples, fourches }
+        Champ { voies, index, chaines, carrefours, simples, fourches, deports }
     }
 
     /// Le nœud `n` est-il une fourche (`fourches`) ?
+    /// Les branches de fourches déportées (pour la surimpression).
+    pub fn deports(&self) -> &[Deport] {
+        &self.deports
+    }
+
     pub fn fourche(&self, n: usize) -> bool {
         self.fourches.contains(&n)
     }

@@ -51,6 +51,8 @@ const JUMEAUX_RECUL: f32 = 15.0;
 const JUMEAUX_DECALAGE: f32 = 30.0;
 /// Le jeu minimal entre deux bras jumeaux à leur bouche (m).
 const JUMEAUX_JEU: f32 = 0.2;
+/// La bouche d'un bras qui devient pont : tant de mètres avant le début du pont.
+const AVANT_PONT: f32 = 0.5;
 
 type Anneau = Vec<[f64; 2]>;
 
@@ -513,13 +515,20 @@ fn groupe(
     }
     // Assez de place sur chaque bras, et au sol jusqu'au-delà de la bouche et du
     // prolongement
-    for b in &bras {
+    for b in &mut bras {
         let autre = coupes[b.k][usize::from(b.debut)].map_or(0.0, |c| c.0);
         if b.longueur() < b.s + autre + RESTE || b.longueur() < b.s + PROLONGE + 1.0 {
             return echec("bras trop court");
         }
-        if !b.pts.iter().zip(&b.s0).take_while(|(_, &s)| s <= b.s + PROLONGE + 1.0).all(|(p, _)| au_sol(p)) {
-            return echec("bras pas au sol jusqu'au prolongement");
+        // Un bras qui devient pont peu après le nœud (un pont qui part du carrefour) :
+        // sa bouche ramenée juste avant le pont (0.178 ; avant, le groupe était refusé
+        // s'il n'était pas au sol jusqu'au-delà du prolongement)
+        let s_pont = b.pts.iter().zip(&b.s0).find(|(p, _)| !au_sol(p)).map_or(f32::MAX, |(_, &s)| s);
+        if b.s > s_pont - AVANT_PONT {
+            if s_pont - AVANT_PONT < S_MIN {
+                return echec("bras en pont dès le nœud");
+            }
+            b.s = s_pont - AVANT_PONT;
         }
         if coupes[b.k][usize::from(!b.debut)].is_some() {
             return echec("bras déjà coupé à l'autre bout");
@@ -668,5 +677,5 @@ fn groupe(
         bt = [bt[0].min(p[0]), bt[1].min(p[1]), bt[2].max(p[0]), bt[3].max(p[1])];
     }
     let c = [(boite[0] + boite[2]) / 2.0, (boite[1] + boite[3]) / 2.0];
-    Some(Carrefour { noeuds: g.to_vec(), c, plans, contour, trous, bouches, boite: bt })
+    Some(Carrefour { noeuds: g.to_vec(), c, plans, contour, trous, bouches, boite: bt, aplanir: true })
 }

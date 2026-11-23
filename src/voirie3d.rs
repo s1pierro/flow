@@ -714,7 +714,7 @@ mod tests {
     use sage_reel::{GRANDE, PIETONNE, ROUTE};
 
     fn route(genre: u8, largeur: f32, pts: &[[f32; 3]]) -> Route {
-        Route { revetement: 0, files: Default::default(), genre, largeur, points: pts.to_vec() }
+        Route { niveau: 0, revetement: 0, files: Default::default(), genre, largeur, points: pts.to_vec() }
     }
 
     #[test]
