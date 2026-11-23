@@ -1860,7 +1860,7 @@ impl Lieux {
                 // La surimpression sur la maquette : tracés du réseau, remblais des voies
                 if self.trois_d.is_some() && self.maquette3d && rubrique(cx, &mut b, &mut self.rubrique, base, "Surimpression") {
                     let s = &mut self.sur;
-                    cx.toggle(&mut b, sub_id(base, 660), "Tracés des voies", &mut s.traces);
+                    cx.toggle(&mut b, sub_id(base, 660), "Tracés", &mut s.traces);
                     if s.traces {
                         cx.slider(&mut b, sub_id(base, 661), "Distance", &format!("{:.0} m", s.traces_distance), &mut s.traces_distance, 50.0, 3000.0);
                         cx.slider(&mut b, sub_id(base, 662), "Rayon", &format!("× {:.1}", s.traces_rayon).replace('.', ","), &mut s.traces_rayon, 0.5, 4.0);
@@ -1871,12 +1871,19 @@ impl Lieux {
                         if s.files {
                             cx.paragraph(&mut b, "En cyan, les lignes entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens.");
                         }
+                        let avant_brut = s.brut;
+                        cx.toggle(&mut b, sub_id(base, 670), "Tracé brut des voies", &mut s.brut);
+                        let avant_pietons = s.pietons;
+                        cx.toggle(&mut b, sub_id(base, 669), "Voies piétonnes", &mut s.pietons);
                         let avant_fils = s.fils;
                         cx.toggle(&mut b, sub_id(base, 668), "Fils de circulation (essai)", &mut s.fils);
+                        let avant_rayons = (s.virage_droite, s.virage_gauche);
                         if s.fils {
+                            cx.slider(&mut b, sub_id(base, 680), "Rayon à droite", &format!("{:.1} m", s.virage_droite).replace('.', ","), &mut s.virage_droite, 2.0, 30.0);
+                            cx.slider(&mut b, sub_id(base, 681), "Rayon à gauche", &format!("{:.1} m", s.virage_gauche).replace('.', ","), &mut s.virage_gauche, 2.0, 40.0);
                             cx.paragraph(&mut b, "En vert, un fil par file sur son axe (en rose, réservée au bus) ; en jaune vert, la partie qui glisse pour prolonger une autre file ; en bleu, les virages d'une voie à une autre. Touchez la sphère d'un nœud pour son détail. Un réseau d'essai : la chaussée et les files ne changent pas.");
                         }
-                        if s.files != avant || s.fils != avant_fils {
+                        if s.files != avant || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut || (s.virage_droite, s.virage_gauche) != avant_rayons {
                             if let Some(r) = self.trois_d.as_mut() {
                                 r.refaire_traces();
                             }
@@ -2789,6 +2796,21 @@ impl Contexte for Lieux {
                         r.refaire_traces();
                     }
                     (Some("noeud"), n) => r.noeud_choisi = n.map(|x| x as usize),
+                    (Some("rayons"), _) => {
+                        if let (Some(d), Some(g)) = (m.get(2).and_then(|x| x.parse().ok()), m.get(3).and_then(|x| x.parse().ok())) {
+                            self.sur.virage_droite = d;
+                            self.sur.virage_gauche = g;
+                        }
+                        r.refaire_traces();
+                    }
+                    (Some("brut"), _) => {
+                        self.sur.brut = m.get(2).is_none_or(|v| v != "non");
+                        r.refaire_traces();
+                    }
+                    (Some("pietons"), _) => {
+                        self.sur.pietons = m.get(2).is_none_or(|v| v != "non");
+                        r.refaire_traces();
+                    }
                     (Some("fils"), _) => {
                         self.sur.fils = m.get(2).is_none_or(|v| v != "non");
                         r.refaire_traces();

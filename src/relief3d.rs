@@ -782,7 +782,7 @@ impl Relief3d {
         let d = donnees.read().ok()?;
         let r = d.reseau_pret()?;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (Arc::as_ptr(&r) as usize, montrees, self.noeud_choisi).hash(&mut h);
+        (Arc::as_ptr(&r) as usize, montrees, self.noeud_choisi, self.sur.pietons).hash(&mut h);
         let cle = h.finish();
         if let Some((k, m)) = &self.spheres {
             if *k == cle {
@@ -790,7 +790,8 @@ impl Relief3d {
             }
         }
         let boites: Vec<[f32; 4]> = montrees.iter().map(|&c| boite_tuile(&d, c)).collect();
-        self.noeuds_montres = r.noeuds.iter().enumerate().filter(|(_, n)| boites.iter().any(|b| n.p[0] >= b[0] && n.p[0] <= b[2] && n.p[1] >= b[1] && n.p[1] <= b[3])).map(|(i, _)| i).collect();
+        let pietons = self.sur.pietons;
+        self.noeuds_montres = r.noeuds.iter().enumerate().filter(|(_, n)| (pietons || noeud_carrossable(&r, n)) && boites.iter().any(|b| n.p[0] >= b[0] && n.p[0] <= b[2] && n.p[1] >= b[1] && n.p[1] <= b[3])).map(|(i, _)| i).collect();
         let (anneaux, quartiers) = (6usize, 10usize);
         let (mut s, mut ix) = (Vec::new(), Vec::new());
         for &n in &self.noeuds_montres {
@@ -1378,11 +1379,18 @@ pub struct Surimpression {
     pub files: bool,
     /// Les fils de circulation d'essai (`crate::fils`), en vert, avec les tracés.
     pub fils: bool,
+    /// Les voies piétonnes (non carrossables) et leurs nœuds, avec les tracés.
+    pub pietons: bool,
+    /// Le tracé brut des voies (les axes du réseau) et les croix de ses nœuds.
+    pub brut: bool,
+    /// Les rayons des virages des fils de circulation, à droite et à gauche (m).
+    pub virage_droite: f32,
+    pub virage_gauche: f32,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE }
     }
 }
 
@@ -1393,11 +1401,11 @@ impl Surimpression {
         let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
         let f = v.get(6);
         let fi = v.get(7);
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0) })
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils))
+        format!("{} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche)
     }
 }
 
@@ -1539,11 +1547,12 @@ impl Relief3d {
             self.traces.clear();
             self.traces_de = adresse;
         }
+        crate::fils::regler_rayons(self.sur.virage_droite, self.sur.virage_gauche);
         let mut v = Vec::new();
         for &cle in montrees {
             if !self.traces.contains_key(&cle) {
                 self.revision += 1;
-                let t = traces_reseau(&r, &deports, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files, self.sur.fils);
+                let t = traces_reseau(&r, &deports, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files, self.sur.fils, self.sur.pietons, self.sur.brut);
                 self.traces.insert(cle, t);
             }
             v.extend(self.traces[&cle].iter().cloned());
@@ -1604,9 +1613,14 @@ fn couper(p: [f32; 3], q: [f32; 3], b: [f32; 4]) -> Option<([f32; 3], [f32; 3])>
     Some((at(t0), at(t1)))
 }
 
+/// Un nœud où arrive au moins une voie carrossable.
+fn noeud_carrossable(r: &sage_reel::reseau::Reseau, n: &sage_reel::reseau::Noeud) -> bool {
+    n.aretes.iter().any(|&k| sage_reel::carrossable(r.aretes[k].genre))
+}
+
 /// Les tracés du réseau `r` dans la boîte `b` : un maillage de traits par passage, et
 /// les nœuds en croix.
-fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
+fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
     use sage_reel::reseau::Passage;
     // Les points d'une arête, déportés près d'une fourche (comme la chaussée)
     let points = |k: usize| -> std::borrow::Cow<'_, [[f32; 3]]> {
@@ -1639,6 +1653,9 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
     };
     let mut listes: [(Vec<f32>, Vec<u32>); 12] = Default::default();
     for (ka, a) in r.aretes.iter().enumerate() {
+        if !brut || (!pietons && !sage_reel::carrossable(a.genre)) {
+            continue;
+        }
         let k = match a.passage {
             Passage::Sol => 0,
             Passage::Pont => 1,
@@ -1656,6 +1673,9 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
     for n in &r.noeuds {
         let p = n.p;
         if p[0] < b[0] || p[0] > b[2] || p[1] < b[1] || p[1] > b[3] {
+            continue;
+        }
+        if !brut || (!pietons && !noeud_carrossable(r, n)) {
             continue;
         }
         let (s, i) = &mut listes[3];
