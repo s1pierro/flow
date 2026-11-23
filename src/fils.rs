@@ -57,6 +57,11 @@ const VIRAGE_LOIN: f32 = 30.0;
 const FONTE_BASE: f32 = 12.0;
 const FONTE_ECART: f32 = 8.0;
 const FONTE_MAX: f32 = 90.0;
+/// Bout à bout, dans une fourche : la file rejoint l'autre sur tant de fois l'écart (m),
+/// entre un minimum et un maximum.
+const BOUT_ECART: f32 = 2.0;
+const BOUT_MIN: f32 = 2.0;
+const BOUT_MAX: f32 = 8.0;
 /// Les nœuds reliés par une voie plus courte (m) ne font qu'un carrefour ; au plus
 /// tant de nœuds par carrefour.
 const SERRE: f32 = 12.0;
@@ -80,6 +85,12 @@ pub struct Fil {
     pub bus: bool,
     /// Un nœud de files : un trait vertical, là où une file arrive à un nœud.
     pub marque: bool,
+    /// Une continuité dans un carrefour : de la ligne d'arrêt d'une voie à celle d'une
+    /// autre, tout droit.
+    pub traverse: bool,
+    /// Le sens de circulation : 1 dans l'ordre des points, −1 à rebours, 0 les deux ou
+    /// sans objet. Un cône au milieu du fil le montre.
+    pub sens: i8,
 }
 
 /// Un bout d'arête à un nœud.
@@ -96,6 +107,8 @@ struct Bout {
 struct Fonte {
     p: [f32; 3],
     o: [f32; 2],
+    /// Bout à bout (une fourche, une jonction) : la file rejoint l'autre au plus court.
+    court: bool,
 }
 
 /// (arête, file, début) → sa fonte.
@@ -597,6 +610,22 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
             apparier(e, &aa, &ss, &mut paires);
         }
     }
+    // Un vrai carrefour : une voie y croise une autre (on peut y tourner, entre
+    // `TOUT_DROIT` et `VIRAGE_MAX`). Sinon (une fourche, une jonction), les files glissent
+    let cos_virage = VIRAGE_MAX.to_radians().cos();
+    let tourne = |e: usize, d: usize| -> bool {
+        if d == e || cibles[e].contains(&d) {
+            return false;
+        }
+        match (dirs[e], dirs[d]) {
+            (Some(oe), Some(od)) => {
+                let c = dot([-oe[0], -oe[1]], od);
+                c <= cos_max && c >= cos_virage
+            }
+            _ => false,
+        }
+    };
+    let carrefour = bs.len() >= 3 && (0..bs.len()).any(|e| (0..bs.len()).any(|d| tourne(e, d)));
     // Qui glisse vers qui
     let mut nb: HashMap<(bool, usize, usize), usize> = HashMap::new();
     for &(a, q) in &paires {
@@ -618,29 +647,39 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
         if let Some(j) = journal.as_mut() {
             j.push(format!("a{}·f{} vers a{}·f{} ; glisse a{}·f{}", pa.arete, pa.file, pq.arete, pq.file, glisse.arete, glisse.file));
         }
-        fontes.insert((glisse.arete, glisse.file, glisse.debut), Fonte { p: garde.p, o: garde.o });
+        if !carrefour {
+            fontes.insert((glisse.arete, glisse.file, glisse.debut), Fonte { p: garde.p, o: garde.o, court: false });
+        }
     }
-    if bs.len() < 3 {
+    if !carrefour {
         return;
     }
-    // Les bouts qui ne se continuent pas : leurs files s'arrêtent au bord des autres voies
+    // Un carrefour : chaque voie a une ligne d'arrêt, où toutes ses files s'arrêtent ;
+    // virages (bleu) et continuités (rouge) relient ces lignes. La ligne est au bord des
+    // voies qui la croisent, ou plus loin au point de raccordement le plus éloigné de
+    // ses virages
     let mut continue_ = vec![false; bs.len()];
     for &(a, q) in &paires {
         continue_[a.0] = true;
         continue_[q.0] = true;
     }
-    let mut recul = vec![0.0f32; bs.len()];
+    let mut bord = vec![0.0f32; bs.len()];
     for e in 0..bs.len() {
-        if continue_[e] {
-            continue;
+        let croisent = (0..bs.len()).filter(|&d| tourne(e, d) || tourne(d, e));
+        let w = croisent.map(|d| r.aretes[bs[d].arete].largeur * 0.5).fold(0.0f32, f32::max);
+        if w > 0.0 {
+            bord[e] = w + VIRAGE_MARGE;
         }
-        let w = (0..bs.len()).filter(|&d| d != e).map(|d| r.aretes[bs[d].arete].largeur * 0.5).fold(0.0f32, f32::max);
-        let l = longueur(&r.aretes[bs[e].arete].points);
-        recul[e] = (w + VIRAGE_MARGE).min(PART_MAX * l);
-        reculs.insert((bs[e].arete, bs[e].debut, usize::MAX), recul[e]);
     }
-    // Les virages
-    let cos_virage = VIRAGE_MAX.to_radians().cos();
+    // Les virages : leurs arcs d'abord, qui repoussent les lignes d'arrêt
+    struct Virage {
+        e: usize,
+        d: usize,
+        fe: Vec<[f32; 3]>,
+        fd: Vec<[f32; 3]>,
+        arc: Option<(Vec<[f32; 3]>, f32, f32)>,
+    }
+    let mut vs: Vec<Virage> = Vec::new();
     for e in 0..bs.len() {
         let Some(oe) = dirs[e] else { continue };
         let t = [-oe[0], -oe[1]];
@@ -665,48 +704,63 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
             };
             let Some((i, j)) = paire else { continue };
             let (pa, pq) = (&arrivees[e][i], &departs[d][j]);
-            // Une voie qui ne fait que tourner : le virage part (ou arrive) au bout de sa
-            // file ; sur une voie qui continue, juste après le point de la file en face de
-            // l'autre bout (`VIRAGE_RAYON` plus loin). Deux voies qui continuent : au bord
-            // de l'autre voie
             let (fe, fd) = (depuis_noeud(r, bs[e], pa.file), depuis_noeud(r, bs[d], pq.file));
-            // Le raccord en arc : les deux files prolongées en ligne droite jusqu'à leur
-            // croisement, raccordées par un arc de cercle tangent aux deux ; ses points de
-            // raccordement, là où il les touche. Une file qui ne fait que tourner s'arrête là
-            if let Some((pts, a, b)) = arc_virage(&fe, &fd, rayon(a_gauche)) {
-                if !continue_[e] {
-                    reculs.insert((bs[e].arete, bs[e].debut, pa.file), abscisse(&fe, a));
-                }
-                if !continue_[d] {
-                    reculs.insert((bs[d].arete, bs[d].debut, pq.file), abscisse(&fd, b));
-                }
-                virages.push(Fil { points: pts, raccord: false, virage: true, bus: false, marque: false });
-                for n in [a, b] {
-                    virages.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true });
-                }
-                if let Some(jl) = journal.as_mut() {
-                    jl.push(format!("virage à {} : a{}·f{} vers a{}·f{}", if a_gauche { "gauche" } else { "droite" }, pa.arete, pa.file, pq.arete, pq.file));
-                }
-                continue;
-            }
-            let (se, sd) = match (continue_[e], continue_[d]) {
-                (false, false) => (recul[e], recul[d]),
-                (false, true) => (recul[e], abscisse(&fd, point_a(&fe, recul[e])) + VIRAGE_RAYON),
-                (true, false) => (abscisse(&fe, point_a(&fd, recul[d])) + VIRAGE_RAYON, recul[d]),
-                (true, true) => (r.aretes[bs[d].arete].largeur * 0.5 + VIRAGE_MARGE, r.aretes[bs[e].arete].largeur * 0.5 + VIRAGE_MARGE),
-            };
-            let (a, da) = point_dir(&fe, se.min(PART_MAX * longueur(&fe)));
-            let (b, db) = point_dir(&fd, sd.min(PART_MAX * longueur(&fd)));
-            virages.push(Fil { points: courbe(a, [-da[0], -da[1]], b, db), raccord: false, virage: true, bus: false, marque: false });
-            // Ses points de raccordement : des nœuds de files
-            for n in [a, b] {
-                virages.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true });
+            let arc = arc_virage(&fe, &fd, rayon(a_gauche)).map(|(pts, a, b)| (pts, abscisse(&fe, a), abscisse(&fd, b)));
+            if let Some((_, sa, sb)) = &arc {
+                bord[e] = bord[e].max(*sa);
+                bord[d] = bord[d].max(*sb);
             }
             if let Some(jl) = journal.as_mut() {
                 jl.push(format!("virage à {} : a{}·f{} vers a{}·f{}", if a_gauche { "gauche" } else { "droite" }, pa.arete, pa.file, pq.arete, pq.file));
             }
+            vs.push(Virage { e, d, fe, fd, arc });
         }
     }
+    for e in 0..bs.len() {
+        let l = longueur(&r.aretes[bs[e].arete].points);
+        bord[e] = bord[e].min(PART_MAX * l);
+        reculs.insert((bs[e].arete, bs[e].debut, usize::MAX), bord[e]);
+        if let Some(jl) = journal.as_mut() {
+            jl.push(format!("ligne d'arrêt de a{} à {:.1} m", bs[e].arete, bord[e]));
+        }
+    }
+    // Les virages, de ligne d'arrêt à ligne d'arrêt : le long de la file jusqu'à l'arc,
+    // l'arc, puis le long de l'autre file
+    for v in &vs {
+        let (se, sd) = (bord[v.e].min(PART_MAX * longueur(&v.fe)), bord[v.d].min(PART_MAX * longueur(&v.fd)));
+        let pts = match &v.arc {
+            Some((arc, sa, sb)) if *sa <= se + 0.01 && *sb <= sd + 0.01 => {
+                let mut pts: Vec<[f32; 3]> = troncon(&v.fe, *sa, se).into_iter().rev().collect();
+                pts.extend(arc.iter().copied());
+                pts.extend(troncon(&v.fd, *sb, sd));
+                pts
+            }
+            _ => {
+                let (a, da) = point_dir(&v.fe, se);
+                let (b, db) = point_dir(&v.fd, sd);
+                courbe(a, [-da[0], -da[1]], b, db)
+            }
+        };
+        virages.push(Fil { points: pts, raccord: false, virage: true, bus: false, marque: false, traverse: false, sens: 1 });
+    }
+    // Les continuités : d'une ligne d'arrêt à l'autre
+    for &(a, q) in &paires {
+        let (pa, pq) = (&arrivees[a.0][a.1], &departs[q.0][q.1]);
+        let (fe, fd) = (depuis_noeud(r, bs[a.0], pa.file), depuis_noeud(r, bs[q.0], pq.file));
+        let (pe, de) = point_dir(&fe, bord[a.0].min(PART_MAX * longueur(&fe)));
+        let (pd, dd) = point_dir(&fd, bord[q.0].min(PART_MAX * longueur(&fd)));
+        let bus = pa.bus || pq.bus;
+        virages.push(Fil { points: courbe(pe, [-de[0], -de[1]], pd, dd), raccord: false, virage: false, bus, marque: false, traverse: true, sens: 1 });
+    }
+}
+
+/// La partie de `p` entre les abscisses `s0` et `s1` (m depuis son début, `s0` ≤ `s1`).
+fn troncon(p: &[[f32; 3]], s0: f32, s1: f32) -> Vec<[f32; 3]> {
+    let l = longueur(p);
+    if s1 - s0 < 0.05 {
+        return Vec::new();
+    }
+    rogner(p, s0, (l - s1).max(0.0))
 }
 
 /// La partie fondue d'une file au départ de `q` (orientée en s'éloignant du nœud) :
@@ -718,7 +772,7 @@ fn fondre(q: &[[f32; 3]], f: Fonte, lmax: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>)
     if ecart < 0.02 {
         return (Vec::new(), q.to_vec());
     }
-    let l = (FONTE_BASE + FONTE_ECART * ecart).min(FONTE_MAX).min(lmax);
+    let l = if f.court { (BOUT_ECART * ecart).clamp(BOUT_MIN, BOUT_MAX) } else { (FONTE_BASE + FONTE_ECART * ecart).min(FONTE_MAX) }.min(lmax);
     if l < 0.5 {
         return (Vec::new(), q.to_vec());
     }
@@ -739,6 +793,11 @@ fn fondre(q: &[[f32; 3]], f: Fonte, lmax: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>)
 fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie: &mut Vec<Fil>) {
     let axe = axe_file(r, k, i);
     let bus = est_bus(r, k, i);
+    // Le sens de la file : dans le sens du tracé, à contresens, ou les deux
+    let fl = r.aretes[k].files;
+    let (n, ar) = (fl.total as usize, fl.arriere as usize);
+    let av = (fl.avant as usize).min(n.saturating_sub(ar));
+    let sens: i8 = if i >= ar.max(n - av) { 1 } else if i < ar.min(n - av) { -1 } else { 0 };
     let recul = |debut: bool| reculs.get(&(k, debut, i)).or_else(|| reculs.get(&(k, debut, usize::MAX))).copied().unwrap_or(0.0);
     let p = rogner(&axe, recul(true), recul(false));
     if p.len() < 2 {
@@ -747,19 +806,21 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
     // Une voie guidée suit son tracé, d'un bout à l'autre
     if guidee(r, k) {
         for n in [p[0], p[p.len() - 1]] {
-            sortie.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true });
+            sortie.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true, traverse: false, sens: 0 });
         }
-        sortie.push(Fil { points: p, raccord: false, virage: false, bus, marque: false });
+        sortie.push(Fil { points: p, raccord: false, virage: false, bus, marque: false, traverse: false, sens });
         return;
     }
     // Les nœuds de files à ses bouts : le bout de l'autre file qu'elle prolonge, ou le sien
     let n0 = fontes.get(&(k, i, true)).map_or(p[0], |f| f.p);
     let n1 = fontes.get(&(k, i, false)).map_or(p[p.len() - 1], |f| f.p);
     for n in [n0, n1] {
-        sortie.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true });
+        sortie.push(Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true, traverse: false, sens: 0 });
     }
     // Une voie courte et presque droite : en ligne droite d'un nœud de files à l'autre
-    if droite(&r.aretes[k].points) {
+    // (une file sans partie qui glisse suit son tracé : rien à redresser)
+    let glisse = fontes.contains_key(&(k, i, true)) || fontes.contains_key(&(k, i, false));
+    if glisse && droite(&r.aretes[k].points) {
         let l = longueur(&p);
         let pas = ((l / 4.0).ceil() as usize).max(1);
         let pts = (0..=pas)
@@ -768,7 +829,7 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
                 [n0[0] + (n1[0] - n0[0]) * t, n0[1] + (n1[1] - n0[1]) * t, point_a(&p, l * t)[2]]
             })
             .collect();
-        sortie.push(Fil { points: pts, raccord: false, virage: false, bus, marque: false });
+        sortie.push(Fil { points: pts, raccord: false, virage: false, bus, marque: false, traverse: false, sens });
         return;
     }
     let lmax = PART_MAX * longueur(&p);
@@ -776,7 +837,7 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
     if let Some(&f) = fontes.get(&(k, i, true)) {
         let (fondue, r2) = fondre(&reste, f, lmax);
         if fondue.len() >= 2 {
-            sortie.push(Fil { points: fondue, raccord: true, virage: false, bus, marque: false });
+            sortie.push(Fil { points: fondue, raccord: true, virage: false, bus, marque: false, traverse: false, sens: 0 });
         }
         reste = r2;
     }
@@ -785,13 +846,13 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
             let envers: Vec<[f32; 3]> = reste.iter().rev().copied().collect();
             let (fondue, r2) = fondre(&envers, f, lmax);
             if fondue.len() >= 2 {
-                sortie.push(Fil { points: fondue, raccord: true, virage: false, bus, marque: false });
+                sortie.push(Fil { points: fondue, raccord: true, virage: false, bus, marque: false, traverse: false, sens: 0 });
             }
             reste = r2.into_iter().rev().collect();
         }
     }
     if reste.len() >= 2 {
-        sortie.push(Fil { points: reste, raccord: false, virage: false, bus, marque: false });
+        sortie.push(Fil { points: reste, raccord: false, virage: false, bus, marque: false, traverse: false, sens });
     }
 }
 

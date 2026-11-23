@@ -1585,6 +1585,11 @@ const TRACE_VIRAGE: [f32; 3] = [0.35, 0.65, 1.0];
 const TRACE_FIL_BUS: [f32; 3] = [0.95, 0.2, 0.5];
 /// Les nœuds de files : des traits verticaux.
 const TRACE_MARQUE: [f32; 3] = [0.95, 0.95, 0.75];
+/// Le cône du sens de circulation au milieu des fils : longueur et rayon (m).
+const CONE_LONGUEUR: f32 = 1.6;
+const CONE_RAYON: f32 = 0.45;
+/// Les continuités dans les carrefours (fils de circulation).
+const TRACE_TRAVERSE: [f32; 3] = [0.95, 0.15, 0.1];
 /// Les fils passent d'autant au-dessus des tracés (m).
 const FILS_DESSUS: f32 = 0.15;
 
@@ -1611,6 +1616,46 @@ fn couper(p: [f32; 3], q: [f32; 3], b: [f32; 4]) -> Option<([f32; 3], [f32; 3])>
     }
     let at = |t: f32| [p[0] + t * dx, p[1] + t * dz, p[2] + t * (q[2] - p[2])];
     Some((at(t0), at(t1)))
+}
+
+/// Le milieu (en longueur) d'un fil et sa direction de circulation (x, z) là.
+fn milieu(p: &[[f32; 3]], sens: i8) -> Option<([f32; 3], [f32; 2])> {
+    let total: f32 = p.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+    if total < 2.0 {
+        return None;
+    }
+    let mut s = 0.0;
+    for w in p.windows(2) {
+        let (dx, dz) = (w[1][0] - w[0][0], w[1][1] - w[0][1]);
+        let l = dx.hypot(dz);
+        if l > 1e-4 && s + l >= total * 0.5 {
+            let t = (total * 0.5 - s) / l;
+            let m = [w[0][0] + dx * t, w[0][1] + dz * t, w[0][2] + (w[1][2] - w[0][2]) * t];
+            let k = f32::from(sens) / l;
+            return Some((m, [dx * k, dz * k]));
+        }
+        s += l;
+    }
+    None
+}
+
+/// Un cône en traits couché sur le fil : sa pointe vers `d`, centré sur `m`.
+fn cone(s: &mut Vec<f32>, ix: &mut Vec<u32>, m: [f32; 3], d: [f32; 2], poser: &dyn Fn(&mut Vec<f32>, &mut Vec<u32>, [f32; 3], [f32; 3])) {
+    let (l, rayon, cotes) = (CONE_LONGUEUR, CONE_RAYON, 8);
+    let pointe = [m[0] + d[0] * l * 0.5, m[1] + d[1] * l * 0.5, m[2]];
+    let c = [m[0] - d[0] * l * 0.5, m[1] - d[1] * l * 0.5, m[2]];
+    let g = [d[1], -d[0]];
+    let base: Vec<[f32; 3]> = (0..cotes)
+        .map(|j| {
+            let a = j as f32 / cotes as f32 * std::f32::consts::TAU;
+            let (u, v) = (a.cos() * rayon, a.sin() * rayon);
+            [c[0] + g[0] * u, c[1] + g[1] * u, c[2] + v]
+        })
+        .collect();
+    for j in 0..cotes {
+        poser(s, ix, base[j], pointe);
+        poser(s, ix, base[j], base[(j + 1) % cotes]);
+    }
 }
 
 /// Un nœud où arrive au moins une voie carrossable.
@@ -1651,7 +1696,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
         }
         i.extend_from_slice(&[n, n + 1]);
     };
-    let mut listes: [(Vec<f32>, Vec<u32>); 12] = Default::default();
+    let mut listes: [(Vec<f32>, Vec<u32>); 13] = Default::default();
     for (ka, a) in r.aretes.iter().enumerate() {
         if !brut || (!pietons && !sage_reel::carrossable(a.genre)) {
             continue;
@@ -1746,7 +1791,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
     // Les fils de circulation d'essai : un peu au-dessus des lignes des files
     if fils {
         for f in crate::fils::dans(r, b) {
-            let k = if f.marque { 11 } else if f.virage { 9 } else if f.bus { 10 } else if f.raccord { 8 } else { 7 };
+            let k = if f.marque { 11 } else if f.traverse { 12 } else if f.virage { 9 } else if f.bus { 10 } else if f.raccord { 8 } else { 7 };
             for w in f.points.windows(2) {
                 let (p, q) = ([w[0][0], w[0][1], w[0][2] + FILS_DESSUS], [w[1][0], w[1][1], w[1][2] + FILS_DESSUS]);
                 if let Some((p, q)) = couper(p, q, b) {
@@ -1754,10 +1799,19 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
                     poser(s, ix, p, q);
                 }
             }
+            // Le sens : un cône (en traits) au milieu du fil, pointe vers l'avant
+            if f.sens != 0 {
+                if let Some((m, d)) = milieu(&f.points, f.sens) {
+                    if m[0] >= b[0] && m[0] <= b[2] && m[1] >= b[1] && m[1] <= b[3] {
+                        let (s, ix) = &mut listes[k];
+                        cone(s, ix, [m[0], m[1], m[2] + FILS_DESSUS], d, &poser);
+                    }
+                }
+            }
         }
     }
     let base = 0x7472_0000_0000_0000u64 ^ (num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
-    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0), (TRACE_FIL, 2.5), (TRACE_RACCORD, 3.0), (TRACE_VIRAGE, 2.5), (TRACE_FIL_BUS, 3.0), (TRACE_MARQUE, 4.0)];
+    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0), (TRACE_FIL, 2.5), (TRACE_RACCORD, 3.0), (TRACE_VIRAGE, 2.5), (TRACE_FIL_BUS, 3.0), (TRACE_MARQUE, 4.0), (TRACE_TRAVERSE, 2.5)];
     listes
         .into_iter()
         .zip(reglages)

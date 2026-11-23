@@ -1881,7 +1881,7 @@ impl Lieux {
                         if s.fils {
                             cx.slider(&mut b, sub_id(base, 680), "Rayon à droite", &format!("{:.1} m", s.virage_droite).replace('.', ","), &mut s.virage_droite, 2.0, 30.0);
                             cx.slider(&mut b, sub_id(base, 681), "Rayon à gauche", &format!("{:.1} m", s.virage_gauche).replace('.', ","), &mut s.virage_gauche, 2.0, 40.0);
-                            cx.paragraph(&mut b, "En vert, un fil par file sur son axe (en rose, réservée au bus) ; en jaune vert, la partie qui glisse pour prolonger une autre file ; en bleu, les virages d'une voie à une autre. Touchez la sphère d'un nœud pour son détail. Un réseau d'essai : la chaussée et les files ne changent pas.");
+                            cx.paragraph(&mut b, "En vert, un fil par file sur son axe (en rose, réservée au bus) ; en jaune vert, la partie qui glisse pour prolonger une autre file ; en bleu, les virages d'une voie à une autre ; en rouge, les continuités dans les carrefours. Touchez la sphère d'un nœud pour son détail. Un réseau d'essai : la chaussée et les files ne changent pas.");
                         }
                         if s.files != avant || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut || (s.virage_droite, s.virage_gauche) != avant_rayons {
                             if let Some(r) = self.trois_d.as_mut() {
