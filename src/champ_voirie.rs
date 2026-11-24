@@ -66,6 +66,9 @@ pub struct Chaine {
     pub revetements: Vec<([f32; 2], u8)>,
 }
 
+/// L'en-tête du champ dans le cache (changé si son format change).
+const CACHE_MAGIE: &[u8; 8] = b"FLCHAMP1";
+
 pub struct Champ {
     voies: Vec<Chaine>,
     /// Les segments au sol (voie, premier point) dont la zone d'influence touche
@@ -732,6 +735,7 @@ fn case(x: f32, z: f32) -> (i32, i32) {
 impl Champ {
     /// Les chaînes de voies du réseau nivelé (sans les piétonnes), lissées.
     pub fn new(r: &Reseau) -> Champ {
+        let mut t_chaines = crate::suivi::tache("chaînes (lissage)");
         let mut voies = Vec::new();
         let mut bouts = Vec::new();
         for (suite, debut, fin) in enchainer(r) {
@@ -776,6 +780,9 @@ impl Champ {
             }
             voies.push(Chaine { points, w, poids: pd, boite, trace: Vec::new(), bouches: [None, None], nets: [false, false], files: [r.aretes[suite[0].0].files, r.aretes[suite[suite.len() - 1].0].files], aretes: suite.iter().map(|x| x.0).collect(), bus, revetements });
         }
+        t_chaines.detail(format!("{} chaînes", voies.len()));
+        drop(t_chaines);
+        let t_fourches = crate::suivi::tache("fourches");
         let mut deports = Vec::new();
         // Les fourches en plaque d'abord ; les autres, branches décalées
         let mut plaques_fourches = Vec::new();
@@ -789,8 +796,12 @@ impl Champ {
             plaques_fourches.push((car, coupes));
             Some(s)
         });
+        drop(t_fourches);
+        let t_desserrer = crate::suivi::tache("desserrer, bus");
         desserrer(&mut voies, &bouts, &fourches);
         unir_bus(&mut voies);
+        drop(t_desserrer);
+        let t_carrefours = crate::suivi::tache("carrefours");
         // Les carrefours simples : les chaînes coupées à leurs bouches
         let deja: Vec<_> = plaques_fourches.iter().flat_map(|p| p.1.iter().copied()).collect();
         let (mut carrefours, mut coupes, absorbees) = crate::carrefours::construire(r, &voies, &bouts, &fourches.iter().map(|f| f.0).collect(), &deja);
@@ -805,7 +816,15 @@ impl Champ {
             v.trace = if ab { Vec::new() } else { crate::carrefours::couper(&v.points, c) };
             v.bouches = [c[0].map(|x| x.1), c[1].map(|x| x.1)];
         }
+        drop(t_carrefours);
+        let _t_index = crate::suivi::tache("index");
         let simples: std::collections::HashSet<usize> = carrefours.iter().flat_map(|c| c.noeuds.iter().copied()).collect();
+        let fourches = fourches.iter().map(|f| f.0).filter(|n| !simples.contains(n)).collect();
+        Champ::indexer(voies, carrefours, simples, fourches, deports)
+    }
+
+    /// Le champ, ses index faits.
+    fn indexer(voies: Vec<Chaine>, carrefours: Vec<crate::carrefours::Carrefour>, simples: std::collections::HashSet<usize>, fourches: std::collections::HashSet<usize>, deports: Vec<Deport>) -> Champ {
         let mut index: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
         for (k, v) in voies.iter().enumerate() {
             // Les bouts comptent jusqu'à leur prolongement (une demi-largeur), frange
@@ -835,8 +854,216 @@ impl Champ {
                 }
             }
         }
-        let fourches = fourches.iter().map(|f| f.0).filter(|n| !simples.contains(n)).collect();
         Champ { voies, index, chaines, carrefours, simples, fourches, deports }
+    }
+
+    /// Le champ en octets, pour le cache (sans ses index, refaits à la lecture).
+    pub fn ecrire(&self) -> Vec<u8> {
+        use crate::cache_lieu::Ecrit;
+        let mut e = Ecrit(CACHE_MAGIE.to_vec());
+        fn pts(e: &mut Ecrit, v: &[Pt]) {
+            e.u(v.len() as u32);
+            for p in v {
+                e.fs(p);
+            }
+        }
+        fn bouche(e: &mut Ecrit, b: &crate::carrefours::Bouche) {
+            e.fs(&b.q);
+            e.fs(&b.g);
+            e.fs(&b.m);
+            e.fs(&b.d);
+        }
+        fn files(e: &mut Ecrit, f: sage_reel::Files) {
+            for x in [f.total, f.avant, f.arriere, u8::from(f.osm)] {
+                e.b(x);
+            }
+            e.u(u32::from(f.bus));
+        }
+        fn ensemble(e: &mut Ecrit, s: &std::collections::HashSet<usize>) {
+            let mut v: Vec<usize> = s.iter().copied().collect();
+            v.sort_unstable();
+            e.u(v.len() as u32);
+            for n in v {
+                e.u(n as u32);
+            }
+        }
+        e.u(self.voies.len() as u32);
+        for v in &self.voies {
+            pts(&mut e, &v.points);
+            e.f(v.w);
+            e.f(v.poids);
+            e.fs(&v.boite);
+            pts(&mut e, &v.trace);
+            for b in &v.bouches {
+                match b {
+                    Some(b) => {
+                        e.b(1);
+                        bouche(&mut e, b);
+                    }
+                    None => e.b(0),
+                }
+            }
+            e.b(u8::from(v.nets[0]));
+            e.b(u8::from(v.nets[1]));
+            files(&mut e, v.files[0]);
+            files(&mut e, v.files[1]);
+            e.u(v.aretes.len() as u32);
+            for &k in &v.aretes {
+                e.u(k as u32);
+            }
+            e.b(u8::from(v.bus));
+            e.u(v.revetements.len() as u32);
+            for (p, r) in &v.revetements {
+                e.fs(p);
+                e.b(*r);
+            }
+        }
+        e.u(self.carrefours.len() as u32);
+        for c in &self.carrefours {
+            e.u(c.noeuds.len() as u32);
+            for &n in &c.noeuds {
+                e.u(n as u32);
+            }
+            e.fs(&c.c);
+            e.u(c.plans.len() as u32);
+            for p in &c.plans {
+                e.fs(&p.c);
+                e.fs(&p.g);
+                e.f(p.rayon);
+            }
+            e.u(c.contour.len() as u32);
+            for p in &c.contour {
+                e.fs(p);
+            }
+            e.u(c.trous.len() as u32);
+            for t in &c.trous {
+                e.u(t.len() as u32);
+                for p in t {
+                    e.fs(p);
+                }
+            }
+            e.u(c.bouches.len() as u32);
+            for (k, b) in &c.bouches {
+                e.u(*k as u32);
+                bouche(&mut e, b);
+            }
+            e.fs(&c.boite);
+            e.b(u8::from(c.aplanir));
+        }
+        ensemble(&mut e, &self.simples);
+        ensemble(&mut e, &self.fourches);
+        e.u(self.deports.len() as u32);
+        for d in &self.deports {
+            e.u(d.aretes.len() as u32);
+            for &k in &d.aretes {
+                e.u(k as u32);
+            }
+            e.fs(&d.c);
+            e.fs(&d.decal);
+            e.f(d.l);
+        }
+        e.0
+    }
+
+    /// Le champ relu du cache (`ecrire`), ses index refaits.
+    pub fn lire(o: &[u8]) -> Option<Champ> {
+        use crate::cache_lieu::Lu;
+        if o.get(..8)? != CACHE_MAGIE {
+            return None;
+        }
+        let mut l = Lu(o, 8);
+        fn pts(l: &mut Lu) -> Option<Vec<Pt>> {
+            let n = l.u()? as usize;
+            let mut v = Vec::with_capacity(n.min(1 << 24));
+            for _ in 0..n {
+                v.push(l.fs::<7>()?);
+            }
+            Some(v)
+        }
+        fn bouche(l: &mut Lu) -> Option<crate::carrefours::Bouche> {
+            Some(crate::carrefours::Bouche { q: l.fs::<7>()?, g: l.fs::<2>()?, m: l.fs::<2>()?, d: l.fs::<2>()? })
+        }
+        fn files(l: &mut Lu) -> Option<sage_reel::Files> {
+            let (total, avant, arriere, osm) = (l.b()?, l.b()?, l.b()?, l.b()? != 0);
+            Some(sage_reel::Files { total, avant, arriere, osm, bus: l.u()? as u16 })
+        }
+        fn usizes(l: &mut Lu) -> Option<Vec<usize>> {
+            let n = l.u()? as usize;
+            let mut v = Vec::with_capacity(n.min(1 << 24));
+            for _ in 0..n {
+                v.push(l.u()? as usize);
+            }
+            Some(v)
+        }
+        let nv = l.u()? as usize;
+        let mut voies = Vec::with_capacity(nv.min(1 << 24));
+        for _ in 0..nv {
+            let points = pts(&mut l)?;
+            let (w, poids, boite) = (l.f()?, l.f()?, l.fs::<4>()?);
+            let trace = pts(&mut l)?;
+            let mut bouches = [None, None];
+            for b in &mut bouches {
+                if l.b()? == 1 {
+                    *b = Some(bouche(&mut l)?);
+                }
+            }
+            let nets = [l.b()? != 0, l.b()? != 0];
+            let files = [files(&mut l)?, files(&mut l)?];
+            let aretes = usizes(&mut l)?;
+            let bus = l.b()? != 0;
+            let nr = l.u()? as usize;
+            let mut revetements = Vec::with_capacity(nr.min(1 << 24));
+            for _ in 0..nr {
+                revetements.push((l.fs::<2>()?, l.b()?));
+            }
+            voies.push(Chaine { points, w, poids, boite, trace, bouches, nets, files, aretes, bus, revetements });
+        }
+        let nc = l.u()? as usize;
+        let mut carrefours = Vec::with_capacity(nc.min(1 << 24));
+        for _ in 0..nc {
+            let noeuds = usizes(&mut l)?;
+            let c = l.fs::<2>()?;
+            let np = l.u()? as usize;
+            let mut plans = Vec::with_capacity(np.min(1 << 20));
+            for _ in 0..np {
+                plans.push(crate::materialisation::Plan { c: l.fs::<3>()?, g: l.fs::<2>()?, rayon: l.f()? });
+            }
+            let n = l.u()? as usize;
+            let mut contour = Vec::with_capacity(n.min(1 << 24));
+            for _ in 0..n {
+                contour.push(l.fs::<2>()?);
+            }
+            let nt = l.u()? as usize;
+            let mut trous = Vec::with_capacity(nt.min(1 << 20));
+            for _ in 0..nt {
+                let n = l.u()? as usize;
+                let mut t = Vec::with_capacity(n.min(1 << 24));
+                for _ in 0..n {
+                    t.push(l.fs::<2>()?);
+                }
+                trous.push(t);
+            }
+            let nb = l.u()? as usize;
+            let mut bouches = Vec::with_capacity(nb.min(1 << 20));
+            for _ in 0..nb {
+                bouches.push((l.u()? as usize, bouche(&mut l)?));
+            }
+            let boite = l.fs::<4>()?;
+            let aplanir = l.b()? != 0;
+            carrefours.push(crate::carrefours::Carrefour { noeuds, c, plans, contour, trous, bouches, boite, aplanir });
+        }
+        let simples = usizes(&mut l)?.into_iter().collect();
+        let fourches = usizes(&mut l)?.into_iter().collect();
+        let nd = l.u()? as usize;
+        let mut deports = Vec::with_capacity(nd.min(1 << 20));
+        for _ in 0..nd {
+            let aretes = usizes(&mut l)?;
+            deports.push(Deport { aretes, c: l.fs::<2>()?, decal: l.fs::<2>()?, l: l.f()? });
+        }
+        if !l.fini() {
+            return None;
+        }
+        Some(Champ::indexer(voies, carrefours, simples, fourches, deports))
     }
 
     /// Le nœud `n` est-il une fourche (`fourches`) ?

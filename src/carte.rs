@@ -246,14 +246,42 @@ impl Donnees {
         self.champ_voirie
             .get_or_init(|| {
                 let r = self.reseau();
-                let _t = crate::suivi::tache("champ de hauteur de la voirie");
-                Arc::new(crate::champ_voirie::Champ::new(&r))
+                let h = crate::cache_lieu::empreinte_reseau(&self.lieu);
+                {
+                    let mut t = crate::suivi::tache("champ de hauteur de la voirie (cache)");
+                    if let Some(c) = crate::cache_lieu::lire("champ", h).and_then(|o| crate::champ_voirie::Champ::lire(&o)) {
+                        return Arc::new(c);
+                    }
+                    t.detail("absent");
+                }
+                let c = {
+                    let _t = crate::suivi::tache("champ de hauteur de la voirie");
+                    crate::champ_voirie::Champ::new(&r)
+                };
+                {
+                    let _t = crate::suivi::tache("champ de hauteur de la voirie (mise en cache)");
+                    crate::cache_lieu::garder("champ", h, &c.ecrire());
+                }
+                Arc::new(c)
             })
             .clone()
     }
 
     pub fn reseau(&self) -> Arc<sage_reel::reseau::Reseau> {
         self.reseau.get_or_init(|| {
+            // Dans le cache, s'il y est pour ce lieu et cette version
+            let h = {
+                let _t = crate::suivi::tache("réseau nivelé (empreinte)");
+                crate::cache_lieu::empreinte_reseau(&self.lieu)
+            };
+            {
+                let mut t = crate::suivi::tache("réseau nivelé (cache)");
+                if let Some(r) = crate::cache_lieu::reseau(h) {
+                    t.detail(format!("{} nœuds, {} arêtes", r.noeuds.len(), r.aretes.len()));
+                    return Arc::new(r);
+                }
+                t.detail("absent");
+            }
             let mut t = crate::suivi::tache("réseau nivelé (calcul)");
             // `sage_reel::reseau::nivele`, étape par étape (pour le suivi)
             use sage_reel::reseau as rs;
@@ -280,6 +308,10 @@ impl Donnees {
                 rs::niveler(&mut r, &c, 50);
             }
             t.detail(format!("{} nœuds, {} arêtes, {n} tunnels affleurants mis au sol", r.noeuds.len(), r.aretes.len()));
+            {
+                let _t = crate::suivi::tache("réseau nivelé (mise en cache)");
+                crate::cache_lieu::garder_reseau(h, &r);
+            }
             Arc::new(r)
         }).clone()
     }

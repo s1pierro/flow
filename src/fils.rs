@@ -52,6 +52,12 @@ fn rayon(a_gauche: bool) -> f32 {
     f32::from_bits(if a_gauche { &RAYON_G } else { &RAYON_D }.load(Ordering::Relaxed))
 }
 const VIRAGE_LOIN: f32 = 30.0;
+/// Un virage déjà assuré (`deja_assure`) : bifurcation cherchée à moins de tant de
+/// mètres en amont, la voie de destination rejointe à moins de tant en aval.
+const AMONT: f32 = 60.0;
+const AVAL: f32 = 60.0;
+/// Un élargissement regarde la bifurcation suivante jusqu'à tant de mètres.
+const ELARGI: f32 = 80.0;
 /// La longueur de la partie fondue : une base, plus autant de fois l'écart à
 /// rattraper, bornée (m).
 const FONTE_BASE: f32 = 12.0;
@@ -144,7 +150,10 @@ fn bouts(r: &Reseau, n: usize) -> Vec<Bout> {
                 continue;
             }
             let a = &r.aretes[k];
-            // Une boucle a ses deux bouts dans le groupe
+            // Ses deux bouts dans le groupe : une voie interne du carrefour, pas une entrée
+            if a.a != a.b && g.contains(&a.a) && g.contains(&a.b) {
+                continue;
+            }
             if g.contains(&a.a) {
                 v.push(Bout { arete: k, debut: true });
             }
@@ -159,7 +168,14 @@ fn bouts(r: &Reseau, n: usize) -> Vec<Bout> {
 /// Une voie carrossable si courte qu'elle n'est qu'un morceau de carrefour : ses deux
 /// nœuds n'en font qu'un, elle n'a pas de files.
 fn courte(r: &Reseau, k: usize) -> bool {
-    carrossable(r, k) && !guidee(r, k) && longueur(&r.aretes[k].points) < SERRE
+    carrossable(r, k) && !guidee(r, k) && !sens_unique(r, k) && longueur(&r.aretes[k].points) < SERRE
+}
+
+/// Une voie à sens unique (une chaussée séparée) : elle relie deux carrefours
+/// distincts, même courte, au lieu de n'en faire qu'un.
+fn sens_unique(r: &Reseau, k: usize) -> bool {
+    let f = r.aretes[k].files;
+    (f.arriere == 0 && f.avant == f.total) || (f.avant == 0 && f.arriere == f.total)
 }
 
 /// Une voie de bus en site propre (le TEOR) : comme un tramway, ses files suivent
@@ -351,6 +367,157 @@ fn places(r: &Reseau, b: Bout, arrivee: bool) -> Vec<Place> {
     v.into_iter().map(|x| x.1).collect()
 }
 
+/// Le nœud d'un bout.
+fn noeud_du_bout(r: &Reseau, b: Bout) -> usize {
+    let a = &r.aretes[b.arete];
+    if b.debut { a.a } else { a.b }
+}
+
+/// Les voies qu'on peut prendre en partant du nœud `n` : (arête, autre nœud, longueur).
+fn sorties(r: &Reseau, n: usize) -> Vec<(usize, usize, f32)> {
+    r.noeuds[n]
+        .aretes
+        .iter()
+        .filter_map(|&k| {
+            let a = &r.aretes[k];
+            if !carrossable(r, k) || a.a == a.b {
+                return None;
+            }
+            let b = Bout { arete: k, debut: a.a == n };
+            (!files_du_bout(r, b).1.is_empty()).then(|| (k, if a.a == n { a.b } else { a.a }, longueur(&a.points)))
+        })
+        .collect()
+}
+
+/// Les voies par lesquelles on arrive au nœud `n` : (arête, autre nœud, longueur).
+fn entrees(r: &Reseau, n: usize) -> Vec<(usize, usize, f32)> {
+    r.noeuds[n]
+        .aretes
+        .iter()
+        .filter_map(|&k| {
+            let a = &r.aretes[k];
+            if !carrossable(r, k) || a.a == a.b {
+                return None;
+            }
+            let b = Bout { arete: k, debut: a.a == n };
+            (!files_du_bout(r, b).0.is_empty()).then(|| (k, if a.a == n { a.b } else { a.a }, longueur(&a.points)))
+        })
+        .collect()
+}
+
+/// Les nœuds atteints depuis `n` en roulant au plus `budget` mètres (sans `n` ni
+/// `evite`), par l'arête `premiere` d'abord si elle est donnée.
+fn en_aval(r: &Reseau, n: usize, premiere: Option<usize>, budget: f32, evite: usize) -> std::collections::HashSet<usize> {
+    let mut vus = std::collections::HashSet::new();
+    let mut pile: Vec<(usize, f32)> = Vec::new();
+    for (k, m, l) in sorties(r, n) {
+        if premiere.is_none_or(|p| p == k) && l <= budget {
+            pile.push((m, budget - l));
+        }
+    }
+    while let Some((m, reste)) = pile.pop() {
+        if m == n || m == evite || !vus.insert(m) {
+            continue;
+        }
+        for (_, o, l) in sorties(r, m) {
+            if l <= reste {
+                pile.push((o, reste - l));
+            }
+        }
+    }
+    vus
+}
+
+/// Le virage du bout `e` (où l'on arrive) vers le bout `d` (où l'on part) est déjà
+/// assuré : en remontant `e` de moins de `AMONT` mètres, une bifurcation dont une autre
+/// branche atteint, en moins de `AVAL` mètres, la voie de `d` en aval du nœud.
+fn deja_assure(r: &Reseau, e: Bout, d: Bout) -> bool {
+    let n = noeud_du_bout(r, e);
+    let cible = en_aval(r, n, Some(d.arete), AVAL, n);
+    if cible.is_empty() {
+        return false;
+    }
+    // Remonter : (nœud, arête par laquelle on en repart vers n, distance faite)
+    let mut pile: Vec<(usize, usize, f32)> = Vec::new();
+    let a = &r.aretes[e.arete];
+    let amont = if e.debut { a.b } else { a.a };
+    pile.push((amont, e.arete, longueur(&a.points)));
+    let mut vus = std::collections::HashSet::new();
+    while let Some((v, venue, fait)) = pile.pop() {
+        if fait > AMONT || !vus.insert(v) {
+            continue;
+        }
+        for (k, m, _) in sorties(r, v) {
+            if k == venue {
+                continue;
+            }
+            // Sans repasser par le nœud du virage
+            if en_aval(r, v, Some(k), AVAL + fait, n).iter().any(|x| cible.contains(x)) {
+                return true;
+            }
+            let _ = m;
+        }
+        for (k, o, l) in entrees(r, v) {
+            pile.push((o, k, fait + l));
+        }
+    }
+    false
+}
+
+/// Le côté où placer `x` files ajoutées sur la voie du bout `d` (où l'on part) : à
+/// gauche (`Some(true)`) si, à son autre bout, à moins de `ELARGI` mètres, elle se
+/// partage et que ses branches de gauche prennent au plus `x` files ; à droite
+/// (`Some(false)`) pour celles de droite ; `None` sinon.
+fn cote_ajout(r: &Reseau, d: Bout, x: usize) -> Option<bool> {
+    let a = &r.aretes[d.arete];
+    if longueur(&a.points) > ELARGI {
+        return None;
+    }
+    let loin = Bout { arete: d.arete, debut: !d.debut };
+    let o = direction(r, loin)?;
+    // En arrivant au bout lointain : à rebours de sa direction depuis ce nœud
+    let t = [-o[0], -o[1]];
+    let n2 = noeud_du_bout(r, loin);
+    // Les branches qui partent vers l'avant : (direction, files libres)
+    let branches: Vec<([f32; 2], usize)> = bouts(r, n2)
+        .into_iter()
+        .filter(|b| b.arete != d.arete)
+        .filter_map(|b| {
+            let libres = places(r, b, false).iter().filter(|p| !p.bus).count();
+            let ob = direction(r, b)?;
+            (libres > 0 && dot(t, ob) >= 0.0).then_some((ob, libres))
+        })
+        .collect();
+    if branches.len() < 2 {
+        return None;
+    }
+    // La plus alignée continue ; les autres sont à sa gauche ou à sa droite
+    let suite = branches.iter().max_by(|a, b| dot(t, a.0).total_cmp(&dot(t, b.0)))?.0;
+    let (mut g, mut dr) = (0usize, 0usize);
+    for &(ob, libres) in &branches {
+        if ob == suite {
+            continue;
+        }
+        if dot(ob, gauche(suite)) > 0.0 {
+            g += libres;
+        } else {
+            dr += libres;
+        }
+    }
+    if g > 0 && g <= x && dr == 0 {
+        Some(true)
+    } else if dr > 0 && dr <= x && g == 0 {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Le bout d'où vient une place.
+fn bout_de(p: &Place) -> Bout {
+    Bout { arete: p.arete, debut: p.debut }
+}
+
 /// La polyligne de la file `i` de l'arête du bout `b`, en s'éloignant du nœud.
 fn depuis_noeud(r: &Reseau, b: Bout, i: usize) -> Vec<[f32; 3]> {
     let axe = axe_file(r, b.arete, i);
@@ -493,11 +660,31 @@ fn apparier(e: usize, aa: &[usize], ss: &[(usize, usize)], paires: &mut Vec<((us
 /// tourner à droite, de celle de gauche pour tourner à gauche, vers la même de l'autre
 /// voie).
 fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, virages: &mut Vec<Fil>, mut journal: Option<&mut Vec<String>>) {
-    let bs = bouts(r, n);
-    if bs.len() < 2 {
+    let bouts_ = bouts(r, n);
+    if bouts_.len() < 2 {
         return;
     }
-    let dirs: Vec<Option<[f32; 2]>> = bs.iter().map(|&b| direction(r, b)).collect();
+    // Les faisceaux : les bouts presque parallèles et côte à côte (les chaussées d'une
+    // même approche, tracées à part dans OSM) ne font qu'une entrée, leurs files rangées
+    // ensemble de gauche à droite
+    let membres: Vec<Vec<Bout>> = bouts_.iter().map(|&b| vec![b]).collect();
+    if membres.len() < 2 {
+        return;
+    }
+    let bs: Vec<Bout> = membres.iter().map(|m| m[0]).collect();
+    let dirs: Vec<Option<[f32; 2]>> = membres
+        .iter()
+        .map(|m| {
+            let (mut x, mut z) = (0.0f32, 0.0f32);
+            for &b in m {
+                let o = direction(r, b)?;
+                x += o[0];
+                z += o[1];
+            }
+            let l = x.hypot(z);
+            (l > 1e-3).then_some([x / l, z / l])
+        })
+        .collect();
     let cos_max = TOUT_DROIT.to_radians().cos();
     // Les destinations de chaque bout d'arrivée
     let cibles: Vec<Vec<usize>> = (0..bs.len())
@@ -516,8 +703,20 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
                 .collect()
         })
         .collect();
-    let arrivees: Vec<Vec<Place>> = bs.iter().map(|&b| places(r, b, true)).collect();
-    let departs: Vec<Vec<Place>> = bs.iter().map(|&b| places(r, b, false)).collect();
+    // Les places d'un faisceau, de gauche à droite dans le sens du déplacement
+    let ranger = |f: usize, arrivee: bool| -> Vec<Place> {
+        let mut v: Vec<Place> = membres[f].iter().flat_map(|&b| places(r, b, arrivee)).collect();
+        if membres[f].len() > 1 {
+            if let Some(o) = dirs[f] {
+                let sens = if arrivee { [-o[0], -o[1]] } else { o };
+                let g = gauche(sens);
+                v.sort_by(|a, b| (b.p[0] * g[0] + b.p[1] * g[1]).total_cmp(&(a.p[0] * g[0] + a.p[1] * g[1])));
+            }
+        }
+        v
+    };
+    let arrivees: Vec<Vec<Place>> = (0..bs.len()).map(|f| ranger(f, true)).collect();
+    let departs: Vec<Vec<Place>> = (0..bs.len()).map(|f| ranger(f, false)).collect();
     // Les files d'un bout de départ sont partagées entre les bouts qui y vont, de
     // gauche à droite, au prorata de leurs files d'arrivée
     let mut parts: Vec<Vec<(usize, std::ops::Range<usize>)>> = vec![Vec::new(); bs.len()];
@@ -535,6 +734,17 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
             gb.total_cmp(&ga)
         });
         let total: usize = sources.iter().map(|&e| arrivees[e].len()).sum();
+        // Une jonction plus large que le départ : une arrivée de même largeur s'y
+        // prolonge file à file ; une plus étroite rejoint les files du bord, de son côté
+        if total > m && sources.len() >= 2 && sources.iter().any(|&e| arrivees[e].len() == m) {
+            let premiere = sources.iter().position(|&e| arrivees[e].len() == m).unwrap_or(0);
+            for (rang, &e) in sources.iter().enumerate() {
+                let k = arrivees[e].len().min(m);
+                let r = if arrivees[e].len() == m { 0..m } else if rang < premiere { 0..k } else { m - k..m };
+                parts[d].push((e, r));
+            }
+            continue;
+        }
         let mut cumul = 0;
         for &e in &sources {
             let k = arrivees[e].len();
@@ -610,11 +820,70 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
             apparier(e, &aa, &ss, &mut paires);
         }
     }
+    // Un élargissement (une voie qui continue avec plus de files) : les files ajoutées
+    // du côté de la branche qui les prend à la prochaine bifurcation, si elle est proche
+    if bs.len() == 2 {
+        for e in 0..2 {
+            let d = 1 - e;
+            let (k, m) = (arrivees[e].len(), departs[d].len());
+            if k == 0 || m <= k || !paires.iter().all(|(a, q)| a.0 != e || q.0 == d) {
+                continue;
+            }
+            if arrivees[e].iter().any(|p| p.bus) || departs[d].iter().any(|p| p.bus) {
+                continue;
+            }
+            let x = m - k;
+            if cote_ajout(r, bs[d], x) == Some(true) {
+                paires.retain(|(a, _)| a.0 != e);
+                for j in 0..=x {
+                    paires.push(((e, 0), (d, j)));
+                }
+                for i in 1..k {
+                    paires.push(((e, i), (d, i + x)));
+                }
+                if let Some(jl) = journal.as_mut() {
+                    jl.push(format!("élargissement de a{} : {x} file(s) ajoutée(s) à gauche (bifurcation proche)", bs[d].arete));
+                }
+            }
+        }
+    }
+    // Une branche qui a exactement les files de l'arrivée (bus compris) : le tronc s'y
+    // prolonge file à file ; les autres branches partent de sa file voisine de leur côté
+    for e in 0..bs.len() {
+        let k = arrivees[e].len();
+        let Some(oe) = dirs[e] else { continue };
+        let t = [-oe[0], -oe[1]];
+        let mut ds: Vec<usize> = paires.iter().filter(|(a, _)| a.0 == e).map(|(_, q)| q.0).collect();
+        ds.sort();
+        ds.dedup();
+        if ds.len() < 2 {
+            continue;
+        }
+        let pareille = |d: usize| departs[d].len() == k && (0..k).all(|i| arrivees[e][i].bus == departs[d][i].bus);
+        let Some(&dx) = ds.iter().filter(|&&d| pareille(d)).max_by(|&&a, &&b| dirs[a].map_or(-2.0, |o| dot(t, o)).total_cmp(&dirs[b].map_or(-2.0, |o| dot(t, o)))) else { continue };
+        let Some(ox) = dirs[dx] else { continue };
+        paires.retain(|(a, _)| a.0 != e);
+        for i in 0..k {
+            paires.push(((e, i), (dx, i)));
+        }
+        let libres: Vec<usize> = (0..k).filter(|&i| !arrivees[e][i].bus).collect();
+        for &d in ds.iter().filter(|&&d| d != dx) {
+            let Some(od) = dirs[d] else { continue };
+            // À gauche de la branche prolongée : la file libre la plus à gauche
+            let a_gauche = dot(od, gauche(ox)) > 0.0;
+            let Some(&i) = (if a_gauche { libres.first() } else { libres.last() }) else { continue };
+            for j in 0..departs[d].len() {
+                if !departs[d][j].bus {
+                    paires.push(((e, i), (d, j)));
+                }
+            }
+        }
+    }
     // Un vrai carrefour : une voie y croise une autre (on peut y tourner, entre
     // `TOUT_DROIT` et `VIRAGE_MAX`). Sinon (une fourche, une jonction), les files glissent
     let cos_virage = VIRAGE_MAX.to_radians().cos();
     let tourne = |e: usize, d: usize| -> bool {
-        if d == e || cibles[e].contains(&d) {
+        if d == e || cibles[e].contains(&d) || arrivees[e].is_empty() || departs[d].is_empty() {
             return false;
         }
         match (dirs[e], dirs[d]) {
@@ -626,6 +895,62 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
         }
     };
     let carrefour = bs.len() >= 3 && (0..bs.len()).any(|e| (0..bs.len()).any(|d| tourne(e, d)));
+    // Une fourche : la file qui borde la branche la plus alignée peut aussi y continuer
+    if !carrefour {
+        for e in 0..bs.len() {
+            let Some(oe) = dirs[e] else { continue };
+            let t = [-oe[0], -oe[1]];
+            let mut ds: Vec<usize> = paires.iter().filter(|(a, _)| a.0 == e).map(|(_, q)| q.0).collect();
+            ds.sort();
+            ds.dedup();
+            if ds.len() < 2 {
+                continue;
+            }
+            let Some(&dx) = ds.iter().max_by(|&&a, &&b| dirs[a].map_or(-2.0, |o| dot(t, o)).total_cmp(&dirs[b].map_or(-2.0, |o| dot(t, o)))) else { continue };
+            let vers = |d: usize| -> Vec<(usize, usize)> { paires.iter().filter(|(a, q)| a.0 == e && q.0 == d).map(|(a, q)| (a.1, q.1)).collect() };
+            let alignee = vers(dx);
+            let moyenne = alignee.iter().map(|x| x.0 as f32).sum::<f32>() / alignee.len() as f32;
+            let mut ajouts = Vec::new();
+            for &d in ds.iter().filter(|&&d| d != dx) {
+                // Seulement une file qui se partage déjà dans sa branche (une file qui y
+                // continue seule ne bifurque pas)
+                let vd = vers(d);
+                let Some(&(i, _)) = vd.iter().filter(|x| !alignee.iter().any(|y| y.0 == x.0) && vd.iter().filter(|y| y.0 == x.0).count() >= 2).min_by(|a, b| (a.0 as f32 - moyenne).abs().total_cmp(&(b.0 as f32 - moyenne).abs())) else { continue };
+                let js = alignee.iter().map(|x| x.1);
+                let j = if (i as f32) < moyenne { js.min() } else { js.max() };
+                let Some(j) = j else { continue };
+                if arrivees[e][i].bus == departs[dx][j].bus {
+                    ajouts.push(((e, i), (dx, j)));
+                }
+            }
+            paires.extend(ajouts);
+        }
+    }
+    // L'axe prioritaire : une voie dont toutes les files continuent, une à une, dans
+    // toutes celles d'une autre voie (le boulevard qui traverse) ; elle n'est pas
+    // coupée, ses files se prolongent, les autres voies s'y raccrochent
+    let mut tronc = vec![false; bs.len()];
+    if carrefour {
+        for e in 0..bs.len() {
+            let k = arrivees[e].len();
+            let de_e: Vec<&((usize, usize), (usize, usize))> = paires.iter().filter(|(a, _)| a.0 == e).collect();
+            let Some(d) = de_e.first().map(|x| x.1 .0) else { continue };
+            let m = departs[d].len();
+            let vers_d = paires.iter().filter(|(_, q)| q.0 == d).count();
+            if k > 0 && k == m && de_e.len() == k && vers_d == m && de_e.iter().all(|x| x.1 .0 == d) {
+                let mut ai: Vec<usize> = de_e.iter().map(|x| x.0 .1).collect();
+                let mut qj: Vec<usize> = de_e.iter().map(|x| x.1 .1).collect();
+                ai.sort();
+                ai.dedup();
+                qj.sort();
+                qj.dedup();
+                if ai.len() == k && qj.len() == m {
+                    tronc[e] = true;
+                    tronc[d] = true;
+                }
+            }
+        }
+    }
     // Qui glisse vers qui
     let mut nb: HashMap<(bool, usize, usize), usize> = HashMap::new();
     for &(a, q) in &paires {
@@ -647,7 +972,7 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
         if let Some(j) = journal.as_mut() {
             j.push(format!("a{}·f{} vers a{}·f{} ; glisse a{}·f{}", pa.arete, pa.file, pq.arete, pq.file, glisse.arete, glisse.file));
         }
-        if !carrefour {
+        if !carrefour || (tronc[a.0] && tronc[q.0]) {
             fontes.insert((glisse.arete, glisse.file, glisse.debut), Fonte { p: garde.p, o: garde.o, court: false });
         }
     }
@@ -666,8 +991,8 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
     let mut bord = vec![0.0f32; bs.len()];
     for e in 0..bs.len() {
         let croisent = (0..bs.len()).filter(|&d| tourne(e, d) || tourne(d, e));
-        let w = croisent.map(|d| r.aretes[bs[d].arete].largeur * 0.5).fold(0.0f32, f32::max);
-        if w > 0.0 {
+        let w = croisent.map(|d| membres[d].iter().map(|b| r.aretes[b.arete].largeur).sum::<f32>() * 0.5).fold(0.0f32, f32::max);
+        if w > 0.0 && !tronc[e] {
             bord[e] = w + VIRAGE_MARGE;
         }
     }
@@ -683,8 +1008,14 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
     for e in 0..bs.len() {
         let Some(oe) = dirs[e] else { continue };
         let t = [-oe[0], -oe[1]];
+        if arrivees[e].is_empty() {
+            continue;
+        }
+        // Au plus un virage de chaque côté : vers la voie qui part le plus près de
+        // l'équerre (de celles qui ont des files au départ)
+        let mut meilleur: [Option<(usize, f32)>; 2] = [None, None];
         for d in 0..bs.len() {
-            if d == e || cibles[e].contains(&d) {
+            if d == e || cibles[e].contains(&d) || departs[d].is_empty() {
                 continue;
             }
             let Some(od) = dirs[d] else { continue };
@@ -692,42 +1023,99 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
             if c > cos_max || c < cos_virage {
                 continue;
             }
-            let a_gauche = dot(od, gauche(t)) > 0.0;
-            // Hors bus si les deux voies en ont ; sinon de bus à bus (le TEOR qui tourne)
-            let choisir = |v: &[Place], bus: bool| -> Option<usize> {
-                let libres: Vec<usize> = (0..v.len()).filter(|&i| v[i].bus == bus).collect();
-                if a_gauche { libres.first().copied() } else { libres.last().copied() }
-            };
-            let paire = match (choisir(&arrivees[e], false), choisir(&departs[d], false)) {
-                (Some(i), Some(j)) => Some((i, j)),
-                _ => choisir(&arrivees[e], true).zip(choisir(&departs[d], true)),
-            };
-            let Some((i, j)) = paire else { continue };
+            let cote = usize::from(dot(od, gauche(t)) > 0.0);
+            let ecart = (c.clamp(-1.0, 1.0).acos() - std::f32::consts::FRAC_PI_2).abs();
+            if meilleur[cote].is_none_or(|(_, m)| ecart < m) {
+                meilleur[cote] = Some((d, ecart));
+            }
+        }
+        // Une voie qui ne fait que tourner : toutes ses files tournent (partagées entre
+        // les deux côtés s'il y en a deux), chacune vers sa file
+        let seule = !paires.iter().any(|(a, _)| a.0 == e);
+        let libres_e: Vec<usize> = (0..arrivees[e].len()).filter(|&i| !arrivees[e][i].bus).collect();
+        let deux = meilleur.iter().all(|m| m.is_some());
+        for (cote, choix) in meilleur.into_iter().enumerate() {
+            let Some((d, _)) = choix else { continue };
+            let a_gauche = cote == 1;
+            // Un virage déjà assuré par une branche sœur, partie de la même bifurcation en
+            // amont, qui rejoint la voie de destination un peu plus loin : pas de virage
+            if deja_assure(r, bs[e], bs[d]) {
+                if let Some(jl) = journal.as_mut() {
+                    jl.push(format!("virage de a{} vers a{} : déjà assuré par une branche voisine", bs[e].arete, bs[d].arete));
+                }
+                continue;
+            }
+            let libres_d: Vec<usize> = (0..departs[d].len()).filter(|&j| !departs[d][j].bus).collect();
+            let mut liste: Vec<(usize, usize)> = Vec::new();
+            if seule && libres_e.len() > 1 && !libres_d.is_empty() {
+                let n = libres_e.len();
+                let moitie = n.div_ceil(2);
+                let mes: Vec<usize> = if !deux { libres_e.clone() } else if a_gauche { libres_e[..moitie].to_vec() } else { libres_e[n - moitie..].to_vec() };
+                let m = libres_d.len();
+                // Alignées du côté où l'on tourne ; les files en trop rejoignent la
+                // dernière de ce côté
+                for (r, &i) in mes.iter().enumerate() {
+                    let j = if a_gauche { libres_d[r.min(m - 1)] } else { libres_d[(m as isize - (mes.len() - r) as isize).max(0) as usize] };
+                    liste.push((i, j));
+                }
+            } else {
+                // Hors bus si les deux voies en ont ; sinon de bus à bus (le TEOR qui tourne)
+                let choisir = |v: &[Place], bus: bool| -> Option<usize> {
+                    let libres: Vec<usize> = (0..v.len()).filter(|&i| v[i].bus == bus).collect();
+                    if a_gauche { libres.first().copied() } else { libres.last().copied() }
+                };
+                let paire = match (choisir(&arrivees[e], false), choisir(&departs[d], false)) {
+                    (Some(i), Some(j)) => Some((i, j)),
+                    _ => choisir(&arrivees[e], true).zip(choisir(&departs[d], true)),
+                };
+                liste.extend(paire);
+            }
+            for (i, j) in liste {
             let (pa, pq) = (&arrivees[e][i], &departs[d][j]);
-            let (fe, fd) = (depuis_noeud(r, bs[e], pa.file), depuis_noeud(r, bs[d], pq.file));
+            let (fe, fd) = (depuis_noeud(r, bout_de(pa), pa.file), depuis_noeud(r, bout_de(pq), pq.file));
             let arc = arc_virage(&fe, &fd, rayon(a_gauche)).map(|(pts, a, b)| (pts, abscisse(&fe, a), abscisse(&fd, b)));
             if let Some((_, sa, sb)) = &arc {
-                bord[e] = bord[e].max(*sa);
-                bord[d] = bord[d].max(*sb);
+                if !tronc[e] {
+                    bord[e] = bord[e].max(*sa);
+                }
+                if !tronc[d] {
+                    bord[d] = bord[d].max(*sb);
+                }
             }
             if let Some(jl) = journal.as_mut() {
                 jl.push(format!("virage à {} : a{}·f{} vers a{}·f{}", if a_gauche { "gauche" } else { "droite" }, pa.arete, pa.file, pq.arete, pq.file));
             }
             vs.push(Virage { e, d, fe, fd, arc });
+            }
         }
     }
     for e in 0..bs.len() {
-        let l = longueur(&r.aretes[bs[e].arete].points);
+        let l = membres[e].iter().map(|b| longueur(&r.aretes[b.arete].points)).fold(f32::MAX, f32::min);
         bord[e] = bord[e].min(PART_MAX * l);
-        reculs.insert((bs[e].arete, bs[e].debut, usize::MAX), bord[e]);
+        for b in &membres[e] {
+            reculs.insert((b.arete, b.debut, usize::MAX), bord[e]);
+        }
         if let Some(jl) = journal.as_mut() {
-            jl.push(format!("ligne d'arrêt de a{} à {:.1} m", bs[e].arete, bord[e]));
+            let noms: Vec<String> = membres[e].iter().map(|b| format!("a{}", b.arete)).collect();
+            jl.push(format!("ligne d'arrêt de {} à {:.1} m", noms.join(" + "), bord[e]));
         }
     }
+    let marque = |n: [f32; 3]| Fil { points: vec![[n[0], n[1], n[2] - MARQUE_BAS], [n[0], n[1], n[2] + MARQUE_HAUT]], raccord: false, virage: false, bus: false, marque: true, traverse: false, sens: 0 };
     // Les virages, de ligne d'arrêt à ligne d'arrêt : le long de la file jusqu'à l'arc,
     // l'arc, puis le long de l'autre file
     for v in &vs {
-        let (se, sd) = (bord[v.e].min(PART_MAX * longueur(&v.fe)), bord[v.d].min(PART_MAX * longueur(&v.fd)));
+        let (mut se, mut sd) = (bord[v.e].min(PART_MAX * longueur(&v.fe)), bord[v.d].min(PART_MAX * longueur(&v.fd)));
+        // Sur l'axe prioritaire, le virage se raccroche à la file là où l'arc la touche
+        if let Some((_, sa, sb)) = &v.arc {
+            if tronc[v.e] {
+                se = *sa;
+                virages.push(marque(point_a(&v.fe, *sa)));
+            }
+            if tronc[v.d] {
+                sd = *sb;
+                virages.push(marque(point_a(&v.fd, *sb)));
+            }
+        }
         let pts = match &v.arc {
             Some((arc, sa, sb)) if *sa <= se + 0.01 && *sb <= sd + 0.01 => {
                 let mut pts: Vec<[f32; 3]> = troncon(&v.fe, *sa, se).into_iter().rev().collect();
@@ -745,8 +1133,11 @@ fn analyser(r: &Reseau, n: usize, fontes: &mut Fontes, reculs: &mut Reculs, vira
     }
     // Les continuités : d'une ligne d'arrêt à l'autre
     for &(a, q) in &paires {
+        if tronc[a.0] && tronc[q.0] {
+            continue;
+        }
         let (pa, pq) = (&arrivees[a.0][a.1], &departs[q.0][q.1]);
-        let (fe, fd) = (depuis_noeud(r, bs[a.0], pa.file), depuis_noeud(r, bs[q.0], pq.file));
+        let (fe, fd) = (depuis_noeud(r, bout_de(pa), pa.file), depuis_noeud(r, bout_de(pq), pq.file));
         let (pe, de) = point_dir(&fe, bord[a.0].min(PART_MAX * longueur(&fe)));
         let (pd, dd) = point_dir(&fd, bord[q.0].min(PART_MAX * longueur(&fd)));
         let bus = pa.bus || pq.bus;
@@ -899,6 +1290,10 @@ pub fn dans(r: &Reseau, b: [f32; 4]) -> Vec<Fil> {
     // Les files, une fois tous les nœuds analysés (leurs reculs connus)
     for (k, a) in r.aretes.iter().enumerate() {
         if !vus.contains(&a.a) || !vus.contains(&a.b) || !carrossable(r, k) || courte(r, k) {
+            continue;
+        }
+        // Une voie interne d'un carrefour regroupé : ses liaisons la remplacent
+        if a.a != a.b && groupe(r, a.a).contains(&a.b) {
             continue;
         }
         let w = a.largeur * 0.5;
