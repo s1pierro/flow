@@ -1878,12 +1878,17 @@ impl Lieux {
                         let avant_fils = s.fils;
                         cx.toggle(&mut b, sub_id(base, 668), "Fils de circulation (essai)", &mut s.fils);
                         let avant_rayons = (s.virage_droite, s.virage_gauche);
+                        let avant_lissage = (s.lissage, s.tolerance);
                         if s.fils {
+                            cx.toggle(&mut b, sub_id(base, 682), "Fils lissés", &mut s.lissage);
+                            if s.lissage {
+                                cx.slider(&mut b, sub_id(base, 683), "Tolérance du lissage", &format!("{:.2} m", s.tolerance).replace('.', ","), &mut s.tolerance, 0.05, 2.0);
+                            }
                             cx.slider(&mut b, sub_id(base, 680), "Rayon à droite", &format!("{:.1} m", s.virage_droite).replace('.', ","), &mut s.virage_droite, 2.0, 30.0);
                             cx.slider(&mut b, sub_id(base, 681), "Rayon à gauche", &format!("{:.1} m", s.virage_gauche).replace('.', ","), &mut s.virage_gauche, 2.0, 40.0);
                             cx.paragraph(&mut b, "En vert, un fil par file sur son axe (en rose, réservée au bus) ; en jaune vert, la partie qui glisse pour prolonger une autre file ; en bleu, les virages d'une voie à une autre ; en rouge, les continuités dans les carrefours. Touchez la sphère d'un nœud pour son détail. Un réseau d'essai : la chaussée et les files ne changent pas.");
                         }
-                        if s.files != avant || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut || (s.virage_droite, s.virage_gauche) != avant_rayons {
+                        if s.files != avant || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut || (s.virage_droite, s.virage_gauche) != avant_rayons || (s.lissage, s.tolerance) != avant_lissage {
                             if let Some(r) = self.trois_d.as_mut() {
                                 r.refaire_traces();
                             }
@@ -2796,6 +2801,13 @@ impl Contexte for Lieux {
                         r.refaire_traces();
                     }
                     (Some("noeud"), n) => r.noeud_choisi = n.map(|x| x as usize),
+                    (Some("lissage"), _) => {
+                        self.sur.lissage = m.get(2).is_none_or(|v| v != "non");
+                        if let Some(b) = m.get(3).and_then(|x| x.parse().ok()) {
+                            self.sur.tolerance = b;
+                        }
+                        r.refaire_traces();
+                    }
                     (Some("rayons"), _) => {
                         if let (Some(d), Some(g)) = (m.get(2).and_then(|x| x.parse().ok()), m.get(3).and_then(|x| x.parse().ok())) {
                             self.sur.virage_droite = d;

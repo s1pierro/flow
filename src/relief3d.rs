@@ -1386,11 +1386,14 @@ pub struct Surimpression {
     /// Les rayons des virages des fils de circulation, à droite et à gauche (m).
     pub virage_droite: f32,
     pub virage_gauche: f32,
+    /// Les fils lissés (essai), et la tolérance du lissage (m).
+    pub lissage: bool,
+    pub tolerance: f32,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT }
     }
 }
 
@@ -1401,11 +1404,11 @@ impl Surimpression {
         let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
         let f = v.get(6);
         let fi = v.get(7);
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE) })
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: v.get(13).copied().filter(|x| *x <= 2.0).unwrap_or(crate::fils::TOLERANCE_DEFAUT) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche)
+        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance)
     }
 }
 
@@ -1548,6 +1551,7 @@ impl Relief3d {
             self.traces_de = adresse;
         }
         crate::fils::regler_rayons(self.sur.virage_droite, self.sur.virage_gauche);
+        crate::fils::regler_lissage(self.sur.lissage, self.sur.tolerance);
         let mut v = Vec::new();
         for &cle in montrees {
             if !self.traces.contains_key(&cle) {

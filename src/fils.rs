@@ -20,7 +20,7 @@
 //! la chaussée ne changent. Les axes sont ceux du réseau, sans les déports des fourches.
 //! Les points sont ceux du réseau : x, z du jeu, et la hauteur.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use sage_reel::reseau::Reseau;
 use std::collections::HashMap;
 
@@ -39,6 +39,237 @@ const VIRAGE_RAYON: f32 = 4.0;
 /// d'une file où un arc peut la toucher.
 pub const RAYON_DROITE: f32 = 4.5;
 pub const RAYON_GAUCHE: f32 = 4.5;
+/// Le lissage des fils (essai) : un graphe adouci tiré du graphe dur, sans le
+/// modifier. Les fils qui se prolongent sont mis bout à bout en chaînes ; chaque
+/// chaîne devient une courbe qui passe par tous ses nœuds de files (aucun ne bouge) et
+/// par les sommets du tracé dur qui s'écartent de plus de la tolérance.
+pub const TOLERANCE_DEFAUT: f32 = 0.3;
+static LISSE: AtomicBool = AtomicBool::new(true);
+static TOLERANCE: AtomicU32 = AtomicU32::new(0x3e99_999a); // 0.3
+
+/// Le lissage et sa tolérance (m).
+pub fn regler_lissage(lisse: bool, tolerance: f32) {
+    LISSE.store(lisse, Ordering::Relaxed);
+    TOLERANCE.store(tolerance.to_bits(), Ordering::Relaxed);
+}
+
+fn lisse() -> bool {
+    LISSE.load(Ordering::Relaxed)
+}
+
+fn tolerance() -> f32 {
+    f32::from_bits(TOLERANCE.load(Ordering::Relaxed))
+}
+
+/// Le pas des points d'une chaîne lissée (m).
+const LISSE_PAS: f32 = 1.0;
+/// Deux bouts de fils à moins de tant se touchent.
+const LISSE_JOINT: f32 = 0.05;
+
+/// Le graphe adouci : les fils (hors virages, continuités et marques) mis bout à bout en
+/// chaînes là où exactement deux se touchent, chaque chaîne en une courbe par tous ses
+/// nœuds.
+fn lisser(v: &mut [Fil]) {
+    let tol = tolerance();
+    let lissable = |f: &Fil| !f.marque && !f.virage && !f.traverse && f.points.len() >= 2;
+    // Les bouts, regroupés par proximité (une grille de cases)
+    let case = |p: [f32; 3]| ((p[0] / 0.5).floor() as i64, (p[1] / 0.5).floor() as i64);
+    let mut grille: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    let mut joints: Vec<[f32; 3]> = Vec::new();
+    let mut trouver = |p: [f32; 3], grille: &mut HashMap<(i64, i64), Vec<usize>>, joints: &mut Vec<[f32; 3]>| -> usize {
+        let (a, b) = case(p);
+        for da in -1..=1 {
+            for db in -1..=1 {
+                if let Some(l) = grille.get(&(a + da, b + db)) {
+                    for &j in l {
+                        if (joints[j][0] - p[0]).hypot(joints[j][1] - p[1]) < LISSE_JOINT {
+                            return j;
+                        }
+                    }
+                }
+            }
+        }
+        joints.push(p);
+        grille.entry((a, b)).or_default().push(joints.len() - 1);
+        joints.len() - 1
+    };
+    // (fil, bout de fin ?) par joint ; et les joints touchés par un virage ou une continuité
+    let mut ends: Vec<[usize; 2]> = vec![[usize::MAX; 2]; v.len()];
+    let mut par_joint: Vec<Vec<(usize, bool)>> = Vec::new();
+    let mut fixe: Vec<bool> = Vec::new();
+    for (i, f) in v.iter().enumerate() {
+        if f.marque || f.points.len() < 2 {
+            continue;
+        }
+        for (k, p) in [f.points[0], f.points[f.points.len() - 1]].into_iter().enumerate() {
+            let j = trouver(p, &mut grille, &mut joints);
+            if par_joint.len() < joints.len() {
+                par_joint.resize(joints.len(), Vec::new());
+                fixe.resize(joints.len(), false);
+            }
+            if lissable(f) {
+                ends[i][k] = j;
+                par_joint[j].push((i, k == 1));
+            } else {
+                fixe[j] = true;
+            }
+        }
+    }
+    let traverse = |j: usize| !fixe[j] && par_joint[j].len() == 2 && par_joint[j][0].0 != par_joint[j][1].0;
+    let mut vu = vec![false; v.len()];
+    let departs: Vec<usize> = (0..v.len()).filter(|&i| lissable(&v[i])).collect();
+    // Les chaînes ouvertes d'abord (d'un bout fixe), puis les boucles
+    for boucles in [false, true] {
+        for &i0 in &departs {
+            if vu[i0] {
+                continue;
+            }
+            // Le bout par lequel commencer : un bout qui n'est pas un passage
+            let debut_fin = if !traverse(ends[i0][0]) {
+                false
+            } else if !traverse(ends[i0][1]) {
+                true
+            } else if boucles {
+                false
+            } else {
+                continue;
+            };
+            // La chaîne : (fil, à l'envers ?)
+            let mut chaine: Vec<(usize, bool)> = Vec::new();
+            let (mut i, mut envers) = (i0, debut_fin);
+            loop {
+                vu[i] = true;
+                chaine.push((i, envers));
+                let sortie = ends[i][if envers { 0 } else { 1 }];
+                if !traverse(sortie) {
+                    break;
+                }
+                let &(n, fin) = par_joint[sortie].iter().find(|x| x.0 != i).unwrap();
+                if vu[n] {
+                    break;
+                }
+                // On entre dans `n` par son bout `fin` : à l'envers si c'est sa fin
+                i = n;
+                envers = fin;
+            }
+            // Les points bout à bout ; `bornes` : les joints, qui ne bougent pas
+            let mut dur: Vec<[f32; 3]> = Vec::new();
+            let mut bornes: Vec<usize> = vec![0];
+            for &(i, envers) in &chaine {
+                let mut p = v[i].points.clone();
+                if envers {
+                    p.reverse();
+                }
+                if !dur.is_empty() {
+                    p.remove(0);
+                }
+                dur.extend(p);
+                bornes.push(dur.len() - 1);
+            }
+            if dur.len() < 3 {
+                continue;
+            }
+            // Les sommets gardés : les joints, et entre eux ceux qui s'écartent de plus de
+            // la tolérance (Douglas-Peucker) ; les points alignés tombent
+            let mut garde = vec![false; dur.len()];
+            for w in bornes.windows(2) {
+                garde[w[0]] = true;
+                garde[w[1]] = true;
+                simplifier(&dur, w[0], w[1], tol, &mut garde);
+            }
+            let som: Vec<usize> = (0..dur.len()).filter(|&k| garde[k]).collect();
+            // Une courbe de Catmull-Rom centripète par tous ces sommets : elle passe par
+            // chacun (les nœuds ne bougent pas), sans cassure ; aux bouts de la chaîne, la
+            // direction du fil dur
+            let pt = |k: usize| dur[som[k]];
+            let fantome_debut = {
+                let (a, b) = (dur[0], dur[1]);
+                let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-4);
+                let m = (pt(1)[0] - a[0]).hypot(pt(1)[1] - a[1]);
+                [a[0] - (b[0] - a[0]) / l * m, a[1] - (b[1] - a[1]) / l * m, a[2] - (pt(1)[2] - a[2])]
+            };
+            let fantome_fin = {
+                let n = dur.len();
+                let (a, b) = (dur[n - 1], dur[n - 2]);
+                let l = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-4);
+                let q = pt(som.len() - 2);
+                let m = (q[0] - a[0]).hypot(q[1] - a[1]);
+                [a[0] - (b[0] - a[0]) / l * m, a[1] - (b[1] - a[1]) / l * m, a[2] - (q[2] - a[2])]
+            };
+            let mut q: Vec<[f32; 3]> = vec![pt(0)];
+            // Où tombe chaque sommet dans `q`
+            let mut ou = vec![0usize; dur.len()];
+            for k in 0..som.len() - 1 {
+                let p0 = if k == 0 { fantome_debut } else { pt(k - 1) };
+                let p3 = if k + 2 >= som.len() { fantome_fin } else { pt(k + 2) };
+                let (p1, p2) = (pt(k), pt(k + 1));
+                let l = (p2[0] - p1[0]).hypot(p2[1] - p1[1]);
+                let n = ((l / LISSE_PAS).ceil() as usize).max(1);
+                for j in 1..n {
+                    q.push(catmull_rom(p0, p1, p2, p3, j as f32 / n as f32));
+                }
+                q.push(p2);
+                ou[som[k + 1]] = q.len() - 1;
+            }
+            // Rendus à leurs fils
+            for (c, &(i, envers)) in chaine.iter().enumerate() {
+                let mut p = q[ou[bornes[c]]..=ou[bornes[c + 1]]].to_vec();
+                if envers {
+                    p.reverse();
+                }
+                if p.len() >= 2 {
+                    v[i].points = p;
+                }
+            }
+        }
+    }
+}
+
+/// Douglas-Peucker : garde entre `a` et `b` les sommets de `p` à plus de `tol` de la
+/// corde.
+fn simplifier(p: &[[f32; 3]], a: usize, b: usize, tol: f32, garde: &mut [bool]) {
+    if b <= a + 1 {
+        return;
+    }
+    let (pa, pb) = (p[a], p[b]);
+    let (dx, dz) = (pb[0] - pa[0], pb[1] - pa[1]);
+    let l2 = dx * dx + dz * dz;
+    let (mut loin, mut k) = (0.0f32, a);
+    for i in a + 1..b {
+        let t = if l2 > 1e-9 { (((p[i][0] - pa[0]) * dx + (p[i][1] - pa[1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        let d = (p[i][0] - pa[0] - dx * t).hypot(p[i][1] - pa[1] - dz * t);
+        if d > loin {
+            loin = d;
+            k = i;
+        }
+    }
+    if loin > tol {
+        garde[k] = true;
+        simplifier(p, a, k, tol, garde);
+        simplifier(p, k, b, tol, garde);
+    }
+}
+
+/// Le point à `t` (0 à 1) entre `p1` et `p2` d'une courbe de Catmull-Rom centripète.
+fn catmull_rom(p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3], t: f32) -> [f32; 3] {
+    let d = |a: [f32; 3], b: [f32; 3]| ((a[0] - b[0]).hypot(a[1] - b[1])).sqrt().max(1e-3);
+    let t0 = 0.0;
+    let t1 = t0 + d(p0, p1);
+    let t2 = t1 + d(p1, p2);
+    let t3 = t2 + d(p2, p3);
+    let u = t1 + (t2 - t1) * t;
+    let mix = |a: [f32; 3], b: [f32; 3], ta: f32, tb: f32| {
+        let (wa, wb) = ((tb - u) / (tb - ta), (u - ta) / (tb - ta));
+        [a[0] * wa + b[0] * wb, a[1] * wa + b[1] * wb, a[2] * wa + b[2] * wb]
+    };
+    let a1 = mix(p0, p1, t0, t1);
+    let a2 = mix(p1, p2, t1, t2);
+    let a3 = mix(p2, p3, t2, t3);
+    let b1 = mix(a1, a2, t0, t2);
+    let b2 = mix(a2, a3, t1, t3);
+    mix(b1, b2, t1, t2)
+}
+
 static RAYON_D: AtomicU32 = AtomicU32::new(0x4090_0000); // 4.5
 static RAYON_G: AtomicU32 = AtomicU32::new(0x4090_0000); // 4.5
 
@@ -1336,6 +1567,9 @@ pub fn dans(r: &Reseau, b: [f32; 4]) -> Vec<Fil> {
         }
     }
     v.extend(virages);
+    if lisse() {
+        lisser(&mut v);
+    }
     v
 }
 
