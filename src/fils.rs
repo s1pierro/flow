@@ -1211,7 +1211,9 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
     // Une voie courte et presque droite : en ligne droite d'un nœud de files à l'autre
     // (une file sans partie qui glisse suit son tracé : rien à redresser)
     let glisse = fontes.contains_key(&(k, i, true)) || fontes.contains_key(&(k, i, false));
-    if glisse && droite(&r.aretes[k].points) {
+    // (une rampe, entre murs : seulement si la droite reste sur sa chaussée ; ailleurs
+    // toujours, les boulevards en dépendent)
+    if glisse && droite(&r.aretes[k].points) && (!rampe(r, k) || sur_chaussee(&r.aretes[k].points, r.aretes[k].largeur * 0.5, n0, n1)) {
         let l = longueur(&p);
         let pas = ((l / 4.0).ceil() as usize).max(1);
         let pts = (0..=pas)
@@ -1245,6 +1247,34 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
     if reste.len() >= 2 {
         sortie.push(Fil { points: reste, raccord: false, virage: false, bus, marque: false, traverse: false, sens });
     }
+}
+
+/// Une rampe ou un ouvrage : la voie est en tunnel ou sur un pont, ou elle touche à
+/// l'un de ses bouts une voie qui l'est (une rampe d'accès, une tête de pont).
+fn rampe(r: &Reseau, k: usize) -> bool {
+    use sage_reel::reseau::Passage;
+    let a = &r.aretes[k];
+    a.passage != Passage::Sol || [a.a, a.b].iter().any(|&n| r.noeuds[n].aretes.iter().any(|&j| j != k && r.aretes[j].passage != Passage::Sol))
+}
+
+/// La corde de `n0` à `n1` reste sur la chaussée (à moins de `w` de l'axe `p`) sur
+/// sa partie centrale (les bouts glissent vers une autre voie, ils peuvent en sortir).
+fn sur_chaussee(p: &[[f32; 3]], w: f32, n0: [f32; 3], n1: [f32; 3]) -> bool {
+    let loin = |q: [f32; 2]| {
+        p.windows(2)
+            .map(|s| {
+                let (ax, az, bx, bz) = (s[0][0], s[0][1], s[1][0], s[1][1]);
+                let (dx, dz) = (bx - ax, bz - az);
+                let l2 = dx * dx + dz * dz;
+                let t = if l2 > 1e-9 { (((q[0] - ax) * dx + (q[1] - az) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                (q[0] - ax - dx * t).hypot(q[1] - az - dz * t)
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    (2..=8).all(|j| {
+        let t = j as f32 / 10.0;
+        loin([n0[0] + (n1[0] - n0[0]) * t, n0[1] + (n1[1] - n0[1]) * t]) <= w
+    })
 }
 
 /// Une voie courte et presque droite : au plus `DROIT_LONGUEUR`, et son axe à moins de
