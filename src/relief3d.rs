@@ -1788,8 +1788,10 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
                 continue;
             }
             // Les lignes, tirées des files vectorielles (`files`)
-            let pts = crate::fils::trace(r, ka);
-            for (ligne, l) in crate::files::separations(a, &pts) {
+            let (pts, _, raccords) = crate::fils::trace_raccords(r, ka);
+            for (rang, (ligne, mut l)) in crate::files::separations(a, &pts).into_iter().enumerate() {
+                // Au raccord, la ligne finit entre les files qu'elle sépare
+                crate::fils::raccorder_bouts(&raccords, &mut l, |rc| rc.bout_ligne(rang + 1));
                 let k = match ligne {
                     crate::files::Ligne::Sens => 6,
                     crate::files::Ligne::Osm => 4,
@@ -1827,7 +1829,9 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
                     }
                 }
             }
-            for f in crate::files::files(ka, a, &pts) {
+            for mut f in crate::files::files(ka, a, &pts) {
+                let rang = f.rang;
+                crate::fils::raccorder_bouts(&raccords, &mut f.axe, |rc| rc.bout_file(rang));
                 let k = if f.bus { 10 } else { 7 };
                 for w in f.axe.windows(2) {
                     if let Some((p, q)) = couper(w[0], w[1], b) {
@@ -1888,7 +1892,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             })
             .map(|(k, _)| k)
             .collect();
-        for l in crate::bords::bords(r, &dans, &|k| crate::fils::trace_largeurs(r, k)) {
+        for l in crate::bords::bords(r, &dans, &|k| crate::fils::trace_raccords(r, k)) {
             for w in l.windows(2) {
                 if let Some((p, q)) = couper(w[0], w[1], b) {
                     let (s, ix) = &mut listes[13];
