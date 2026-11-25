@@ -2,7 +2,7 @@
 //! `Flow/cache` : un fichier par lieu et par calcul, reconnu par l'empreinte de ce
 //! dont il dépend et la version de Flow (une nouvelle version refait les calculs).
 
-use sage_reel::reseau::{Arete, Noeud, Passage, Reseau};
+use sage_reel::reseau::{Arete, Noeud, Origine, Passage, Reseau};
 use sage_reel::{Files, Lieu};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -81,7 +81,7 @@ pub fn empreinte_reseau(l: &Lieu) -> u64 {
 
 // --- Écriture et lecture ---------------------------------------------------------
 
-const MAGIE: &[u8; 8] = b"FLRESEA1";
+const MAGIE: &[u8; 8] = b"FLRESEA2";
 
 pub(crate) struct Ecrit(pub(crate) Vec<u8>);
 
@@ -146,6 +146,13 @@ fn ecrire_reseau(r: &Reseau) -> Vec<u8> {
     e.u(r.noeuds.len() as u32);
     for n in &r.noeuds {
         e.p(n.p);
+        e.b(match n.origine {
+            Origine::Donnees => 0,
+            Origine::Bord => 1,
+            Origine::Raccord => 2,
+            Origine::RaccordSommet => 3,
+            Origine::Croisement => 4,
+        });
         e.u(n.aretes.len() as u32);
         for &k in &n.aretes {
             e.u(k as u32);
@@ -188,12 +195,19 @@ fn lire_reseau(o: &[u8]) -> Option<Reseau> {
     let mut noeuds = Vec::with_capacity(nn);
     for _ in 0..nn {
         let p = l.p()?;
+        let origine = match l.b()? {
+            1 => Origine::Bord,
+            2 => Origine::Raccord,
+            3 => Origine::RaccordSommet,
+            4 => Origine::Croisement,
+            _ => Origine::Donnees,
+        };
         let k = l.u()? as usize;
         let mut aretes = Vec::with_capacity(k);
         for _ in 0..k {
             aretes.push(l.u()? as usize);
         }
-        noeuds.push(Noeud { p, aretes });
+        noeuds.push(Noeud { p, aretes, origine });
     }
     let na = l.u()? as usize;
     let mut aretes = Vec::with_capacity(na);
@@ -281,7 +295,7 @@ mod tests {
     #[test]
     fn le_reseau_fait_l_aller_retour() {
         let r = Reseau {
-            noeuds: vec![Noeud { p: [1.0, 2.0, 3.0], aretes: vec![0] }, Noeud { p: [4.0, 5.0, 6.0], aretes: vec![0] }],
+            noeuds: vec![Noeud { p: [1.0, 2.0, 3.0], aretes: vec![0], origine: Origine::Raccord }, Noeud { p: [4.0, 5.0, 6.0], aretes: vec![0], origine: Origine::Donnees }],
             aretes: vec![Arete { a: 0, b: 1, points: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], passage: Passage::Pont, genre: 1, largeur: 7.5, revetement: 2, files: Files { total: 2, avant: 1, arriere: 1, osm: true, bus: 2 }, niveau: -1 }],
             raccords: 3,
             a_niveau: 4,

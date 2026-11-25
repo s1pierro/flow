@@ -29,6 +29,8 @@ pub mod charge;
 pub mod renfort;
 pub mod champ_voirie;
 pub mod fils;
+pub mod files;
+pub mod origine_noeuds;
 pub mod cache_lieu;
 pub mod carrefours;
 pub mod carrefours_groupes;

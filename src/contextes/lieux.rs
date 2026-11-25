@@ -186,6 +186,8 @@ pub struct Lieux {
     inachevees: Vec<(PathBuf, Option<Demande>, String)>,
     // L'édition
     choix: Option<Choix>,
+    /// Le nœud choisi de la voie choisie (son indice dans ses points).
+    noeud: Option<usize>,
     trace: Option<Vec<[f32; 2]>>,
     pinceau: usize,
     rayon: f32,
@@ -293,6 +295,7 @@ impl Default for Lieux {
             liste: None,
             inachevees: Vec::new(),
             choix: None,
+            noeud: None,
             trace: None,
             pinceau: 0,
             rayon: 40.0,
@@ -1122,7 +1125,8 @@ impl Lieux {
         let Some(mut vue) = self.vue else { return };
         let (min, max) = {
             let c = self.carte.as_ref().and_then(|c| c.donnees.read().ok().map(|d| d.monde().2)).unwrap_or(20000.0);
-            (zone.w.min(zone.h) / c * 0.5, 8.0)
+            // (de près : jusqu'à 80 px par mètre, pour retoucher les nœuds des voies)
+            (zone.w.min(zone.h) / c * 0.5, 80.0)
         };
         let peint = matches!(self.outil, RELIEF | EAU | SOL);
         match g {
@@ -1141,7 +1145,24 @@ impl Lieux {
                         match self.outil {
                             VOIR => self.info = Some(Lieux::decrire(&d, wx, wz)),
                             BATI => self.choix = Lieux::bati_sous(&d, wx, wz).map(Choix::Bati),
-                            VOIES => self.choix = Lieux::voie_pres(&d, wx, wz, 14.0 / vue.echelle).map(|(p, k)| Choix::Voie(p, k)),
+                            VOIES => {
+                                // Un nœud de la voie choisie, sinon une autre voie
+                                let n = match self.choix {
+                                    Some(Choix::Voie(pont, k)) => (if pont { d.lieu.ponts.get(k) } else { d.lieu.routes.get(k) }).and_then(|r| {
+                                        r.points.iter().enumerate().map(|(i, q)| {
+                                            let s = vue.ecran(zone, q[0], q[1]);
+                                            (i, (s[0] - x).hypot(s[1] - y))
+                                        }).min_by(|a, b| a.1.total_cmp(&b.1)).filter(|p| p.1 < 24.0 * self.dp).map(|p| p.0)
+                                    }),
+                                    _ => None,
+                                };
+                                if n.is_some() {
+                                    self.noeud = n;
+                                } else {
+                                    self.choix = Lieux::voie_pres(&d, wx, wz, 14.0 / vue.echelle).map(|(p, k)| Choix::Voie(p, k));
+                                    self.noeud = None;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -1170,6 +1191,7 @@ impl Lieux {
                                     }).min_by(|a, b| a.1.total_cmp(&b.1));
                                     if let Some((i, _)) = proche.filter(|p| p.1 < 24.0 * self.dp) {
                                         self.trait_ = Some(Trait::Point { pont, k, i, avant: r.clone() });
+                                        self.noeud = Some(i);
                                     }
                                 }
                             }
@@ -1495,7 +1517,14 @@ impl Lieux {
         }
         // Le nœud choisi : ce qu'on en sait, en bas à gauche (au-dessus de la génération)
         if let (true, Some(n), Some(carte)) = (self.maquette3d, r.noeud_choisi, &self.carte) {
-            let lignes = carte.donnees.read().ok().and_then(|d| d.reseau_pret()).map(|res| crate::fils::decrire(&res, n));
+            let lignes = carte.donnees.read().ok().and_then(|d| {
+                let res = d.reseau_pret()?;
+                let mut l = crate::fils::decrire(&res, n);
+                if n < res.noeuds.len() {
+                    l.insert(1.min(l.len()), crate::origine_noeuds::texte(&res, n));
+                }
+                Some(l)
+            });
             if let Some(lignes) = lignes {
                 let c = cx.couleurs();
                 let (taille, pad) = (12.0, cx.pad());
@@ -1621,6 +1650,12 @@ impl Lieux {
                                 cx.dl.rrect(Rect::new(s[0] - rr, s[1] - rr, 2.0 * rr, 2.0 * rr), rr, [255, 255, 255, 255]);
                                 cx.dl.rrect(Rect::new(s[0] - rr + 2.0 * d, s[1] - rr + 2.0 * d, 2.0 * rr - 4.0 * d, 2.0 * rr - 4.0 * d), rr, accent);
                             }
+                        }
+                        if let Some(q) = self.noeud.and_then(|i| r.points.get(i)) {
+                            let s = vue.ecran(zone, q[0], q[1]);
+                            let rr = 10.0 * d;
+                            cx.dl.rrect(Rect::new(s[0] - rr, s[1] - rr, 2.0 * rr, 2.0 * rr), rr, accent);
+                            cx.dl.rrect(Rect::new(s[0] - rr + 3.0 * d, s[1] - rr + 3.0 * d, 2.0 * rr - 6.0 * d, 2.0 * rr - 6.0 * d), rr, [255, 255, 255, 255]);
                         }
                     }
                 }
@@ -1867,28 +1902,20 @@ impl Lieux {
                     }
                     if s.traces {
                         let avant = s.files;
-                        cx.toggle(&mut b, sub_id(base, 667), "Files des voies", &mut s.files);
+                        cx.toggle(&mut b, sub_id(base, 667), "Séparateurs", &mut s.files);
+                        let avant_axes = s.axes;
                         if s.files {
-                            cx.paragraph(&mut b, "En cyan, les lignes entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens.");
+                            cx.toggle(&mut b, sub_id(base, 683), "Files", &mut s.axes);
+                            cx.paragraph(&mut b, "En cyan, les séparateurs entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens. Files : l'axe de chacune, en vert (en rose, réservée au bus), un cône pour son sens (aucun pour une file partagée).");
                         }
                         let avant_brut = s.brut;
                         cx.toggle(&mut b, sub_id(base, 670), "Tracé brut des voies", &mut s.brut);
                         let avant_pietons = s.pietons;
                         cx.toggle(&mut b, sub_id(base, 669), "Voies piétonnes", &mut s.pietons);
+                        // (les fils de circulation, à l'essai, ne sont plus montrés)
                         let avant_fils = s.fils;
-                        cx.toggle(&mut b, sub_id(base, 668), "Fils de circulation (essai)", &mut s.fils);
-                        let avant_rayons = (s.virage_droite, s.virage_gauche);
-                        let avant_lissage = (s.lissage, s.tolerance);
-                        if s.fils {
-                            cx.toggle(&mut b, sub_id(base, 682), "Fils lissés", &mut s.lissage);
-                            if s.lissage {
-                                cx.slider(&mut b, sub_id(base, 683), "Tolérance du lissage", &format!("{:.2} m", s.tolerance).replace('.', ","), &mut s.tolerance, 0.05, 2.0);
-                            }
-                            cx.slider(&mut b, sub_id(base, 680), "Rayon à droite", &format!("{:.1} m", s.virage_droite).replace('.', ","), &mut s.virage_droite, 2.0, 30.0);
-                            cx.slider(&mut b, sub_id(base, 681), "Rayon à gauche", &format!("{:.1} m", s.virage_gauche).replace('.', ","), &mut s.virage_gauche, 2.0, 40.0);
-                            cx.paragraph(&mut b, "En vert, un fil par file sur son axe (en rose, réservée au bus) ; en jaune vert, la partie qui glisse pour prolonger une autre file ; en bleu, les virages d'une voie à une autre ; en rouge, les continuités dans les carrefours. Touchez la sphère d'un nœud pour son détail. Un réseau d'essai : la chaussée et les files ne changent pas.");
-                        }
-                        if s.files != avant || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut || (s.virage_droite, s.virage_gauche) != avant_rayons || (s.lissage, s.tolerance) != avant_lissage {
+                        s.fils = false;
+                        if s.files != avant || s.axes != avant_axes || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut {
                             if let Some(r) = self.trois_d.as_mut() {
                                 r.refaire_traces();
                             }
@@ -2383,6 +2410,99 @@ impl Lieux {
         }
         if r != avant {
             self.poser(li, k, Elem::R(r), Elem::R(avant));
+            return;
+        }
+        self.panneau_noeuds(cx, b, base, pont, k, &avant);
+    }
+
+    /// Les nœuds de la voie choisie : en choisir un (le toucher, ou précédent / suivant),
+    /// en insérer, en retirer, l'accrocher à la voie voisine, y couper la voie.
+    fn panneau_noeuds(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, base: Id, pont: bool, k: usize, r: &Route) {
+        let li = if pont { Liste::Ponts } else { Liste::Routes };
+        let n = r.points.len();
+        cx.section(b, "Nœuds");
+        let Some(i) = self.noeud.filter(|&i| i < n) else {
+            self.noeud = None;
+            cx.paragraph(b, &format!("{n} nœuds · touchez-en un pour le choisir, tirez-le pour le déplacer."));
+            return;
+        };
+        let q = r.points[i];
+        let lg = |a: [f32; 3], c: [f32; 3]| (c[0] - a[0]).hypot(c[1] - a[1]);
+        let (av, ap) = (if i > 0 { format!("{:.1} m", lg(r.points[i - 1], q)) } else { "bout".into() }, if i + 1 < n { format!("{:.1} m", lg(q, r.points[i + 1])) } else { "bout".into() });
+        cx.paragraph(b, &format!("nœud {} sur {n} · x {:.1} z {:.1} · avant {av}, après {ap}", i + 1, q[0], q[1]).replace('.', ","));
+        let actions = ["Précédent", "Suivant", "Insérer", "Retirer", "Accrocher", "Couper"];
+        let Some(a) = Lieux::puces(cx, b, sub_id(base, 275), &actions, usize::MAX) else { return };
+        let mut neuf = r.clone();
+        match a {
+            0 => self.noeud = Some(i.saturating_sub(1)),
+            1 => self.noeud = Some((i + 1).min(n - 1)),
+            // Un nœud au milieu du segment suivant (ou précédent, au dernier)
+            2 => {
+                let (j0, j1) = if i + 1 < n { (i, i + 1) } else { (i - 1, i) };
+                let (p0, p1) = (r.points[j0], r.points[j1]);
+                neuf.points.insert(j1, [(p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0, (p0[2] + p1[2]) / 2.0]);
+                self.faire(Retouche::Pose(li, k, Elem::R(neuf)));
+                self.noeud = Some(j1);
+            }
+            3 if n > 2 => {
+                neuf.points.remove(i);
+                self.faire(Retouche::Pose(li, k, Elem::R(neuf)));
+                self.noeud = Some(i.min(n - 2));
+            }
+            // Sur le nœud d'une autre voie s'il en est un à moins de 3 m, sinon sur son
+            // tracé (à moins de 8 m)
+            4 => {
+                let cible = self.carte.as_ref().and_then(|c| c.donnees.read().ok()).and_then(|d| {
+                    let mut som: Option<(f32, [f32; 3])> = None;
+                    let mut seg: Option<(f32, [f32; 3])> = None;
+                    for p2 in [false, true] {
+                        let liste = if p2 { &d.lieu.ponts } else { &d.lieu.routes };
+                        for kk in d.routes_dans([q[0] - 8.0, q[1] - 8.0, q[0] + 8.0, q[1] + 8.0], p2) {
+                            let kk = kk as usize;
+                            if p2 == pont && kk == k {
+                                continue;
+                            }
+                            let pts = &liste[kk].points;
+                            for c in pts {
+                                let e = lg(*c, q);
+                                if e < 3.0 && som.is_none_or(|m| e < m.0) {
+                                    som = Some((e, *c));
+                                }
+                            }
+                            for s2 in pts.windows(2) {
+                                let (dx, dz) = (s2[1][0] - s2[0][0], s2[1][1] - s2[0][1]);
+                                let l2 = dx * dx + dz * dz;
+                                let t = if l2 > 1e-9 { (((q[0] - s2[0][0]) * dx + (q[1] - s2[0][1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                                let c = [s2[0][0] + dx * t, s2[0][1] + dz * t, s2[0][2] + (s2[1][2] - s2[0][2]) * t];
+                                let e = lg(c, q);
+                                if e < 8.0 && seg.is_none_or(|m| e < m.0) {
+                                    seg = Some((e, c));
+                                }
+                            }
+                        }
+                    }
+                    som.or(seg).map(|m| m.1)
+                });
+                match cible {
+                    Some(c) => {
+                        neuf.points[i] = c;
+                        self.faire(Retouche::Pose(li, k, Elem::R(neuf)));
+                    }
+                    None => self.message = Some(("Aucune autre voie à moins de 8 m de ce nœud.".into(), false)),
+                }
+            }
+            // La voie en deux : du début à ce nœud, de ce nœud à la fin
+            5 if i > 0 && i + 1 < n => {
+                let mut suite = r.clone();
+                neuf.points.truncate(i + 1);
+                suite.points.drain(..i);
+                let m = self.carte.as_ref().and_then(|c| c.donnees.read().ok()).map(|d| if pont { d.lieu.ponts.len() } else { d.lieu.routes.len() });
+                if let Some(m) = m {
+                    self.faire(Retouche::Groupe(vec![Retouche::Pose(li, k, Elem::R(neuf)), Retouche::Insere(li, m, Elem::R(suite))]));
+                    self.noeud = Some(i);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2653,10 +2773,6 @@ impl Lieux {
                 self.defaire(false);
             }
             x -= h;
-            if bouton(cx, x, 2, Icon::Disquette, self.chemin.is_some() && self.enregistrement.is_none(), if self.modifie { col.accent } else { col.pale }) {
-                self.enregistrer();
-            }
-            x -= h;
             if bouton(cx, x, 4, Icon::Cube, true, if self.trois_d.is_some() { col.accent } else { col.texte }) {
                 self.basculer_3d();
             }
@@ -2669,6 +2785,12 @@ impl Lieux {
                     self.fermer_lieu();
                     c.clavier.fermer();
                 }
+            }
+            // L'enregistrement à l'écart de l'annulation (un doigt qui glisse ne doit pas
+            // enregistrer au lieu de défaire)
+            x -= h * 1.6;
+            if bouton(cx, x, 2, Icon::Disquette, self.chemin.is_some() && self.enregistrement.is_none(), if self.modifie { col.accent } else { col.pale }) {
+                self.enregistrer();
             }
         }
         // Le nom

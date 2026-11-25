@@ -794,11 +794,41 @@ impl Relief3d {
         self.noeuds_montres = r.noeuds.iter().enumerate().filter(|(_, n)| (pietons || noeud_carrossable(&r, n)) && boites.iter().any(|b| n.p[0] >= b[0] && n.p[0] <= b[2] && n.p[1] >= b[1] && n.p[1] <= b[3])).map(|(i, _)| i).collect();
         let (anneaux, quartiers) = (6usize, 10usize);
         let (mut s, mut ix) = (Vec::new(), Vec::new());
+        // Les nœuds des données téléchargées (OSM) en cylindres, ceux que le réseau a
+        // ajoutés, et le bord de la carte, en sphères (l'origine tracée par le réseau)
         for &n in &self.noeuds_montres {
             let p = r.noeuds[n].p;
             let choisi = self.noeud_choisi == Some(n);
             let (rayon, c) = if choisi { (SPHERE_RAYON * 1.8, self.accent) } else { (SPHERE_RAYON, SPHERE_COULEUR) };
             let base = (s.len() / 9) as u32;
+            if crate::origine_noeuds::osm(&r, n) {
+                // Un cylindre debout, du diamètre de la sphère et aussi haut : ses flancs,
+                // puis ses deux disques
+                let y = p[2] + TRACES_DESSUS;
+                for q in 0..=quartiers {
+                    let f = std::f32::consts::TAU * q as f32 / quartiers as f32;
+                    let (cs, sn) = (f.cos(), f.sin());
+                    for h in [-rayon, rayon] {
+                        s.extend_from_slice(&[p[0] + cs * rayon, y + h, p[1] + sn * rayon, cs, 0.0, sn, c[0], c[1], c[2]]);
+                    }
+                }
+                for q in 0..quartiers as u32 {
+                    let (a0, a1) = (base + 2 * q, base + 2 * q + 2);
+                    ix.extend_from_slice(&[a0, a0 + 1, a1, a1, a0 + 1, a1 + 1]);
+                }
+                for (h, ny) in [(rayon, 1.0f32), (-rayon, -1.0)] {
+                    let centre = (s.len() / 9) as u32;
+                    s.extend_from_slice(&[p[0], y + h, p[1], 0.0, ny, 0.0, c[0], c[1], c[2]]);
+                    for q in 0..=quartiers {
+                        let f = std::f32::consts::TAU * q as f32 / quartiers as f32;
+                        s.extend_from_slice(&[p[0] + f.cos() * rayon, y + h, p[1] + f.sin() * rayon, 0.0, ny, 0.0, c[0], c[1], c[2]]);
+                    }
+                    for q in 0..quartiers as u32 {
+                        ix.extend_from_slice(&[centre, centre + 1 + q, centre + 2 + q]);
+                    }
+                }
+                continue;
+            }
             for a in 0..=anneaux {
                 let t = std::f32::consts::PI * a as f32 / anneaux as f32;
                 for q in 0..=quartiers {
@@ -1389,11 +1419,13 @@ pub struct Surimpression {
     /// Les fils lissés (essai), et la tolérance du lissage (m).
     pub lissage: bool,
     pub tolerance: f32,
+    /// Les files dont les séparateurs sont tirés (`files`) : leur axe et leur sens.
+    pub axes: bool,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false }
     }
 }
 
@@ -1404,11 +1436,11 @@ impl Surimpression {
         let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
         let f = v.get(6);
         let fi = v.get(7);
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: v.get(13).copied().filter(|x| *x <= 2.0).unwrap_or(crate::fils::TOLERANCE_DEFAUT) })
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance)
+        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes))
     }
 }
 
@@ -1550,13 +1582,14 @@ impl Relief3d {
             self.traces.clear();
             self.traces_de = adresse;
         }
+        crate::fils::regler_deports(Arc::new(deports.clone()));
         crate::fils::regler_rayons(self.sur.virage_droite, self.sur.virage_gauche);
         crate::fils::regler_lissage(self.sur.lissage, self.sur.tolerance);
         let mut v = Vec::new();
         for &cle in montrees {
             if !self.traces.contains_key(&cle) {
                 self.revision += 1;
-                let t = traces_reseau(&r, &deports, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files, self.sur.fils, self.sur.pietons, self.sur.brut);
+                let t = traces_reseau(&r, &deports, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files, false, self.sur.axes, self.sur.pietons, self.sur.brut);
                 self.traces.insert(cle, t);
             }
             v.extend(self.traces[&cle].iter().cloned());
@@ -1669,7 +1702,7 @@ fn noeud_carrossable(r: &sage_reel::reseau::Reseau, n: &sage_reel::reseau::Noeud
 
 /// Les tracés du réseau `r` dans la boîte `b` : un maillage de traits par passage, et
 /// les nœuds en croix.
-fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
+fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, axes: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
     use sage_reel::reseau::Passage;
     // Les points d'une arête, déportés près d'une fourche (comme la chaussée)
     let points = |k: usize| -> std::borrow::Cow<'_, [[f32; 3]]> {
@@ -1745,48 +1778,55 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             if x1 + w < b[0] || x0 - w > b[2] || z1 + w < b[1] || z0 - w > b[3] {
                 continue;
             }
-            // La normale à gauche en chaque point (moyenne des segments voisins)
+            // Les lignes, tirées des files vectorielles (`files`)
             let pts = points(ka);
-            let m = pts.len();
-            let gauche: Vec<[f32; 2]> = (0..m)
-                .map(|i| {
-                    let (mut g, mut k) = ([0.0f32; 2], 0.0f32);
-                    for (u, v) in [(i.saturating_sub(1), i), (i, (i + 1).min(m - 1))] {
-                        let (dx, dz) = (pts[v][0] - pts[u][0], pts[v][1] - pts[u][1]);
-                        let l = dx.hypot(dz);
-                        if l > 1e-6 {
-                            g[0] += dz / l;
-                            g[1] += -dx / l;
-                            k += 1.0;
-                        }
-                    }
-                    // La moyenne des normales voisines : sa longueur est le cosinus du
-                    // demi-angle ; l'onglet (1 / cosinus) borné à 2. Un bout n'a qu'un
-                    // segment : sa normale telle quelle
-                    let g = [g[0] / k.max(1.0), g[1] / k.max(1.0)];
-                    let c = g[0].hypot(g[1]).max(0.5);
-                    [g[0] / (c * c), g[1] / (c * c)]
-                })
-                .collect();
-            let lw = a.largeur / n as f32;
-            let (ar, partagees) = (f.arriere as usize, n - f.avant as usize - f.arriere as usize);
-            for i in 1..n {
-                // Entre les deux sens (ou au bord d'une file partagée) : la ligne de sens
-                let groupe = |file: usize| if file < ar { 0 } else if file < ar + partagees { 1 } else { 2 };
-                let k = if groupe(i - 1) != groupe(i) {
-                    6
-                } else if f.osm {
-                    4
-                } else {
-                    5
+            for (ligne, l) in crate::files::separations(a, &pts) {
+                let k = match ligne {
+                    crate::files::Ligne::Sens => 6,
+                    crate::files::Ligne::Osm => 4,
+                    crate::files::Ligne::Deduite => 5,
                 };
-                let y = w - i as f32 * lw;
-                for j in 0..m - 1 {
-                    let p = [pts[j][0] + gauche[j][0] * y, pts[j][1] + gauche[j][1] * y, pts[j][2]];
-                    let q = [pts[j + 1][0] + gauche[j + 1][0] * y, pts[j + 1][1] + gauche[j + 1][1] * y, pts[j + 1][2]];
-                    if let Some((p, q)) = couper(p, q, b) {
+                for w in l.windows(2) {
+                    if let Some((p, q)) = couper(w[0], w[1], b) {
                         let (s, ix) = &mut listes[k];
                         poser(s, ix, p, q);
+                    }
+                }
+            }
+        }
+    }
+    // Les files elles-mêmes (celles dont les séparateurs sont tirés) : leur axe, et leur
+    // sens en cône au milieu (aucun pour une file partagée) ; en rose, réservées au bus
+    if axes {
+        for (ka, a) in r.aretes.iter().enumerate() {
+            if a.files.total == 0 || a.points.len() < 2 || (!pietons && !sage_reel::carrossable(a.genre)) {
+                continue;
+            }
+            let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));
+            let w = a.largeur * 0.5;
+            if x1 + w < b[0] || x0 - w > b[2] || z1 + w < b[1] || z0 - w > b[3] {
+                continue;
+            }
+            let pts = points(ka);
+            for f in crate::files::files(ka, a, &pts) {
+                let k = if f.bus { 10 } else { 7 };
+                for w in f.axe.windows(2) {
+                    if let Some((p, q)) = couper(w[0], w[1], b) {
+                        let (s, ix) = &mut listes[k];
+                        poser(s, ix, p, q);
+                    }
+                }
+                let sens = match f.sens {
+                    crate::files::Sens::Avant => 1,
+                    crate::files::Sens::Arriere => -1,
+                    crate::files::Sens::Partagee => 0,
+                };
+                if sens != 0 {
+                    if let Some((m, d)) = milieu(&f.axe, sens) {
+                        if m[0] >= b[0] && m[0] <= b[2] && m[1] >= b[1] && m[1] <= b[3] {
+                            let (s, ix) = &mut listes[k];
+                            cone(s, ix, m, d, &poser);
+                        }
                     }
                 }
             }

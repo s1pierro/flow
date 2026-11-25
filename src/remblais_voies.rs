@@ -42,9 +42,11 @@ impl Scene {
 }
 
 /// Le dessus du tracé au-dessus de la chaussée (m), ce que le remblai dépasse au-dessus
-/// de lui, ce qu'il descend sous le terrain, ce qu'il déborde de la voie de chaque côté.
+/// de lui (en dessous s'il est négatif), ce qu'il descend sous le terrain, ce qu'il déborde de la voie de chaque côté.
 pub const DESSUS: f32 = 1.0;
-pub const HAUT: f32 = 0.5;
+// (négatif : le dessus du remblai reste sous les tracés, à `DESSUS`, et sous les fils
+// de circulation, 0,15 m plus haut ; ils se voient par-dessus en maquette)
+pub const HAUT: f32 = -0.1;
 pub const SOUS: f32 = 0.3;
 pub const MARGE: f32 = 0.0;
 /// Ce que la dalle d'un pont ou d'un tunnel descend sous la chaussée (m), et
