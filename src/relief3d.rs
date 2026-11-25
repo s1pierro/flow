@@ -1425,13 +1425,13 @@ pub struct Surimpression {
     pub bords: bool,
     /// Le raccourci des fourches de sens unique (`fils::raccourcir`) : l'angle (°) d'une
     /// cassure et sa distance (m) au plus du nœud (0 : aucun).
-    pub raccourci_angle: f32,
-    pub raccourci_distance: f32,
+    /// La tolérance (°) d'une section strictement droite aux fourches de sens unique.
+    pub raccourci_tolerance: f32,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false, bords: false, raccourci_angle: crate::fils::RACCOURCI_ANGLE, raccourci_distance: crate::fils::RACCOURCI_DISTANCE }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false, bords: false, raccourci_tolerance: crate::fils::RACCOURCI_TOLERANCE }
     }
 }
 
@@ -1442,11 +1442,11 @@ impl Surimpression {
         let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
         let f = v.get(6);
         let fi = v.get(7);
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0), bords: v.get(15).is_some_and(|x| *x != 0.0), raccourci_angle: v.get(16).copied().unwrap_or(crate::fils::RACCOURCI_ANGLE), raccourci_distance: v.get(17).copied().unwrap_or(crate::fils::RACCOURCI_DISTANCE) })
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0), bords: v.get(15).is_some_and(|x| *x != 0.0), raccourci_tolerance: v.get(18).copied().unwrap_or(crate::fils::RACCOURCI_TOLERANCE) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes), u8::from(self.bords), self.raccourci_angle, self.raccourci_distance)
+        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} 0 0 {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes), u8::from(self.bords), self.raccourci_tolerance)
     }
 }
 
@@ -1590,7 +1590,7 @@ impl Relief3d {
         }
         crate::fils::regler_deports(Arc::new(deports.clone()));
         crate::fils::regler_rayons(self.sur.virage_droite, self.sur.virage_gauche);
-        crate::fils::regler_raccourcis(self.sur.raccourci_angle, self.sur.raccourci_distance);
+        crate::fils::regler_raccourcis(self.sur.raccourci_tolerance);
         crate::fils::regler_lissage(self.sur.lissage, self.sur.tolerance);
         let mut v = Vec::new();
         for &cle in montrees {
@@ -1816,7 +1816,17 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             if x1 + w < b[0] || x0 - w > b[2] || z1 + w < b[1] || z0 - w > b[3] {
                 continue;
             }
-            let pts = crate::fils::trace(r, ka);
+            let (pts, _, raccords) = crate::fils::trace_raccords(r, ka);
+            // Les nœuds de files des raccords de fourche : des traits verticaux, à la
+            // cassure de la branche et sur la file du tronc
+            for nd in raccords.iter().flatten().flat_map(|rc| rc.noeuds.iter()) {
+                for n in [nd.cassure, nd.sur_tronc] {
+                    if n[0] >= b[0] && n[0] <= b[2] && n[1] >= b[1] && n[1] <= b[3] {
+                        let (s, ix) = &mut listes[11];
+                        poser(s, ix, [n[0], n[1], n[2] - crate::fils::MARQUE_BAS], [n[0], n[1], n[2] + crate::fils::MARQUE_HAUT]);
+                    }
+                }
+            }
             for f in crate::files::files(ka, a, &pts) {
                 let k = if f.bus { 10 } else { 7 };
                 for w in f.axe.windows(2) {

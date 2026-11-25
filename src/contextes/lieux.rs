@@ -1928,12 +1928,11 @@ impl Lieux {
                             cx.toggle(&mut b, sub_id(base, 683), "Files", &mut s.axes);
                             cx.paragraph(&mut b, "En cyan, les séparateurs entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens. Files : l'axe de chacune, en vert (en rose, réservée au bus), un cône pour son sens (aucun pour une file partagée).");
                         }
-                        let avant_racc = (s.raccourci_angle, s.raccourci_distance);
+                        let avant_racc = s.raccourci_tolerance;
                         if s.files || s.bords {
                             cx.section(&mut b, "Fourches de sens unique");
-                            cx.molettes(&mut b, sub_id(base, 685), "Cassure", "°", &mut s.raccourci_angle);
-                            cx.molettes(&mut b, sub_id(base, 686), "Distance", "m", &mut s.raccourci_distance);
-                            cx.paragraph(&mut b, "Où des voies à sens unique se rejoignent en une seule (ou s'en séparent), chacune arrive par une section droite puis une cassure vers le nœud. Une cassure d'au moins tant de degrés, à moins de tant de mètres du nœud, est sautée : de là, les files vont droit à leurs files sur la voie commune. Distance à 0 : aucun raccourci.");
+                            cx.molettes(&mut b, sub_id(base, 685), "Droit à", "°", &mut s.raccourci_tolerance);
+                            cx.paragraph(&mut b, "Où une voie (le tronc) se sépare en voies à sens unique (elle-même à sens unique, ou à double sens : une chaussée par sens), chaque branche part du nœud par une section strictement droite (coudes sous la tolérance) ; sa fin est la cassure. Un nœud de file y est posé, et un autre sur la file du tronc qu'elle continue : la file va droit de l'un à l'autre. Sans coude, toute la voie est déviée (une voie déviée à ses deux bouts l'est depuis son milieu). Pour reconnaître le tronc, seules comptent les voies du même genre ; à défaut, celles dans son prolongement.");
                         }
                         let avant_bords = s.bords;
                         cx.toggle(&mut b, sub_id(base, 684), "Bords des chaussées", &mut s.bords);
@@ -1947,7 +1946,7 @@ impl Lieux {
                         // (les fils de circulation, à l'essai, ne sont plus montrés)
                         let avant_fils = s.fils;
                         s.fils = false;
-                        if s.files != avant || s.axes != avant_axes || s.bords != avant_bords || (s.raccourci_angle, s.raccourci_distance) != avant_racc || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut {
+                        if s.files != avant || s.axes != avant_axes || s.bords != avant_bords || s.raccourci_tolerance != avant_racc || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut {
                             if let Some(r) = self.trois_d.as_mut() {
                                 r.refaire_traces();
                             }

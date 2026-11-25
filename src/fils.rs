@@ -340,17 +340,14 @@ fn deporte(r: &Reseau, k: usize) -> Vec<[f32; 3]> {
     }
 }
 
-/// Le raccourci des fourches de sens unique, par défaut : l'angle (°) d'une cassure, et
-/// sa distance (m) au plus du nœud.
-pub const RACCOURCI_ANGLE: f32 = 8.0;
-pub const RACCOURCI_DISTANCE: f32 = 15.0;
-static RACC_ANGLE: AtomicU32 = AtomicU32::new(0x4100_0000); // 8
-static RACC_DISTANCE: AtomicU32 = AtomicU32::new(0x4170_0000); // 15
+/// La tolérance (°) d'une section strictement droite aux fourches de sens unique, par
+/// défaut : au-delà, un coude est la cassure.
+pub const RACCOURCI_TOLERANCE: f32 = 0.5;
+static RACC_TOLERANCE: AtomicU32 = AtomicU32::new(0x3f00_0000); // 0.5
 
-/// Règle la détection des raccourcis (une distance nulle les retire).
-pub fn regler_raccourcis(angle: f32, distance: f32) {
-    RACC_ANGLE.store(angle.to_bits(), Ordering::Relaxed);
-    RACC_DISTANCE.store(distance.to_bits(), Ordering::Relaxed);
+/// Règle la tolérance de la section droite des branches de fourche.
+pub fn regler_raccourcis(tolerance: f32) {
+    RACC_TOLERANCE.store(tolerance.to_bits(), Ordering::Relaxed);
 }
 
 /// Le sens d'un bout de voie à sens unique : vrai si la circulation entre au nœud
@@ -368,53 +365,159 @@ fn entrant(a: &sage_reel::reseau::Arete, fin: bool) -> Option<bool> {
     Some(avant == fin)
 }
 
-/// Le raccourci d'une branche de fourche de sens unique : à un nœud où plusieurs voies à
-/// sens unique se rejoignent en une seule (ou s'en séparent), dans le même sens, avec
-/// autant de files en tout, chaque branche arrive par une section droite puis une
-/// cassure, et un dernier segment qui plonge vers le nœud (OSM réunit les chaussées en
-/// un point). Ce segment est sauté : de la cassure, l'axe de la branche va droit à ses
-/// files sur le tronc (au nœud, les branches prennent les files du tronc dans l'ordre
-/// où elles arrivent en travers). `p` : l'axe de l'arête `k`, modifié au bout `fin`.
-/// Rend la demi-largeur de ses files sur le tronc (celle de la branche au nœud) si
-/// l'axe est raccourci.
-fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, angle: f32, dmax: f32) -> Option<f32> {
+/// Le raccourci d'une branche de fourche de sens unique : à un nœud où une voie (le
+/// tronc) se sépare en voies à sens unique (les branches), chaque branche arrive par une
+/// section droite puis une cassure, et un dernier segment qui plonge vers le nœud (OSM
+/// réunit les chaussées en un point). Le tronc peut être à sens unique (les branches
+/// vont toutes dans le même sens) ou à double sens (une chaussée par sens) : dans chaque
+/// sens, ses files doivent être aussi nombreuses que celles des branches qui les
+/// continuent. Le dernier segment est sauté : de la cassure, l'axe de la branche va
+/// droit à ses files sur le tronc (au nœud, les branches d'un sens prennent les files
+/// de ce sens dans l'ordre où elles arrivent en travers). `p` : l'axe de l'arête `k`,
+/// modifié au bout `fin`. Rend la demi-largeur de ses files sur le tronc (celle de la
+/// branche au nœud) si l'axe est raccourci.
+fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance: f32, arret: usize) -> Option<Raccord> {
     let a = &r.aretes[k];
     let n = if fin { a.b } else { a.a };
-    if a.a == a.b || p.len() < 3 {
+    if a.a == a.b || p.len() < 2 {
         return None;
     }
     let e = entrant(a, fin)?;
-    let mut tronc: Option<(usize, bool)> = None;
-    let mut branches: Vec<(usize, bool)> = Vec::new();
+    // Les bouts carrossables au nœud
+    let mut tous: Vec<(usize, bool)> = Vec::new();
     for &j in &r.noeuds[n].aretes {
         let b = &r.aretes[j];
-        if !sage_reel::carrossable(b.genre) || b.points.len() < 2 {
+        if !sage_reel::carrossable(b.genre) || b.points.len() < 2 || b.files.total == 0 {
             continue;
         }
         for f in [false, true] {
-            if (if f { b.b } else { b.a }) != n {
-                continue;
-            }
-            let ej = entrant(b, f)?;
-            if ej == e {
-                branches.push((j, f));
-            } else if tronc.is_some() {
-                return None;
-            } else {
-                tronc = Some((j, f));
+            if (if f { b.b } else { b.a }) == n {
+                tous.push((j, f));
             }
         }
     }
-    let (t, tf) = tronc?;
-    if branches.len() < 2 {
-        return None;
-    }
+    // La direction d'un bout en s'éloignant du nœud
+    let dir = |j: usize, f: bool| -> [f32; 2] {
+        let q = &r.aretes[j].points;
+        let (o, s_) = if f { (q[q.len() - 1], q[q.len() - 2]) } else { (q[0], q[1]) };
+        let l = (s_[0] - o[0]).hypot(s_[1] - o[1]).max(1e-6);
+        [(s_[0] - o[0]) / l, (s_[1] - o[1]) / l]
+    };
+    // Le sens d'une file du tronc au nœud : vrai si elle y entre (rien : partagée)
+    let file_entre = |t: &sage_reel::reseau::Arete, tf: bool, i: usize| match crate::files::sens(t, i) {
+        crate::files::Sens::Avant => Some(tf),
+        crate::files::Sens::Arriere => Some(!tf),
+        crate::files::Sens::Partagee => None,
+    };
+    // Le tronc parmi des bouts gardés par `garde(tronc, bout)` : le seul bout tel que
+    // les autres soient à sens unique, et que dans chaque sens ses files égalent celles
+    // des branches qui les continuent. Rend aussi les bouts gardés pour ce tronc.
+    let chercher = |garde: &dyn Fn((usize, bool), (usize, bool)) -> bool| -> Option<((usize, bool), Vec<(usize, bool)>)> {
+        let mut trouve = None;
+        for &(t, tf) in &tous {
+            if t == k {
+                continue;
+            }
+            let bouts: Vec<(usize, bool)> = tous.iter().copied().filter(|&x| x == (t, tf) || garde((t, tf), x)).collect();
+            if bouts.len() < 3 || !bouts.contains(&(k, fin)) {
+                continue;
+            }
+            let ta = &r.aretes[t];
+            let (mut sorties, mut entrees, mut ok) = (0usize, 0usize, true);
+            for i in 0..ta.files.total as usize {
+                match file_entre(ta, tf, i) {
+                    Some(true) => entrees += 1,
+                    Some(false) => sorties += 1,
+                    None => ok = false,
+                }
+            }
+            // Les branches qui entrent continuent les files qui sortent, et l'inverse
+            let (mut b_in, mut b_out) = (0usize, 0usize);
+            for &(j, f) in &bouts {
+                if (j, f) == (t, tf) {
+                    continue;
+                }
+                match entrant(&r.aretes[j], f) {
+                    Some(true) => b_in += r.aretes[j].files.total as usize,
+                    Some(false) => b_out += r.aretes[j].files.total as usize,
+                    None => ok = false,
+                }
+            }
+            if ok && b_in == sorties && b_out == entrees {
+                if trouve.is_some() {
+                    return None;
+                }
+                trouve = Some(((t, tf), bouts));
+            }
+        }
+        trouve
+    };
+    // D'abord les voies du même genre que le tronc (une rue qui s'y greffe n'en est
+    // pas) ; à défaut, celles à moins de TOUT_DROIT du prolongement du tronc
+    // Une voie naissante : le tronc continue tel quel dans une branche (autant de files
+    // dans notre sens, la plus alignée), et d'autres branches de notre sens naissent à
+    // son côté (ou, à l'inverse, s'y fondent). Rend le tronc, les bouts gardés et la
+    // continuation.
+    let naitre = |garde: &dyn Fn((usize, bool), (usize, bool)) -> bool| -> Option<((usize, bool), Vec<(usize, bool)>, (usize, bool))> {
+        let mut trouve = None;
+        for &(t, tf) in &tous {
+            if t == k {
+                continue;
+            }
+            let bouts: Vec<(usize, bool)> = tous.iter().copied().filter(|&x| x == (t, tf) || garde((t, tf), x)).collect();
+            if bouts.len() < 3 || !bouts.contains(&(k, fin)) {
+                continue;
+            }
+            let ta = &r.aretes[t];
+            let nt = (0..ta.files.total as usize).filter(|&i| file_entre(ta, tf, i) == Some(!e)).count();
+            if nt == 0 {
+                continue;
+            }
+            let branches: Vec<(usize, bool)> = bouts.iter().copied().filter(|&(j, f)| (j, f) != (t, tf) && entrant(&r.aretes[j], f) == Some(e)).collect();
+            if !branches.contains(&(k, fin)) || branches.iter().map(|&(j, _)| r.aretes[j].files.total as usize).sum::<usize>() <= nt {
+                continue;
+            }
+            let u = dir(t, tf);
+            let ecart = |(j, f): (usize, bool)| {
+                let v = dir(j, f);
+                (-(u[0] * v[0] + u[1] * v[1])).clamp(-1.0, 1.0).acos()
+            };
+            let suite = branches
+                .iter()
+                .copied()
+                .filter(|&(j, _)| r.aretes[j].files.total as usize == nt)
+                .min_by(|&x, &y| ecart(x).total_cmp(&ecart(y)));
+            let Some(suite) = suite else { continue };
+            if suite == (k, fin) || ecart(suite) > TOUT_DROIT.to_radians() {
+                continue;
+            }
+            if trouve.is_some() {
+                return None;
+            }
+            trouve = Some(((t, tf), bouts, suite));
+        }
+        trouve
+    };
+    // D'abord les voies du même genre que le tronc (une rue qui s'y greffe n'en est
+    // pas) ; à défaut, celles à moins de TOUT_DROIT du prolongement du tronc
+    let meme_genre = |(t, _): (usize, bool), (j, _): (usize, bool)| r.aretes[j].genre == r.aretes[t].genre;
+    let alignee = |(t, tf): (usize, bool), (j, f): (usize, bool)| {
+        let (u, v) = (dir(t, tf), dir(j, f));
+        // Une branche part à l'opposé du tronc
+        (-(u[0] * v[0] + u[1] * v[1])).clamp(-1.0, 1.0).acos() <= TOUT_DROIT.to_radians()
+    };
+    let ((t, tf), bouts, suite) = match chercher(&meme_genre).or_else(|| chercher(&alignee)) {
+        Some((t, b)) => (t, b, None),
+        None => {
+            let (t, b, s_) = naitre(&meme_genre).or_else(|| naitre(&alignee))?;
+            (t, b, Some(s_))
+        }
+    };
     let ta = &r.aretes[t];
-    let somme: usize = branches.iter().map(|&(j, _)| r.aretes[j].files.total as usize).sum();
-    if somme != ta.files.total as usize {
-        return None;
-    }
-    // Le tronc depuis le nœud : sa direction, et l'axe de ses files au nœud, en travers
+    // Les branches de notre sens
+    let branches: Vec<(usize, bool)> = bouts.iter().copied().filter(|&(j, f)| (j, f) != (t, tf) && entrant(&r.aretes[j], f) == Some(e)).collect();
+    // Le tronc depuis le nœud : sa direction, et l'axe de ses files de notre sens (qui
+    // entrent au nœud si nous en sortons) au nœud, en travers
     let tp = deporte(r, t);
     if tp.len() < 2 {
         return None;
@@ -425,23 +528,21 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, angle: f32
     let dl = (tp[i1][0] - o[0]).hypot(tp[i1][1] - o[1]).max(1e-6);
     let d = [(tp[i1][0] - o[0]) / dl, (tp[i1][1] - o[1]) / dl];
     let travers = |q: [f32; 2]| (q[0] - o[0]) * -d[1] + (q[1] - o[1]) * d[0];
-    let mut fs: Vec<[f32; 2]> = (0..ta.files.total as usize)
+    let mut fs: Vec<(usize, [f32; 2])> = (0..ta.files.total as usize)
+        .filter(|&i| file_entre(ta, tf, i) == Some(!e))
         .map(|i| {
             let y = crate::files::decalage(ta, i);
-            [o[0] + tg[i0][0] * y, o[1] + tg[i0][1] * y]
+            (i, [o[0] + tg[i0][0] * y, o[1] + tg[i0][1] * y])
         })
         .collect();
-    fs.sort_by(|x, y| travers(*x).total_cmp(&travers(*y)));
+    fs.sort_by(|x, y| travers(x.1).total_cmp(&travers(y.1)));
     // Une branche, ses points vers le nœud : sa cassure (rang, point), et son repère en
     // travers (la cassure, ou à défaut l'avant-dernier point)
-    let cassure = |q: &[[f32; 3]]| -> (Option<usize>, [f32; 2]) {
+    let cassure = |q: &[[f32; 3]], arret: usize| -> (usize, [f32; 2]) {
         let m = q.len();
-        let repere = [q[m - 2][0], q[m - 2][1]];
-        let mut s = 0.0;
         for i in (1..m - 1).rev() {
-            s += (q[i + 1][0] - q[i][0]).hypot(q[i + 1][1] - q[i][1]);
-            if s > dmax {
-                break;
+            if i <= arret {
+                return (i, [q[i][0], q[i][1]]);
             }
             let u1 = [q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]];
             let u2 = [q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]];
@@ -450,15 +551,13 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, angle: f32
                 continue;
             }
             let c = ((u1[0] * u2[0] + u1[1] * u2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
-            if c.acos() >= angle {
-                // La section droite doit filer vers le tronc
-                if (u1[0] * d[0] + u1[1] * d[1]) / l1 < 0.5 {
-                    break;
-                }
-                return (Some(i), [q[i][0], q[i][1]]);
+            // La fin de la section strictement droite depuis le nœud
+            if c.acos() > tolerance {
+                return (i, [q[i][0], q[i][1]]);
             }
         }
-        (None, repere)
+        // Droite jusqu'au bout : toute la voie est déviée
+        (0, [q[0][0], q[0][1]])
     };
     let vers_noeud = |pts: &[[f32; 3]], f: bool| -> Vec<[f32; 3]> { if f { pts.to_vec() } else { pts.iter().rev().copied().collect() } };
     let mut bs: Vec<(usize, bool, usize, f32)> = Vec::new();
@@ -468,35 +567,112 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, angle: f32
         if q.len() < 2 {
             return None;
         }
-        let (i, rep) = cassure(&q);
+        let (i, rep) = cassure(&q, if j == k && f == fin { arret } else { 0 });
         if j == k && f == fin {
-            mien = i;
+            mien = Some(i);
         }
         bs.push((j, f, r.aretes[j].files.total as usize, travers(rep)));
     }
     let i = mien?;
     bs.sort_by(|x, y| x.3.total_cmp(&y.3));
-    let mut rang = 0;
-    let mut cible = None;
-    for &(j, f, nf, _) in &bs {
-        if j == k && f == fin {
-            let m = &fs[rang..rang + nf];
-            let s = m.iter().fold([0.0f32; 2], |s, x| [s[0] + x[0], s[1] + x[1]]);
-            cible = Some([s[0] / nf as f32, s[1] / nf as f32]);
+    let mut cibles: Option<Vec<(usize, [f32; 2])>> = None;
+    match suite {
+        // Une fourche : les branches prennent les files du tronc dans l'ordre
+        None => {
+            let mut rang = 0;
+            for &(j, f, nf, _) in &bs {
+                if rang + nf > fs.len() {
+                    return None;
+                }
+                if j == k && f == fin {
+                    cibles = Some(fs[rang..rang + nf].to_vec());
+                }
+                rang += nf;
+            }
         }
-        rang += nf;
+        // Une voie naissante : piquée sur les files extrêmes du tronc de son côté (les
+        // premières qui ne sont pas réservées au bus)
+        Some(s_) => {
+            let x = |jf: (usize, bool)| bs.iter().find(|b| (b.0, b.1) == jf).map(|b| b.3);
+            let (mien_x, suite_x) = (x((k, fin))?, x(s_)?);
+            let nf = a.files.total as usize;
+            if nf == 0 || nf > fs.len() {
+                return None;
+            }
+            let libre = |d0: usize| (d0..d0 + nf).all(|m| !ta.files.est_bus(fs[m].0));
+            let debuts: Vec<usize> = if mien_x < suite_x { (0..=fs.len() - nf).collect() } else { (0..=fs.len() - nf).rev().collect() };
+            let d0 = debuts.iter().copied().find(|&d0| libre(d0)).unwrap_or(debuts[0]);
+            cibles = Some(fs[d0..d0 + nf].to_vec());
+        }
     }
-    let c = cible?;
+    let cibles = cibles?;
+    let nf = cibles.len();
+    let c = cibles.iter().fold([0.0f32; 2], |s, x| [s[0] + x.1[0] / nf as f32, s[1] + x.1[1] / nf as f32]);
+    // Le raccord : une droite de la cassure au centre des files sur le tronc
     let mut q = vers_noeud(p, fin);
-    let z = q[q.len() - 1][2];
+    let (zc, zn) = (q[i][2], q[q.len() - 1][2]);
+    let pc = q[i];
+    let u = {
+        let v = if i == 0 { [q[1][0] - q[0][0], q[1][1] - q[0][1]] } else { [q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]] };
+        let l = v[0].hypot(v[1]).max(1e-6);
+        [v[0] / l, v[1] / l]
+    };
+    let dist: f32 = (i..q.len() - 1).map(|m| (q[m + 1][0] - q[m][0]).hypot(q[m + 1][1] - q[m][1])).sum();
     q.truncate(i + 1);
-    q.push([c[0], c[1], z]);
+    q.push([c[0], c[1], zn]);
     if !fin {
         q.reverse();
     }
     *p = q;
-    let nf = a.files.total as f32;
-    Some(ta.largeur / ta.files.total.max(1) as f32 * nf * 0.5)
+    // Les nœuds de files : chaque file de la branche, à la cassure et sur le tronc
+    let demi = ta.largeur / ta.files.total.max(1) as f32 * nf as f32 * 0.5;
+    let g0 = [u[1], -u[0]];
+    let noeuds = (0..nf)
+        .map(|r_| {
+            // La file r_ de la branche, de sa gauche à sa droite dans le sens du tracé
+            let y0 = crate::files::decalage(a, r_);
+            let y0 = if fin { y0 } else { -y0 };
+            let cassure = [pc[0] + g0[0] * y0, pc[1] + g0[1] * y0, zc];
+            NoeudsDeFile { rang: r_, cassure, distance: 0.0, tronc: t, rang_tronc: 0, sur_tronc: [0.0, 0.0, zn] }
+        })
+        .collect::<Vec<_>>();
+    // Les files de la branche prises en travers du tronc dans le même ordre que ses cibles
+    let mut noeuds = noeuds;
+    noeuds.sort_by(|x, y| travers([x.cassure[0], x.cassure[1]]).total_cmp(&travers([y.cassure[0], y.cassure[1]])));
+    for (nd, cb) in noeuds.iter_mut().zip(&cibles) {
+        nd.distance = dist;
+        nd.rang_tronc = cb.0;
+        nd.sur_tronc = [cb.1[0], cb.1[1], zn];
+    }
+    noeuds.sort_by_key(|x| x.rang);
+    Some(Raccord { demi, points: RACCORD_POINTS, noeuds, entier: i == 0 })
+}
+
+/// Les points du raccord d'une branche de fourche après la cassure (une droite).
+const RACCORD_POINTS: usize = 1;
+
+/// Une file d'une branche raccordée à une fourche : ses deux nœuds de files, à la
+/// cassure de la branche et sur la file du tronc qu'elle continue (au nœud).
+#[derive(Clone, Debug)]
+pub struct NoeudsDeFile {
+    pub rang: usize,
+    pub cassure: [f32; 3],
+    /// La distance de la cassure au nœud, le long du tracé (m).
+    pub distance: f32,
+    pub tronc: usize,
+    pub rang_tronc: usize,
+    pub sur_tronc: [f32; 3],
+}
+
+/// Le raccord d'un bout de branche : la demi-largeur au nœud, le nombre de points de la
+/// courbe après la cassure, et les nœuds de files.
+#[derive(Clone, Debug)]
+pub struct Raccord {
+    pub demi: f32,
+    pub points: usize,
+    pub noeuds: Vec<NoeudsDeFile>,
+    /// La voie est droite jusqu'à son autre bout : toute déviée.
+    pub entier: bool,
 }
 
 /// L'axe de l'arête `k` pour ses files : déporté près d'une fourche, et raccourci aux
@@ -509,23 +685,49 @@ pub fn trace(r: &Reseau, k: usize) -> Vec<[f32; 3]> {
 /// voie, sauf au bout raccourci d'une branche de fourche, celle de ses files sur le
 /// tronc (la largeur change en biseau depuis la cassure : les bords suivent les files).
 pub fn trace_largeurs(r: &Reseau, k: usize) -> (Vec<[f32; 3]>, Vec<f32>) {
+    let (p, w, _) = trace_raccords(r, k);
+    (p, w)
+}
+
+/// `trace_largeurs`, avec les raccords des deux bouts (début, fin).
+pub fn trace_raccords(r: &Reseau, k: usize) -> (Vec<[f32; 3]>, Vec<f32>, [Option<Raccord>; 2]) {
     let mut p = deporte(r, k);
-    let angle = f32::from_bits(RACC_ANGLE.load(Ordering::Relaxed)).to_radians();
-    let dmax = f32::from_bits(RACC_DISTANCE.load(Ordering::Relaxed));
+    let tol = f32::from_bits(RACC_TOLERANCE.load(Ordering::Relaxed)).max(0.0).to_radians();
+    // Une voie droite d'un bout à l'autre, déviée à ses deux bouts : depuis son milieu
+    let essai = |fin: bool| raccourcir(r, k, fin, &mut p.clone(), tol, 0);
+    let (arret0, arret1) = match (essai(false), essai(true)) {
+        (Some(x), Some(y)) if x.entier && y.entier => {
+            let m = p.len();
+            let mi = if m >= 3 {
+                m / 2
+            } else {
+                let (u, v) = (p[0], p[1]);
+                p.insert(1, [(u[0] + v[0]) / 2.0, (u[1] + v[1]) / 2.0, (u[2] + v[2]) / 2.0]);
+                1
+            };
+            (p.len() - 1 - mi, 1)
+        }
+        _ => (0, 0),
+    };
     let mut bouts = [None, None];
-    if dmax > 0.0 {
-        for (i, fin) in [false, true].into_iter().enumerate() {
-            bouts[i] = raccourcir(r, k, fin, &mut p, angle, dmax);
+    bouts[0] = raccourcir(r, k, false, &mut p, tol, arret0);
+    // Au bout de la fin, ne pas dépasser la cassure du début (son nœud de file)
+    let arret1 = if bouts[0].is_some() { arret1.max(1) } else { arret1 };
+    bouts[1] = raccourcir(r, k, true, &mut p, tol, arret1);
+    let w0 = r.aretes[k].largeur * 0.5;
+    let mut w = vec![w0; p.len()];
+    let m = p.len();
+    // La largeur passe en biseau le long de la courbe, de la cassure au nœud
+    for (i, b) in bouts.iter().enumerate() {
+        let Some(b) = b else { continue };
+        let n = b.points.min(m - 1);
+        for s in 1..=n {
+            let t = s as f32 / n as f32;
+            let j = if i == 0 { n - s } else { m - 1 - n + s };
+            w[j] = w0 + (b.demi - w0) * t;
         }
     }
-    let mut w = vec![r.aretes[k].largeur * 0.5; p.len()];
-    if let (Some(x), Some(v)) = (bouts[0], w.first_mut()) {
-        *v = x;
-    }
-    if let (Some(x), Some(v)) = (bouts[1], w.last_mut()) {
-        *v = x;
-    }
-    (p, w)
+    (p, w, bouts)
 }
 
 static RAYON_D: AtomicU32 = AtomicU32::new(0x4090_0000); // 4.5
@@ -571,8 +773,8 @@ const FONTE_PAS: f32 = 1.0;
 const DROIT_LONGUEUR: f32 = 60.0;
 const DROIT_ECART: f32 = 3.0;
 /// Le trait d'un nœud de files : de tant sous la file à tant au-dessus (m).
-const MARQUE_BAS: f32 = 0.5;
-const MARQUE_HAUT: f32 = 3.0;
+pub(crate) const MARQUE_BAS: f32 = 0.5;
+pub(crate) const MARQUE_HAUT: f32 = 3.0;
 
 /// Un fil : ses points ; s'il est la partie fondue qui prolonge une autre file, un
 /// virage d'une voie à une autre, ou une file réservée au bus.
@@ -2211,6 +2413,17 @@ pub fn decrire(r: &Reseau, n: usize) -> Vec<String> {
                 f.arriere,
                 if f.osm { "OSM" } else { "déduites" },
                 longueur(&a.points)
+            ));
+        }
+    }
+    // Les raccords des branches de fourche : leurs nœuds de files
+    for b in &bs {
+        let (_, _, rc) = trace_raccords(r, b.arete);
+        let Some(rc) = &rc[if b.debut { 0 } else { 1 }] else { continue };
+        for nd in &rc.noeuds {
+            v.push(format!(
+                "a{}·f{} raccordée : nœud de file à la cassure ({:.1} m du nœud), vers a{}·f{}",
+                b.arete, nd.rang, nd.distance, nd.tronc, nd.rang_tronc
             ));
         }
     }
