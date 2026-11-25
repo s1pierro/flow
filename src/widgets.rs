@@ -761,6 +761,35 @@ impl Cx<'_> {
         clicked
     }
 
+    /// Un histogramme en barres : pour chaque classe, son libellé (sous l'axe) et son
+    /// effectif (au-dessus de la barre) ; la hauteur suit l'effectif.
+    pub fn histogramme(&mut self, b: &mut Body, classes: &[(&str, usize)], legende_x: &str) {
+        if classes.is_empty() {
+            return;
+        }
+        let (u, c) = (self.dp, self.couleurs());
+        let haut = 110.0 * u;
+        let (x0, w) = (b.x, b.w);
+        let pas = w / classes.len() as f32;
+        let max = classes.iter().map(|c| c.1).max().unwrap_or(0).max(1) as f32;
+        let haut_texte = 18.0 * u;
+        let bas = b.y + haut_texte + haut;
+        // L'axe
+        self.dl.rrect(Rect::new(x0, bas, w, 1.0 * u), 0.0, c.pale);
+        for (i, &(lib, n)) in classes.iter().enumerate() {
+            let x = x0 + pas * i as f32;
+            let h = haut * n as f32 / max;
+            if n > 0 {
+                self.dl.rrect(Rect::new(x + pas * 0.15, bas - h, pas * 0.7, h), 2.0 * u, c.accent);
+                self.centered(Rect::new(x, bas - h - haut_texte, pas, haut_texte), &n.to_string(), 12.0, c.texte);
+            }
+            self.centered(Rect::new(x, bas + 2.0 * u, pas, 16.0 * u), lib, 11.0, c.pale);
+        }
+        b.y = bas + 20.0 * u;
+        self.centered(Rect::new(x0, b.y, w, 16.0 * u), legende_x, 12.0, c.pale);
+        b.y += 24.0 * u;
+    }
+
     pub fn paragraph(&mut self, b: &mut Body, s: &str) {
         let (px, c, k) = (self.px(15.0), self.couleurs(), self.theme.texte);
         for line in self.text.wrap(s, px, b.w) {

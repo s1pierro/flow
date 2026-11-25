@@ -409,6 +409,20 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         crate::files::Sens::Arriere => Some(!tf),
         crate::files::Sens::Partagee => None,
     };
+    // Les files d'un bout qui entrent au nœud, et celles qui en sortent
+    let files_du_sens = |j: usize, f: bool| -> (Vec<usize>, Vec<usize>) {
+        let b = &r.aretes[j];
+        let mut ei = Vec::new();
+        let mut so = Vec::new();
+        for i in 0..b.files.total as usize {
+            match file_entre(b, f, i) {
+                Some(true) => ei.push(i),
+                Some(false) => so.push(i),
+                None => {}
+            }
+        }
+        (ei, so)
+    };
     // Le tronc parmi des bouts gardés par `garde(tronc, bout)` : le seul bout tel que
     // les autres soient à sens unique, et que dans chaque sens ses files égalent celles
     // des branches qui les continuent. Rend aussi les bouts gardés pour ce tronc.
@@ -424,26 +438,66 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
             }
             let ta = &r.aretes[t];
             let (mut sorties, mut entrees, mut ok) = (0usize, 0usize, true);
+            let (mut bus_sorties, mut bus_entrees) = (0usize, 0usize);
             for i in 0..ta.files.total as usize {
+                let bus = ta.files.est_bus(i) as usize;
                 match file_entre(ta, tf, i) {
-                    Some(true) => entrees += 1,
-                    Some(false) => sorties += 1,
+                    Some(true) => {
+                        entrees += 1;
+                        bus_entrees += bus;
+                    }
+                    Some(false) => {
+                        sorties += 1;
+                        bus_sorties += bus;
+                    }
                     None => ok = false,
                 }
             }
-            // Les branches qui entrent continuent les files qui sortent, et l'inverse
-            let (mut b_in, mut b_out) = (0usize, 0usize);
+            // Les branches qui entrent continuent les files qui sortent, et l'inverse ;
+            // à chaque séparation entre deux branches d'un sens, une file du tronc peut
+            // être partagée (elle mène à l'une ou à l'autre)
+            // Une branche à double sens (une seule) apporte à chaque sens ses files de ce
+            // sens
+            let (mut b_in, mut b_out, mut n_in, mut n_out, mut doubles) = (0usize, 0usize, 0usize, 0usize, 0usize);
             for &(j, f) in &bouts {
                 if (j, f) == (t, tf) {
                     continue;
                 }
                 match entrant(&r.aretes[j], f) {
-                    Some(true) => b_in += r.aretes[j].files.total as usize,
-                    Some(false) => b_out += r.aretes[j].files.total as usize,
-                    None => ok = false,
+                    Some(true) => {
+                        b_in += r.aretes[j].files.total as usize;
+                        n_in += 1;
+                    }
+                    Some(false) => {
+                        b_out += r.aretes[j].files.total as usize;
+                        n_out += 1;
+                    }
+                    None => {
+                        doubles += 1;
+                        let (ei, so) = files_du_sens(j, f);
+                        if ei.len() + so.len() < r.aretes[j].files.total as usize {
+                            ok = false;
+                        }
+                        if !ei.is_empty() {
+                            b_in += ei.len();
+                            n_in += 1;
+                        }
+                        if !so.is_empty() {
+                            b_out += so.len();
+                            n_out += 1;
+                        }
+                    }
                 }
             }
-            if ok && b_in == sorties && b_out == entrees {
+            if doubles > 1 {
+                ok = false;
+            }
+            // Juste : autant de files ; ou une partagée à chaque séparation ; ou, pour une
+            // seule branche, les files du tronc moins ses files de bus (qui se ferment)
+            let juste = |b: usize, n: usize, t_: usize, bus: usize| b == t_ || (n >= 2 && b == t_ + n - 1) || (n == 1 && bus > 0 && b + bus == t_);
+            // Seul compte le sens de notre bout : l'autre sens peut ne pas se partager
+            let dans_notre_sens = if e { juste(b_in, n_in, sorties, bus_sorties) } else { juste(b_out, n_out, entrees, bus_entrees) };
+            if ok && dans_notre_sens {
                 if trouve.is_some() {
                     return None;
                 }
@@ -586,7 +640,21 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
     };
     let ta = &r.aretes[t];
     // Les branches de notre sens
-    let branches: Vec<(usize, bool)> = bouts.iter().copied().filter(|&(j, f)| (j, f) != (t, tf) && entrant(&r.aretes[j], f) == Some(e)).collect();
+    let dans_sens = |j: usize, f: bool| -> usize {
+        match entrant(&r.aretes[j], f) {
+            Some(x) if x == e => r.aretes[j].files.total as usize,
+            Some(_) => 0,
+            None => {
+                let (ei, so) = files_du_sens(j, f);
+                if e { ei.len() } else { so.len() }
+            }
+        }
+    };
+    let branches: Vec<(usize, bool)> = if matches!(mode, Mode::Fourche) {
+        bouts.iter().copied().filter(|&(j, f)| (j, f) != (t, tf) && dans_sens(j, f) > 0).collect()
+    } else {
+        bouts.iter().copied().filter(|&(j, f)| (j, f) != (t, tf) && entrant(&r.aretes[j], f) == Some(e)).collect()
+    };
     // Le tronc depuis le nœud : sa direction, et l'axe de ses files de notre sens (qui
     // entrent au nœud si nous en sortons) au nœud, en travers
     let tp = deporte(r, t);
@@ -638,28 +706,60 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         if q.len() < 2 {
             return None;
         }
-        let (i, rep) = cassure(&q, if j == k && f == fin { arret } else { 0 });
+        let (i, mut rep) = cassure(&q, if j == k && f == fin { arret } else { 0 });
         if j == k && f == fin {
             mien = Some(i);
         }
-        bs.push((j, f, r.aretes[j].files.total as usize, travers(rep)));
+        let mut nb = r.aretes[j].files.total as usize;
+        // Une branche à double sens : ses seules files de notre sens, repérées à leur
+        // place en travers
+        if entrant(&r.aretes[j], f).is_none() {
+            let (ei, so) = files_du_sens(j, f);
+            let mes = if e { ei } else { so };
+            nb = mes.len();
+            let pts = deporte(r, j);
+            let tg_ = crate::files::normales(&pts);
+            let ii = if f { i } else { pts.len() - 1 - i };
+            let y = mes.iter().map(|&m| crate::files::decalage(&r.aretes[j], m)).sum::<f32>() / nb.max(1) as f32;
+            rep = [pts[ii][0] + tg_[ii][0] * y, pts[ii][1] + tg_[ii][1] * y];
+        }
+        bs.push((j, f, nb, travers(rep)));
     }
     let i = mien?;
     bs.sort_by(|x, y| x.3.total_cmp(&y.3));
     let mut cibles: Option<Vec<(usize, [f32; 2])>> = None;
+    let mut partagee = false;
+    let mut bus_ferme = false;
     match mode {
         // Une fourche : les branches prennent les files du tronc dans l'ordre
         Mode::Fourche => {
+            // Partagée : à chaque séparation, la dernière file d'une branche est aussi la
+            // première de la suivante
+            let somme: usize = bs.iter().map(|b| b.2).sum();
+            // Une seule branche plus étroite : les files de bus du tronc s'y ferment, les
+            // autres continuent dans l'ordre
+            let sans_bus: Vec<(usize, [f32; 2])> = fs.iter().copied().filter(|x| !ta.files.est_bus(x.0)).collect();
+            let (fs_, partage) = if somme == fs.len() {
+                (fs.clone(), 0)
+            } else if bs.len() >= 2 && somme == fs.len() + bs.len() - 1 {
+                (fs.clone(), 1)
+            } else if bs.len() == 1 && sans_bus.len() < fs.len() && somme == sans_bus.len() {
+                bus_ferme = true;
+                (sans_bus, 0)
+            } else {
+                return None;
+            };
             let mut rang = 0;
             for &(j, f, nf, _) in &bs {
-                if rang + nf > fs.len() {
+                if nf == 0 || rang + nf > fs_.len() {
                     return None;
                 }
                 if j == k && f == fin {
-                    cibles = Some(fs[rang..rang + nf].to_vec());
+                    cibles = Some(fs_[rang..rang + nf].to_vec());
                 }
-                rang += nf;
+                rang += nf - partage;
             }
+            partagee = partage == 1;
         }
         // Une voie naissante : piquée sur les files extrêmes du tronc de son côté (les
         // premières qui ne sont pas réservées au bus)
@@ -708,6 +808,8 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         _ => (cibles.iter().fold([0.0f32; 2], |s, x| [s[0] + x.1[0] / nf as f32, s[1] + x.1[1] / nf as f32]), nf),
     };
     let regle = match mode {
+        Mode::Fourche if partagee => "fourche, file partagée",
+        Mode::Fourche if bus_ferme => "fourche, file de bus fermée",
         Mode::Fourche => "fourche",
         Mode::Naissante(_) => "voie naissante",
         Mode::Elargie(Some(_)) => "file naissante, côté libéré",

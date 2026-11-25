@@ -238,6 +238,8 @@ pub struct Lieux {
     zone_centre: Option<[f32; 2]>,
     /// La rubrique dépliée de l'onglet Voir (une seule à la fois).
     rubrique: Option<&'static str>,
+    /// La tranche ouverte du diagnostic des bords (distance au voisin).
+    diag_tranche: Option<usize>,
     /// Pourquoi le renfort n'a pas pu démarrer (port pris…).
     erreur_renfort: Option<String>,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
@@ -326,6 +328,7 @@ impl Default for Lieux {
             bati_mat: false,
             zone_centre: None,
             rubrique: None,
+            diag_tranche: None,
             erreur_renfort: None,
             maquette3d: false,
             selection: Default::default(),
@@ -1937,7 +1940,57 @@ impl Lieux {
                         let avant_bords = s.bords;
                         cx.toggle(&mut b, sub_id(base, 684), "Bords des chaussées", &mut s.bords);
                         if s.bords {
-                            cx.paragraph(&mut b, "En noir, les bords des chaussées, tirés des files : le contour des chaussées réunies (chaque voie élargie de sa demi-largeur de chaque côté, sur l'axe de ses files). Un bord s'arrête où il entre dans la chaussée d'une autre voie ; un trait ferme le côté plat d'un T, l'entre-deux de voies qui se rejoignent et le bout d'une impasse. Ils forment des boucles autour des pâtés de maisons. Les sites propres de bus (TEOR) sont une surface à part, jamais coupée : les voies qui les traversent s'arrêtent à leur bord.");
+                            cx.paragraph(&mut b, "En noir, les bords des chaussées : le bord extérieur des files extrêmes de chaque voie, posé aux raccords des fourches sur celui des files du tronc. Un bord s'arrête où il entre dans la chaussée d'une autre voie ; deux bouts libres à moins d'un mètre près d'un nœud sont confondus en leur milieu ; un trait ferme le bout d'une impasse. Ils forment des boucles autour des pâtés de maisons. Les sites propres de bus (TEOR) sont une surface à part, jamais coupée : les voies qui les traversent s'arrêtent à leur bord.");
+                            if cx.button(&mut b, sub_id(base, 687), "Diagnostiquer les bords") {
+                                if let Some(r) = self.trois_d.as_mut() {
+                                    r.diagnostiquer_bords(&carte.donnees);
+                                }
+                            }
+                            if let Some(r) = self.trois_d.as_mut() {
+                                if let Some(l) = r.bords_diag.lines().next() {
+                                    cx.paragraph(&mut b, l);
+                                }
+                                // L'histogramme : le nombre de bouts selon la distance au plus
+                                // proche voisin
+                                if !r.bords_libres.is_empty() {
+                                    const BORNES: [(f32, &str); 11] = [(0.01, "1cm"), (0.02, "2"), (0.05, "5"), (0.1, "10"), (0.2, "20"), (0.5, "50cm"), (1.0, "1m"), (2.0, "2"), (5.0, "5"), (10.0, "10m"), (f32::MAX, "+")];
+                                    let mut n = [0usize; 11];
+                                    for l in &r.bords_libres {
+                                        let k = BORNES.iter().position(|x| l.d_voisin < x.0).unwrap_or(10);
+                                        n[k] += 1;
+                                    }
+                                    let classes: Vec<(&str, usize)> = BORNES.iter().zip(n).map(|(x, n)| (x.1, n)).collect();
+                                    cx.histogramme(&mut b, &classes, "distance au plus proche bout (jusqu'à…)");
+                                }
+                                // Les bouts non raccordés par tranche de distance au plus proche
+                                // voisin, chacune dépliable ; chaque bout amène la vue au nœud
+                                const TRANCHES: [(f32, f32, &str); 4] = [(0.0, 0.05, "Voisin à moins de 5 cm"), (0.05, 1.0, "Voisin de 5 cm à 1 m"), (1.0, 5.0, "Voisin de 1 à 5 m"), (5.0, f32::MAX, "Voisin au-delà de 5 m")];
+                                let mut aller = None;
+                                for (t, &(lo, hi, titre)) in TRANCHES.iter().enumerate() {
+                                    let dans: Vec<&crate::relief3d::BoutLibre> = r.bords_libres.iter().filter(|l| l.d_voisin >= lo && l.d_voisin < hi).collect();
+                                    if dans.is_empty() {
+                                        continue;
+                                    }
+                                    let ouverte = self.diag_tranche == Some(t);
+                                    if cx.rubrique(&mut b, sub_id(sub_id(base, 689), t), &format!("{titre} : {}", dans.len()), ouverte) {
+                                        self.diag_tranche = if ouverte { None } else { Some(t) };
+                                    }
+                                    if ouverte {
+                                        for (i, l) in dans.iter().take(40).enumerate() {
+                                            let texte = format!("Nœud {} · voisin {:.2} m", l.noeud, l.d_voisin).replace('.', ",");
+                                            if cx.row(&mut b, sub_id(sub_id(base, 688), t * 1000 + i), &texte, None, false) {
+                                                aller = Some((l.noeud, l.p));
+                                            }
+                                        }
+                                        if dans.len() > 40 {
+                                            cx.paragraph(&mut b, &format!("… et {} autres", dans.len() - 40));
+                                        }
+                                    }
+                                }
+                                if let Some((n, p)) = aller {
+                                    r.aller_bout(n, p);
+                                }
+                            }
                         }
                         let avant_brut = s.brut;
                         cx.toggle(&mut b, sub_id(base, 670), "Tracé brut des voies", &mut s.brut);
@@ -2979,6 +3032,10 @@ impl Contexte for Lieux {
                         r.refaire_traces();
                     }
                     (Some("noeud"), n) => r.noeud_choisi = n.map(|x| x as usize),
+                    (Some("bords"), _) => {
+                        let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
+                        return Some(Ok(r.diagnostiquer_bords(&carte.donnees)));
+                    }
                     (Some("lissage"), _) => {
                         self.sur.lissage = m.get(2).is_none_or(|v| v != "non");
                         if let Some(b) = m.get(3).and_then(|x| x.parse().ok()) {

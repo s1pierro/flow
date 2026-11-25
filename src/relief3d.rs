@@ -131,6 +131,11 @@ pub struct Relief3d {
     pub traces_bilan: String,
     /// Le nœud du réseau choisi (sa sphère touchée).
     pub noeud_choisi: Option<usize>,
+    /// Le dernier diagnostic des bords (`diagnostiquer_bords`) : son bilan, ses bouts
+    /// non raccordés, et un compteur (les sphères rouges en dépendent).
+    pub bords_diag: String,
+    pub bords_libres: Vec<BoutLibre>,
+    bords_rev: u64,
     /// Les nœuds montrés en sphères, et le maillage des sphères (avec sa clé).
     noeuds_montres: Vec<usize>,
     spheres: Option<(u64, Maillage3d)>,
@@ -295,7 +300,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), noeud_choisi: None, noeuds_montres: Vec::new(), spheres: None, faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None, bati_mat: false, bati_mat_faits: HashMap::new(), bati_mat_bilan: (0, 0, 0, 0, 0), mur: None }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), noeud_choisi: None, bords_diag: String::new(), bords_libres: Vec::new(), bords_rev: 0, noeuds_montres: Vec::new(), spheres: None, faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None, bati_mat: false, bati_mat_faits: HashMap::new(), bati_mat_bilan: (0, 0, 0, 0, 0), mur: None }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -782,7 +787,7 @@ impl Relief3d {
         let d = donnees.read().ok()?;
         let r = d.reseau_pret()?;
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (Arc::as_ptr(&r) as usize, montrees, self.noeud_choisi, self.sur.pietons).hash(&mut h);
+        (Arc::as_ptr(&r) as usize, montrees, self.noeud_choisi, self.sur.pietons, self.bords_rev).hash(&mut h);
         let cle = h.finish();
         if let Some((k, m)) = &self.spheres {
             if *k == cle {
@@ -841,6 +846,27 @@ impl Relief3d {
             for a in 0..anneaux as u32 {
                 for q in 0..quartiers as u32 {
                     let (i0, i1) = (base + a * l + q, base + (a + 1) * l + q);
+                    ix.extend_from_slice(&[i0, i1, i0 + 1, i0 + 1, i1, i1 + 1]);
+                }
+            }
+        }
+        // Les bouts de bords non raccordés du dernier diagnostic : de petites sphères
+        // rouges
+        for l in &self.bords_libres {
+            let (p, rayon, c) = (l.p, SPHERE_RAYON * 0.6, [0.95f32, 0.1, 0.1]);
+            let base = (s.len() / 9) as u32;
+            for a in 0..=anneaux {
+                let t = std::f32::consts::PI * a as f32 / anneaux as f32;
+                for q in 0..=quartiers {
+                    let f = std::f32::consts::TAU * q as f32 / quartiers as f32;
+                    let nrm = [t.sin() * f.cos(), t.cos(), t.sin() * f.sin()];
+                    s.extend_from_slice(&[p[0] + nrm[0] * rayon, p[2] + TRACES_DESSUS + nrm[1] * rayon, p[1] + nrm[2] * rayon, nrm[0], nrm[1], nrm[2], c[0], c[1], c[2]]);
+                }
+            }
+            let l_ = quartiers as u32 + 1;
+            for a in 0..anneaux as u32 {
+                for q in 0..quartiers as u32 {
+                    let (i0, i1) = (base + a * l_ + q, base + (a + 1) * l_ + q);
                     ix.extend_from_slice(&[i0, i1, i0 + 1, i0 + 1, i1, i1 + 1]);
                 }
             }
@@ -1393,6 +1419,18 @@ impl Decoupe {
 /// `TRACES_TUILES` tuiles.
 pub const TRACES_DISTANCE: f32 = 300.0;
 pub const TRACES_TUILES: usize = 4;
+/// Un bout de bord de chaussée qui ne rejoint aucun autre bout (diagnostic).
+#[derive(Clone, Debug)]
+pub struct BoutLibre {
+    /// x, z, hauteur.
+    pub p: [f32; 3],
+    /// Le nœud le plus proche et sa distance (m).
+    pub noeud: usize,
+    pub d_noeud: f32,
+    /// La distance (m) au plus proche bout d'un autre bord.
+    pub d_voisin: f32,
+}
+
 /// Les réglages de la surimpression sur la maquette : les tracés du réseau et les
 /// remblais des voies, chacun montré ou non, avec la distance de la caméra
 /// à sa cible en deçà de laquelle il paraît (m) et son rayon autour de la cible (en
@@ -1468,6 +1506,101 @@ impl Relief3d {
     /// `TRACES_DESSUS` au-dessus de la chaussée. Rien n'entre dans les tuiles faites.
     /// Le réseau est calculé à part la première fois (dans un fil) : en attendant, rien.
     /// Oublie les tracés faits : ils seront redemandés.
+    /// Le diagnostic des bords des chaussées : sur les tuiles des tracés, les bouts de
+    /// bords qui ne rejoignent aucun autre bout (à 2 cm près), hors bords des tuiles.
+    /// Rend (et garde) le bilan : leur nombre, et les premiers avec le nœud le plus
+    /// proche.
+    pub fn diagnostiquer_bords(&mut self, donnees: &Arc<std::sync::RwLock<Donnees>>) -> String {
+        let bilan = (|| -> (String, Vec<BoutLibre>) {
+            let Ok(d) = donnees.read() else { return ("données indisponibles".into(), Vec::new()) };
+            let Some(r) = d.reseau_pret() else { return ("réseau pas encore calculé".into(), Vec::new()) };
+            let cles: Vec<Cle> = self.traces.keys().copied().collect();
+            if cles.is_empty() {
+                return ("aucune tuile de tracés montrée".into(), Vec::new());
+            }
+            let mut libres: Vec<BoutLibre> = Vec::new();
+            let mut total_bouts = 0usize;
+            for cle in &cles {
+                let b = boite_tuile(&d, *cle);
+                let marge = 40.0;
+                let dans: Vec<usize> = r
+                    .aretes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));
+                        !(x1 + marge < b[0] || x0 - marge > b[2] || z1 + marge < b[1] || z0 - marge > b[3])
+                    })
+                    .map(|(k, _)| k)
+                    .collect();
+                let lignes = crate::bords::bords(&r, &dans, &|k| crate::fils::trace_raccords(&r, k));
+                let bouts: Vec<[f32; 3]> = lignes.iter().filter(|l| l.len() >= 2).flat_map(|l| [l[0], l[l.len() - 1]]).collect();
+                let interieur = |q: [f32; 3]| q[0] > b[0] + 0.5 && q[0] < b[2] - 0.5 && q[1] > b[1] + 0.5 && q[1] < b[3] - 0.5;
+                // Une grille de 1 m pour chercher les bouts voisins
+                let mut grille: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+                for (i, q) in bouts.iter().enumerate() {
+                    grille.entry((q[0].floor() as i32, q[1].floor() as i32)).or_default().push(i);
+                }
+                for (i, q) in bouts.iter().enumerate() {
+                    if !interieur(*q) {
+                        continue;
+                    }
+                    total_bouts += 1;
+                    let (gx, gz) = (q[0].floor() as i32, q[1].floor() as i32);
+                    let mut rejoint = false;
+                    'v: for dx in -1..=1 {
+                        for dz in -1..=1 {
+                            for &j in grille.get(&(gx + dx, gz + dz)).map(|v| v.as_slice()).unwrap_or(&[]) {
+                                if j != i && (bouts[j][0] - q[0]).hypot(bouts[j][1] - q[1]) <= 0.02 {
+                                    rejoint = true;
+                                    break 'v;
+                                }
+                            }
+                        }
+                    }
+                    if !rejoint {
+                        // Le plus proche bout d'un autre bord
+                        let moi = i / 2;
+                        let d_voisin = bouts.iter().enumerate().filter(|(j, _)| j / 2 != moi).map(|(_, b)| (b[0] - q[0]).hypot(b[1] - q[1])).fold(f32::MAX, f32::min);
+                        // Le nœud le plus proche, parmi ceux des voies de la tuile
+                        let (mut nmin, mut dmin) = (usize::MAX, f32::MAX);
+                        for &k in &dans {
+                            for n in [r.aretes[k].a, r.aretes[k].b] {
+                                let p = r.noeuds[n].p;
+                                let dd = (p[0] - q[0]).hypot(p[1] - q[1]);
+                                if dd < dmin {
+                                    (nmin, dmin) = (n, dd);
+                                }
+                            }
+                        }
+                        libres.push(BoutLibre { p: *q, noeud: nmin, d_noeud: dmin, d_voisin });
+                    }
+                }
+            }
+            let t = format!("{} tuiles · {} bouts de bords · {} non raccordés (hors bords des tuiles)", cles.len(), total_bouts, libres.len());
+            libres.sort_by(|a, b| a.d_voisin.total_cmp(&b.d_voisin));
+            (t, libres)
+        })();
+        let (bilan, libres) = bilan;
+        self.bords_libres = libres;
+        self.bords_rev += 1;
+        let tranche = |a: f32, b: f32| self.bords_libres.iter().filter(|l| l.d_voisin >= a && l.d_voisin < b).count();
+        let bilan = format!("{bilan}\nvoisin à moins de 5 cm : {} · de 5 cm à 1 m : {} · de 1 à 5 m : {} · au-delà : {}", tranche(0.0, 0.05), tranche(0.05, 1.0), tranche(1.0, 5.0), tranche(5.0, f32::MAX));
+        let mut t = bilan.clone();
+        for l in self.bords_libres.iter().rev().take(12) {
+            t.push_str(&format!("\nnœud {} à {:.1} m · voisin à {:.2} m · x {:.1} z {:.1}", l.noeud, l.d_noeud, l.d_voisin, l.p[0], l.p[1]).replace('.', ","));
+        }
+        self.bords_diag = bilan;
+        t
+    }
+
+    /// Amène la vue sur le nœud `n` (choisi) d'un bout de bord non raccordé `p`.
+    pub fn aller_bout(&mut self, n: usize, p: [f32; 3]) {
+        self.camera.cible = [p[0], p[2], p[1]];
+        self.camera.distance = self.camera.distance.min(30.0);
+        self.noeud_choisi = Some(n);
+    }
+
     pub fn refaire_traces(&mut self) {
         self.traces.clear();
         self.faces.clear();

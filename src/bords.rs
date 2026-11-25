@@ -8,7 +8,9 @@
 //! nœuds proches disparaissent, et ce qui reste se lie en boucles (autour d'un pâté de
 //! maisons). Les bords suivent le bord extérieur des files extrêmes : aux raccords
 //! des fourches, ils finissent sur celui des files du tronc qu'elles continuent. Seule
-//! une impasse est fermée d'un trait en travers.
+//! une impasse est fermée d'un trait en travers, et les micro coupures près d'un nœud
+//! (deux bouts libres à moins de `SOUDURE`) sont refermées : les deux bouts sont
+//! confondus en leur milieu.
 //!
 //! Les voies de bus en site propre (`sage_reel::BUS`, le TEOR) sont une surface à part,
 //! qui passe sans être coupée : leurs bords ne s'arrêtent que dans une autre voie de
@@ -21,6 +23,10 @@ use std::collections::HashMap;
 /// Les bandes sont rétrécies d'autant (m) : un bord posé sur le bord d'une autre bande
 /// (une voie qui en continue une autre) n'est pas « dedans ».
 const EPS: f32 = 0.02;
+/// Deux bouts de bords près d'un nœud à moins de tant (m) l'un de l'autre sont confondus.
+const SOUDURE: f32 = 1.0;
+/// Partout, deux bouts à moins de tant (m) l'un de l'autre sont confondus.
+const SOUDURE_FINE: f32 = 0.05;
 /// La maille (m) de l'index des bandes.
 const CASE: f32 = 10.0;
 /// Une bande ne coupe un bord que s'ils sont à moins de tant de mètres en hauteur (un
@@ -238,8 +244,6 @@ pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32
             sortie.extend(bandes.garder(p, r.aretes[k].passage, est_bus(k), &[k]));
         }
     }
-    // Les impasses : leurs deux bords reliés en travers (aux autres nœuds, les bords des
-    // files se rejoignent d'eux-mêmes)
     let mut noeuds: Vec<usize> = Vec::new();
     for &k in &utiles {
         noeuds.push(r.aretes[k].a);
@@ -247,6 +251,101 @@ pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32
     }
     noeuds.sort_unstable();
     noeuds.dedup();
+    // Les micro coupures : près d'un nœud, deux bouts libres de bords à moins de
+    // SOUDURE l'un de l'autre (un coude, un changement de largeur) sont confondus en
+    // leur milieu, les plus proches d'abord
+    let mut deplacements: Vec<(usize, usize, [f32; 3])> = Vec::new();
+    {
+        let mut pris: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+        // D'abord, partout, les bouts presque confondus (deux bords qui se coupent en un
+        // coin, à l'écart près des bandes rétrécies)
+        {
+            let mut grille: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+            for (i, l) in sortie.iter().enumerate() {
+                for (j, q) in [(0, l[0]), (1, l[l.len() - 1])] {
+                    grille.entry(((q[0] / 0.5).floor() as i32, (q[1] / 0.5).floor() as i32)).or_default().push((i, j));
+                }
+            }
+            let bout = |(i, j): (usize, usize)| if j == 0 { sortie[i][0] } else { sortie[i][sortie[i].len() - 1] };
+            let mut paires: Vec<(f32, (usize, usize), (usize, usize))> = Vec::new();
+            for (&(gx, gz), v) in &grille {
+                for &a in v {
+                    for dx in -1..=1 {
+                        for dz in -1..=1 {
+                            for &b in grille.get(&(gx + dx, gz + dz)).map(|w| w.as_slice()).unwrap_or(&[]) {
+                                if a < b && a.0 != b.0 {
+                                    let (p, q) = (bout(a), bout(b));
+                                    let d = (p[0] - q[0]).hypot(p[1] - q[1]);
+                                    if d <= SOUDURE_FINE && (p[2] - q[2]).abs() <= ECART_H {
+                                        paires.push((d, a, b));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            paires.sort_by(|u, v| u.0.total_cmp(&v.0));
+            for (d, a, b) in paires {
+                if pris.contains(&a) || pris.contains(&b) {
+                    continue;
+                }
+                pris.insert(a);
+                pris.insert(b);
+                if d > 0.001 {
+                    let (p, q) = (bout(a), bout(b));
+                    let m = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0, (p[2] + q[2]) / 2.0];
+                    deplacements.push((a.0, a.1, m));
+                    deplacements.push((b.0, b.1, m));
+                }
+            }
+        }
+        for &n in &noeuds {
+            let c = r.noeuds[n].p;
+            let rayon = r.noeuds[n].aretes.iter().map(|&k| r.aretes[k].largeur * 0.5).fold(0.0f32, f32::max) + 1.5;
+            let mut bouts: Vec<(usize, usize, [f32; 3])> = Vec::new();
+            for (i, l) in sortie.iter().enumerate() {
+                for (j, q) in [(0, l[0]), (1, l[l.len() - 1])] {
+                    if (q[0] - c[0]).hypot(q[1] - c[1]) <= rayon && !pris.contains(&(i, j)) {
+                        bouts.push((i, j, q));
+                    }
+                }
+            }
+            let mut paires: Vec<(f32, usize, usize)> = Vec::new();
+            for x in 0..bouts.len() {
+                for y in x + 1..bouts.len() {
+                    let (a, b) = (bouts[x], bouts[y]);
+                    if a.0 == b.0 || (a.2[2] - b.2[2]).abs() > ECART_H {
+                        continue;
+                    }
+                    let d = (a.2[0] - b.2[0]).hypot(a.2[1] - b.2[1]);
+                    if d <= SOUDURE {
+                        paires.push((d, x, y));
+                    }
+                }
+            }
+            paires.sort_by(|u, v| u.0.total_cmp(&v.0));
+            for (d, x, y) in paires {
+                let (a, b) = (bouts[x], bouts[y]);
+                if pris.contains(&(a.0, a.1)) || pris.contains(&(b.0, b.1)) {
+                    continue;
+                }
+                pris.insert((a.0, a.1));
+                pris.insert((b.0, b.1));
+                if d > 0.001 {
+                    let m = [(a.2[0] + b.2[0]) / 2.0, (a.2[1] + b.2[1]) / 2.0, (a.2[2] + b.2[2]) / 2.0];
+                    deplacements.push((a.0, a.1, m));
+                    deplacements.push((b.0, b.1, m));
+                }
+            }
+        }
+    }
+    for (i, j, m) in deplacements {
+        let l = &mut sortie[i];
+        let k = if j == 0 { 0 } else { l.len() - 1 };
+        l[k] = m;
+    }
+    // Les impasses : leurs deux bords reliés en travers
     for n in noeuds {
         let mut bouts: Vec<(usize, bool)> = Vec::new();
         for &k in &r.noeuds[n].aretes {
