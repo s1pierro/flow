@@ -30,6 +30,7 @@ pub mod renfort;
 pub mod champ_voirie;
 pub mod fils;
 pub mod files;
+pub mod bords;
 pub mod origine_noeuds;
 pub mod cache_lieu;
 pub mod carrefours;

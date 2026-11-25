@@ -1421,11 +1421,17 @@ pub struct Surimpression {
     pub tolerance: f32,
     /// Les files dont les séparateurs sont tirés (`files`) : leur axe et leur sens.
     pub axes: bool,
+    /// Les bords des chaussées, tirés des voies et de leurs files (`bords`).
+    pub bords: bool,
+    /// Le raccourci des fourches de sens unique (`fils::raccourcir`) : l'angle (°) d'une
+    /// cassure et sa distance (m) au plus du nœud (0 : aucun).
+    pub raccourci_angle: f32,
+    pub raccourci_distance: f32,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false, bords: false, raccourci_angle: crate::fils::RACCOURCI_ANGLE, raccourci_distance: crate::fils::RACCOURCI_DISTANCE }
     }
 }
 
@@ -1436,11 +1442,11 @@ impl Surimpression {
         let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
         let f = v.get(6);
         let fi = v.get(7);
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0) })
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0), bords: v.get(15).is_some_and(|x| *x != 0.0), raccourci_angle: v.get(16).copied().unwrap_or(crate::fils::RACCOURCI_ANGLE), raccourci_distance: v.get(17).copied().unwrap_or(crate::fils::RACCOURCI_DISTANCE) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes))
+        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes), u8::from(self.bords), self.raccourci_angle, self.raccourci_distance)
     }
 }
 
@@ -1584,12 +1590,13 @@ impl Relief3d {
         }
         crate::fils::regler_deports(Arc::new(deports.clone()));
         crate::fils::regler_rayons(self.sur.virage_droite, self.sur.virage_gauche);
+        crate::fils::regler_raccourcis(self.sur.raccourci_angle, self.sur.raccourci_distance);
         crate::fils::regler_lissage(self.sur.lissage, self.sur.tolerance);
         let mut v = Vec::new();
         for &cle in montrees {
             if !self.traces.contains_key(&cle) {
                 self.revision += 1;
-                let t = traces_reseau(&r, &deports, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files, false, self.sur.axes, self.sur.pietons, self.sur.brut);
+                let t = traces_reseau(&r, &deports, boite_tuile(&d, cle), cle, self.num, self.revision, self.sur.files, false, self.sur.axes, self.sur.bords, self.sur.pietons, self.sur.brut);
                 self.traces.insert(cle, t);
             }
             v.extend(self.traces[&cle].iter().cloned());
@@ -1625,6 +1632,8 @@ const TRACE_MARQUE: [f32; 3] = [0.95, 0.95, 0.75];
 /// Le cône du sens de circulation au milieu des fils : longueur et rayon (m).
 const CONE_LONGUEUR: f32 = 1.6;
 const CONE_RAYON: f32 = 0.45;
+/// Les bords des chaussées.
+const TRACE_BORD: [f32; 3] = [0.0, 0.0, 0.0];
 /// Les continuités dans les carrefours (fils de circulation).
 const TRACE_TRAVERSE: [f32; 3] = [0.95, 0.15, 0.1];
 /// Les fils passent d'autant au-dessus des tracés (m).
@@ -1702,7 +1711,7 @@ fn noeud_carrossable(r: &sage_reel::reseau::Reseau, n: &sage_reel::reseau::Noeud
 
 /// Les tracés du réseau `r` dans la boîte `b` : un maillage de traits par passage, et
 /// les nœuds en croix.
-fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, axes: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
+fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, axes: bool, bords: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
     use sage_reel::reseau::Passage;
     // Les points d'une arête, déportés près d'une fourche (comme la chaussée)
     let points = |k: usize| -> std::borrow::Cow<'_, [[f32; 3]]> {
@@ -1733,7 +1742,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
         }
         i.extend_from_slice(&[n, n + 1]);
     };
-    let mut listes: [(Vec<f32>, Vec<u32>); 13] = Default::default();
+    let mut listes: [(Vec<f32>, Vec<u32>); 14] = Default::default();
     for (ka, a) in r.aretes.iter().enumerate() {
         if !brut || (!pietons && !sage_reel::carrossable(a.genre)) {
             continue;
@@ -1779,7 +1788,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
                 continue;
             }
             // Les lignes, tirées des files vectorielles (`files`)
-            let pts = points(ka);
+            let pts = crate::fils::trace(r, ka);
             for (ligne, l) in crate::files::separations(a, &pts) {
                 let k = match ligne {
                     crate::files::Ligne::Sens => 6,
@@ -1807,7 +1816,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             if x1 + w < b[0] || x0 - w > b[2] || z1 + w < b[1] || z0 - w > b[3] {
                 continue;
             }
-            let pts = points(ka);
+            let pts = crate::fils::trace(r, ka);
             for f in crate::files::files(ka, a, &pts) {
                 let k = if f.bus { 10 } else { 7 };
                 for w in f.axe.windows(2) {
@@ -1854,8 +1863,32 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             }
         }
     }
+    // Les bords des chaussées, tirés des voies et de leurs files (`bords`) : liés d'une
+    // voie à l'autre à chaque nœud
+    if bords {
+        // Assez large pour que toute bande qui touche la boîte coupe les bords
+        let marge = 40.0;
+        let dans: Vec<usize> = r
+            .aretes
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));
+                !(x1 + marge < b[0] || x0 - marge > b[2] || z1 + marge < b[1] || z0 - marge > b[3])
+            })
+            .map(|(k, _)| k)
+            .collect();
+        for l in crate::bords::bords(r, &dans, &|k| crate::fils::trace_largeurs(r, k)) {
+            for w in l.windows(2) {
+                if let Some((p, q)) = couper(w[0], w[1], b) {
+                    let (s, ix) = &mut listes[13];
+                    poser(s, ix, p, q);
+                }
+            }
+        }
+    }
     let base = 0x7472_0000_0000_0000u64 ^ (num << 40) ^ ((cle.0 as u64) << 32) ^ ((cle.1 as u64 & 0xFFFF) << 16) ^ (cle.2 as u64 & 0xFFFF);
-    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0), (TRACE_FIL, 2.5), (TRACE_RACCORD, 3.0), (TRACE_VIRAGE, 2.5), (TRACE_FIL_BUS, 3.0), (TRACE_MARQUE, 4.0), (TRACE_TRAVERSE, 2.5)];
+    let reglages = [(TRACE_SOL, 2.0), (TRACE_PONT, 3.0), (TRACE_TUNNEL, 2.0), (TRACE_NOEUD, 3.0), (TRACE_FILE, 2.0), (TRACE_FILE_DEDUITE, 1.5), (TRACE_SENS, 3.0), (TRACE_FIL, 2.5), (TRACE_RACCORD, 3.0), (TRACE_VIRAGE, 2.5), (TRACE_FIL_BUS, 3.0), (TRACE_MARQUE, 4.0), (TRACE_TRAVERSE, 2.5), (TRACE_BORD, 5.0)];
     listes
         .into_iter()
         .zip(reglages)

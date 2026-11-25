@@ -318,7 +318,8 @@ pub fn regler_deports(d: Arc<HashMap<usize, Vec<crate::champ_voirie::Deport>>>) 
 }
 
 /// L'axe de l'arête `k`, déporté près d'une fourche.
-fn trace(r: &Reseau, k: usize) -> Vec<[f32; 3]> {
+/// L'axe de l'arête `k` déporté près d'une fourche (`regler_deports`).
+fn deporte(r: &Reseau, k: usize) -> Vec<[f32; 3]> {
     let a = &r.aretes[k];
     let ds = DEPORTS.read().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&k).cloned()));
     match ds {
@@ -337,6 +338,194 @@ fn trace(r: &Reseau, k: usize) -> Vec<[f32; 3]> {
             })
             .collect(),
     }
+}
+
+/// Le raccourci des fourches de sens unique, par défaut : l'angle (°) d'une cassure, et
+/// sa distance (m) au plus du nœud.
+pub const RACCOURCI_ANGLE: f32 = 8.0;
+pub const RACCOURCI_DISTANCE: f32 = 15.0;
+static RACC_ANGLE: AtomicU32 = AtomicU32::new(0x4100_0000); // 8
+static RACC_DISTANCE: AtomicU32 = AtomicU32::new(0x4170_0000); // 15
+
+/// Règle la détection des raccourcis (une distance nulle les retire).
+pub fn regler_raccourcis(angle: f32, distance: f32) {
+    RACC_ANGLE.store(angle.to_bits(), Ordering::Relaxed);
+    RACC_DISTANCE.store(distance.to_bits(), Ordering::Relaxed);
+}
+
+/// Le sens d'un bout de voie à sens unique : vrai si la circulation entre au nœud
+/// (rien pour une voie à double sens ou sans file).
+fn entrant(a: &sage_reel::reseau::Arete, fin: bool) -> Option<bool> {
+    let f = a.files;
+    if f.total == 0 {
+        return None;
+    }
+    let avant = f.avant > 0 && f.arriere == 0;
+    let arriere = f.arriere > 0 && f.avant == 0;
+    if !(avant || arriere) {
+        return None;
+    }
+    Some(avant == fin)
+}
+
+/// Le raccourci d'une branche de fourche de sens unique : à un nœud où plusieurs voies à
+/// sens unique se rejoignent en une seule (ou s'en séparent), dans le même sens, avec
+/// autant de files en tout, chaque branche arrive par une section droite puis une
+/// cassure, et un dernier segment qui plonge vers le nœud (OSM réunit les chaussées en
+/// un point). Ce segment est sauté : de la cassure, l'axe de la branche va droit à ses
+/// files sur le tronc (au nœud, les branches prennent les files du tronc dans l'ordre
+/// où elles arrivent en travers). `p` : l'axe de l'arête `k`, modifié au bout `fin`.
+/// Rend la demi-largeur de ses files sur le tronc (celle de la branche au nœud) si
+/// l'axe est raccourci.
+fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, angle: f32, dmax: f32) -> Option<f32> {
+    let a = &r.aretes[k];
+    let n = if fin { a.b } else { a.a };
+    if a.a == a.b || p.len() < 3 {
+        return None;
+    }
+    let e = entrant(a, fin)?;
+    let mut tronc: Option<(usize, bool)> = None;
+    let mut branches: Vec<(usize, bool)> = Vec::new();
+    for &j in &r.noeuds[n].aretes {
+        let b = &r.aretes[j];
+        if !sage_reel::carrossable(b.genre) || b.points.len() < 2 {
+            continue;
+        }
+        for f in [false, true] {
+            if (if f { b.b } else { b.a }) != n {
+                continue;
+            }
+            let ej = entrant(b, f)?;
+            if ej == e {
+                branches.push((j, f));
+            } else if tronc.is_some() {
+                return None;
+            } else {
+                tronc = Some((j, f));
+            }
+        }
+    }
+    let (t, tf) = tronc?;
+    if branches.len() < 2 {
+        return None;
+    }
+    let ta = &r.aretes[t];
+    let somme: usize = branches.iter().map(|&(j, _)| r.aretes[j].files.total as usize).sum();
+    if somme != ta.files.total as usize {
+        return None;
+    }
+    // Le tronc depuis le nœud : sa direction, et l'axe de ses files au nœud, en travers
+    let tp = deporte(r, t);
+    if tp.len() < 2 {
+        return None;
+    }
+    let tg = crate::files::normales(&tp);
+    let (i0, i1) = if tf { (tp.len() - 1, tp.len() - 2) } else { (0, 1) };
+    let o = tp[i0];
+    let dl = (tp[i1][0] - o[0]).hypot(tp[i1][1] - o[1]).max(1e-6);
+    let d = [(tp[i1][0] - o[0]) / dl, (tp[i1][1] - o[1]) / dl];
+    let travers = |q: [f32; 2]| (q[0] - o[0]) * -d[1] + (q[1] - o[1]) * d[0];
+    let mut fs: Vec<[f32; 2]> = (0..ta.files.total as usize)
+        .map(|i| {
+            let y = crate::files::decalage(ta, i);
+            [o[0] + tg[i0][0] * y, o[1] + tg[i0][1] * y]
+        })
+        .collect();
+    fs.sort_by(|x, y| travers(*x).total_cmp(&travers(*y)));
+    // Une branche, ses points vers le nœud : sa cassure (rang, point), et son repère en
+    // travers (la cassure, ou à défaut l'avant-dernier point)
+    let cassure = |q: &[[f32; 3]]| -> (Option<usize>, [f32; 2]) {
+        let m = q.len();
+        let repere = [q[m - 2][0], q[m - 2][1]];
+        let mut s = 0.0;
+        for i in (1..m - 1).rev() {
+            s += (q[i + 1][0] - q[i][0]).hypot(q[i + 1][1] - q[i][1]);
+            if s > dmax {
+                break;
+            }
+            let u1 = [q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]];
+            let u2 = [q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]];
+            let (l1, l2) = (u1[0].hypot(u1[1]), u2[0].hypot(u2[1]));
+            if l1 < 1e-6 || l2 < 1e-6 {
+                continue;
+            }
+            let c = ((u1[0] * u2[0] + u1[1] * u2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
+            if c.acos() >= angle {
+                // La section droite doit filer vers le tronc
+                if (u1[0] * d[0] + u1[1] * d[1]) / l1 < 0.5 {
+                    break;
+                }
+                return (Some(i), [q[i][0], q[i][1]]);
+            }
+        }
+        (None, repere)
+    };
+    let vers_noeud = |pts: &[[f32; 3]], f: bool| -> Vec<[f32; 3]> { if f { pts.to_vec() } else { pts.iter().rev().copied().collect() } };
+    let mut bs: Vec<(usize, bool, usize, f32)> = Vec::new();
+    let mut mien: Option<usize> = None;
+    for &(j, f) in &branches {
+        let q = if j == k { vers_noeud(p, f) } else { vers_noeud(&deporte(r, j), f) };
+        if q.len() < 2 {
+            return None;
+        }
+        let (i, rep) = cassure(&q);
+        if j == k && f == fin {
+            mien = i;
+        }
+        bs.push((j, f, r.aretes[j].files.total as usize, travers(rep)));
+    }
+    let i = mien?;
+    bs.sort_by(|x, y| x.3.total_cmp(&y.3));
+    let mut rang = 0;
+    let mut cible = None;
+    for &(j, f, nf, _) in &bs {
+        if j == k && f == fin {
+            let m = &fs[rang..rang + nf];
+            let s = m.iter().fold([0.0f32; 2], |s, x| [s[0] + x[0], s[1] + x[1]]);
+            cible = Some([s[0] / nf as f32, s[1] / nf as f32]);
+        }
+        rang += nf;
+    }
+    let c = cible?;
+    let mut q = vers_noeud(p, fin);
+    let z = q[q.len() - 1][2];
+    q.truncate(i + 1);
+    q.push([c[0], c[1], z]);
+    if !fin {
+        q.reverse();
+    }
+    *p = q;
+    let nf = a.files.total as f32;
+    Some(ta.largeur / ta.files.total.max(1) as f32 * nf * 0.5)
+}
+
+/// L'axe de l'arête `k` pour ses files : déporté près d'une fourche, et raccourci aux
+/// fourches de sens unique (`raccourcir`).
+pub fn trace(r: &Reseau, k: usize) -> Vec<[f32; 3]> {
+    trace_largeurs(r, k).0
+}
+
+/// L'axe de `trace` et la demi-largeur de la voie en chacun de ses points : celle de la
+/// voie, sauf au bout raccourci d'une branche de fourche, celle de ses files sur le
+/// tronc (la largeur change en biseau depuis la cassure : les bords suivent les files).
+pub fn trace_largeurs(r: &Reseau, k: usize) -> (Vec<[f32; 3]>, Vec<f32>) {
+    let mut p = deporte(r, k);
+    let angle = f32::from_bits(RACC_ANGLE.load(Ordering::Relaxed)).to_radians();
+    let dmax = f32::from_bits(RACC_DISTANCE.load(Ordering::Relaxed));
+    let mut bouts = [None, None];
+    if dmax > 0.0 {
+        for (i, fin) in [false, true].into_iter().enumerate() {
+            bouts[i] = raccourcir(r, k, fin, &mut p, angle, dmax);
+        }
+    }
+    let mut w = vec![r.aretes[k].largeur * 0.5; p.len()];
+    if let (Some(x), Some(v)) = (bouts[0], w.first_mut()) {
+        *v = x;
+    }
+    if let (Some(x), Some(v)) = (bouts[1], w.last_mut()) {
+        *v = x;
+    }
+    (p, w)
 }
 
 static RAYON_D: AtomicU32 = AtomicU32::new(0x4090_0000); // 4.5

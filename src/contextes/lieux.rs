@@ -1651,6 +1651,26 @@ impl Lieux {
                                 cx.dl.rrect(Rect::new(s[0] - rr + 2.0 * d, s[1] - rr + 2.0 * d, 2.0 * rr - 4.0 * d, 2.0 * rr - 4.0 * d), rr, accent);
                             }
                         }
+                        // Le sens du tracé : une flèche au milieu de la voie
+                        let total: f32 = r.points.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum();
+                        let mut l = 0.0;
+                        for s in r.points.windows(2) {
+                            let ls = (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1]);
+                            if l + ls >= total / 2.0 && ls > 1e-3 {
+                                let u = (total / 2.0 - l) / ls;
+                                let m = [s[0][0] + (s[1][0] - s[0][0]) * u, s[0][1] + (s[1][1] - s[0][1]) * u];
+                                let dir = [(s[1][0] - s[0][0]) / ls, (s[1][1] - s[0][1]) / ls];
+                                let t = (r.largeur * 0.6).max(10.0 * d / vue.echelle);
+                                let pointe = vue.ecran(zone, m[0] + dir[0] * t, m[1] + dir[1] * t);
+                                for cote in [-1.0f32, 1.0] {
+                                    let aile = vue.ecran(zone, m[0] - dir[0] * t * 0.2 + dir[1] * t * 0.6 * cote, m[1] - dir[1] * t * 0.2 - dir[0] * t * 0.6 * cote);
+                                    cx.dl.line(pointe, aile, 3.0 * d, [255, 255, 255, 255]);
+                                }
+                                cx.dl.line(vue.ecran(zone, m[0] - dir[0] * t, m[1] - dir[1] * t), pointe, 3.0 * d, [255, 255, 255, 255]);
+                                break;
+                            }
+                            l += ls;
+                        }
                         if let Some(q) = self.noeud.and_then(|i| r.points.get(i)) {
                             let s = vue.ecran(zone, q[0], q[1]);
                             let rr = 10.0 * d;
@@ -1908,6 +1928,18 @@ impl Lieux {
                             cx.toggle(&mut b, sub_id(base, 683), "Files", &mut s.axes);
                             cx.paragraph(&mut b, "En cyan, les séparateurs entre les files : vif là où OSM donne le nombre de files, sombre là où il est déduit de la largeur ; plus clair et plus épais entre les deux sens. Files : l'axe de chacune, en vert (en rose, réservée au bus), un cône pour son sens (aucun pour une file partagée).");
                         }
+                        let avant_racc = (s.raccourci_angle, s.raccourci_distance);
+                        if s.files || s.bords {
+                            cx.section(&mut b, "Fourches de sens unique");
+                            cx.molettes(&mut b, sub_id(base, 685), "Cassure", "°", &mut s.raccourci_angle);
+                            cx.molettes(&mut b, sub_id(base, 686), "Distance", "m", &mut s.raccourci_distance);
+                            cx.paragraph(&mut b, "Où des voies à sens unique se rejoignent en une seule (ou s'en séparent), chacune arrive par une section droite puis une cassure vers le nœud. Une cassure d'au moins tant de degrés, à moins de tant de mètres du nœud, est sautée : de là, les files vont droit à leurs files sur la voie commune. Distance à 0 : aucun raccourci.");
+                        }
+                        let avant_bords = s.bords;
+                        cx.toggle(&mut b, sub_id(base, 684), "Bords des chaussées", &mut s.bords);
+                        if s.bords {
+                            cx.paragraph(&mut b, "En noir, les bords des chaussées, tirés des files : le contour des chaussées réunies (chaque voie élargie de sa demi-largeur de chaque côté, sur l'axe de ses files). Un bord s'arrête où il entre dans la chaussée d'une autre voie ; un trait ferme le côté plat d'un T, l'entre-deux de voies qui se rejoignent et le bout d'une impasse. Ils forment des boucles autour des pâtés de maisons. Les sites propres de bus (TEOR) sont une surface à part, jamais coupée : les voies qui les traversent s'arrêtent à leur bord.");
+                        }
                         let avant_brut = s.brut;
                         cx.toggle(&mut b, sub_id(base, 670), "Tracé brut des voies", &mut s.brut);
                         let avant_pietons = s.pietons;
@@ -1915,7 +1947,7 @@ impl Lieux {
                         // (les fils de circulation, à l'essai, ne sont plus montrés)
                         let avant_fils = s.fils;
                         s.fils = false;
-                        if s.files != avant || s.axes != avant_axes || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut {
+                        if s.files != avant || s.axes != avant_axes || s.bords != avant_bords || (s.raccourci_angle, s.raccourci_distance) != avant_racc || s.fils != avant_fils || s.pietons != avant_pietons || s.brut != avant_brut {
                             if let Some(r) = self.trois_d.as_mut() {
                                 r.refaire_traces();
                             }
@@ -2379,7 +2411,32 @@ impl Lieux {
         if let Some(i) = Lieux::puces(cx, b, sub_id(base, 270), &GENRES_VOIE, r.genre as usize) {
             r.genre = i as u8;
         }
-        cx.slider(b, sub_id(base, 271), "Largeur", &format!("{:.1} m", r.largeur).replace('.', ","), &mut r.largeur, 1.0, 40.0);
+        if cx.molettes(b, sub_id(base, 271), "Largeur", "m", &mut r.largeur) {
+            r.largeur = r.largeur.max(0.5);
+        }
+        // Le sens et le nombre de files (le sens du tracé : la flèche sur la carte)
+        if sage_reel::carrossable(r.genre) {
+            let f = r.files;
+            let n = f.total.max(1);
+            let sens = if f.avant >= n && f.arriere == 0 { 1 } else if f.arriere >= n && f.avant == 0 { 2 } else { 0 };
+            cx.section(b, &format!("Files · {}", if f.osm { "lues dans OSM" } else { "déduites" }));
+            let nouveau_sens = Lieux::puces(cx, b, sub_id(base, 276), &["Double sens", "Sens de la flèche", "Sens inverse"], sens);
+            let noms = ["1", "2", "3", "4", "5", "6"];
+            let nouveau_n = Lieux::puces(cx, b, sub_id(base, 277), &noms, n as usize - 1).map(|i| i as u8 + 1);
+            if nouveau_sens.is_some() || nouveau_n.is_some() {
+                let (s2, n2) = (nouveau_sens.unwrap_or(sens), nouveau_n.unwrap_or(n));
+                let (avant, arriere) = match s2 {
+                    1 => (n2, 0),
+                    2 => (0, n2),
+                    // Double sens : moitié-moitié, une file impaire au milieu partagée
+                    _ => (n2 / 2, n2 / 2),
+                };
+                r.files.total = n2;
+                r.files.avant = avant;
+                r.files.arriere = arriere;
+                r.files.bus &= (1u16 << n2) - 1;
+            }
+        }
         let mut est_pont = pont;
         cx.toggle(b, sub_id(base, 272), "Pont", &mut est_pont);
         let supprimer = cx.button(b, sub_id(base, 273), if pont { "Supprimer le pont" } else { "Supprimer la route" });

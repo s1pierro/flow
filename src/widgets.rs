@@ -830,6 +830,67 @@ impl Cx<'_> {
         b.y += r.h;
     }
 
+    /// Une valeur de 0 à 99,9 réglée chiffre par chiffre, comme un cadenas à code :
+    /// dizaines, unités et dixièmes, chacun entre un chevron au-dessus (+1) et un au-dessous
+    /// (−1), qui tournent de 9 à 0 sans retenue. Rend vrai si la valeur a changé.
+    pub fn molettes(&mut self, b: &mut Body, id: Id, label: &str, unite: &str, value: &mut f32) -> bool {
+        let c = self.couleurs();
+        let d = self.dp;
+        let col = self.commande();
+        let hc = (col * 0.7).round();
+        let ecart = (4.0 * d).round();
+        let virgule = self.measure(",", 22.0) + 2.0 * ecart;
+        let largeur = 3.0 * col + 2.0 * ecart + virgule + self.measure(unite, 16.0) + ecart;
+        let x0 = b.x + b.w - largeur;
+        let y0 = b.y + ecart;
+        let h = hc * 2.0 + col;
+        self.label(b.x, y0 + h / 2.0, label, 16.0, c.texte);
+        let mut v = (*value * 10.0).round().clamp(0.0, 999.0) as i32;
+        let mut chiffres = [v / 100, (v / 10) % 10, v % 10];
+        let mut change = false;
+        let mut x = x0;
+        for (i, ch) in chiffres.iter_mut().enumerate() {
+            if i == 2 {
+                self.centered(Rect::new(x, y0 + hc, virgule, col), ",", 22.0, c.texte);
+                x += virgule;
+            }
+            let haut = Rect::new(x, y0, col, hc);
+            let bas = Rect::new(x, y0 + hc + col, col, hc);
+            let (ih, ib) = (sub_id(id, 2 * i), sub_id(id, 2 * i + 1));
+            if self.ui.click(ih, haut, Some(b.id)) {
+                *ch = (*ch + 1) % 10;
+                change = true;
+            }
+            if self.ui.click(ib, bas, Some(b.id)) {
+                *ch = (*ch + 9) % 10;
+                change = true;
+            }
+            // Les chevrons
+            let (w2, h2, t) = (col * 0.22, hc * 0.18, 2.5 * d);
+            for (r, pid, sens) in [(haut, ih, -1.0f32), (bas, ib, 1.0)] {
+                if self.ui.pressed(pid) {
+                    self.dl.rrect(r, self.theme.rayon(r.h), c.ligne);
+                }
+                let (cx, cy) = (r.cx(), r.cy());
+                let pointe = [cx, cy + sens * h2];
+                self.dl.line([cx - w2, cy - sens * h2], pointe, t, c.accent);
+                self.dl.line(pointe, [cx + w2, cy - sens * h2], t, c.accent);
+            }
+            // Le chiffre
+            let r = Rect::new(x, y0 + hc, col, col);
+            self.dl.rrect(r, self.theme.rayon(col) * 0.5, c.puce);
+            self.centered(r, &ch.to_string(), 22.0, c.texte);
+            x += col + ecart;
+        }
+        self.label(x, y0 + hc + col / 2.0, unite, 16.0, c.pale);
+        if change {
+            v = chiffres[0] * 100 + chiffres[1] * 10 + chiffres[2];
+            *value = v as f32 / 10.0;
+        }
+        b.y += h + 2.0 * ecart;
+        change
+    }
+
     pub fn button(&mut self, b: &mut Body, id: Id, label: &str) -> bool {
         let r = Rect::new(b.x, b.y + (self.theme.marge * 0.4 * self.dp).round(), b.w, self.commande());
         let c = self.couleurs();
