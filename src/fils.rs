@@ -35,6 +35,8 @@ pub const TOUT_DROIT: f32 = 40.0;
 /// prolongement des bords, un quasi-alignement par arc ou intersection — ce qui tient
 /// dans un tronçon de quelques mètres.
 const GIR_COURT: f32 = 0.0;
+/// La longueur au-delà de laquelle une petite impasse n'est plus une amorce (m).
+const AMORCE_MAX: f32 = 12.0;
 /// L'écart à l'angle droit (degrés) en deçà duquel deux voies bout à bout se
 /// rejoignent en coin des deux côtés, sans arc.
 const ANGLE_DROIT: f32 = 25.0;
@@ -1308,6 +1310,34 @@ pub struct Raccord {
     pub regle: &'static str,
 }
 
+/// Une amorce : une petite impasse carrossable (moins de AMORCE_MAX), dont un bout ne
+/// rejoint aucune autre voie carrossable (une passerelle, un chemin) et l'autre un
+/// carrefour d'au moins deux voies. Elle fait partie du carrefour (le sommet d'une
+/// épingle) : ni fourche, ni chaussée à part.
+pub fn est_amorce(r: &Reseau, k: usize) -> bool {
+    let a = &r.aretes[k];
+    if !sage_reel::carrossable(a.genre) || a.files.total == 0 || a.points.len() < 2 || a.a == a.b {
+        return false;
+    }
+    let l: f32 = a.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+    if l >= AMORCE_MAX {
+        return false;
+    }
+    // Les autres bouts carrossables à un nœud
+    let autres = |n: usize| -> usize {
+        r.noeuds[n].aretes.iter().filter(|&&j| j != k).map(|&j| {
+            let b = &r.aretes[j];
+            if !sage_reel::carrossable(b.genre) || b.files.total == 0 || b.points.len() < 2 {
+                0
+            } else {
+                (b.a == n) as usize + (b.b == n) as usize
+            }
+        }).sum()
+    };
+    let (na, nb) = (autres(a.a), autres(a.b));
+    (na == 0 && nb >= 2) || (nb == 0 && na >= 2)
+}
+
 /// Retire de la polyligne `l` la longueur `d` (m) à son bout (`fin`) ou à son début.
 pub fn rogner_bout(l: &mut Vec<[f32; 3]>, fin: bool, d: f32) {
     if d <= 0.0 || l.len() < 2 {
@@ -1540,7 +1570,9 @@ fn est_bus(r: &Reseau, k: usize, i: usize) -> bool {
 
 fn carrossable(r: &Reseau, k: usize) -> bool {
     let a = &r.aretes[k];
-    a.files.total > 0 && a.points.len() >= 2
+    // Une amorce (le sommet d'une épingle vers une passerelle) n'est ni une voie des
+    // fils ni un morceau de carrefour
+    a.files.total > 0 && a.points.len() >= 2 && !est_amorce(r, k)
 }
 
 /// Les bouts carrossables du nœud `n`.
@@ -3243,7 +3275,7 @@ pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Racc
             let b = &r.aretes[j];
             // Seules comptent les voies de notre genre (une voie de service qui s'y
             // greffe ne l'empêche pas)
-            if !sage_reel::carrossable(b.genre) || b.points.len() < 2 || b.files.total == 0 || b.genre != a.genre {
+            if !sage_reel::carrossable(b.genre) || b.points.len() < 2 || b.files.total == 0 || b.genre != a.genre || (j != k && est_amorce(r, j)) {
                 continue;
             }
             for f in [false, true] {

@@ -1513,7 +1513,7 @@ impl Relief3d {
     /// Le réseau est calculé à part la première fois (dans un fil) : en attendant, rien.
     /// Oublie les tracés faits : ils seront redemandés.
     /// Le diagnostic des bords des chaussées : sur les tuiles des tracés, les bouts de
-    /// bords qui ne rejoignent aucun autre bout (à 2 cm près), hors bords des tuiles.
+    /// bords qui ne rejoignent aucun autre bout (à 2 cm près), chacun compté une fois.
     /// Rend (et garde) le bilan : leur nombre, et les premiers avec le nœud le plus
     /// proche.
     pub fn diagnostiquer_bords(&mut self, donnees: &Arc<std::sync::RwLock<Donnees>>) -> String {
@@ -1527,6 +1527,7 @@ impl Relief3d {
             let mut libres: Vec<BoutLibre> = Vec::new();
             let mut total_bouts = 0usize;
             let mut au_site = 0usize;
+            let mut vus: std::collections::HashSet<(i64, i64, i64)> = std::collections::HashSet::new();
             for cle in &cles {
                 let b = boite_tuile(&d, *cle);
                 let marge = 40.0;
@@ -1569,14 +1570,17 @@ impl Relief3d {
                     let n = dx.hypot(dz).max(1e-6);
                     [q[0] + dx / n * 0.1, q[1] + dz / n * 0.1, q[2]]
                 };
-                let interieur = |q: [f32; 3]| q[0] > b[0] + 0.5 && q[0] < b[2] - 0.5 && q[1] > b[1] + 0.5 && q[1] < b[3] - 0.5;
+                // Les bords ne sont pas coupés aux limites des tuiles (les voies sont
+                // prises 40 m au-delà) : un bout dans la tuile est un vrai bout ; compté
+                // une fois même si plusieurs tuiles le contiennent
+                let interieur = |q: [f32; 3]| q[0] >= b[0] && q[0] <= b[2] && q[1] >= b[1] && q[1] <= b[3];
                 // Une grille de 1 m pour chercher les bouts voisins
                 let mut grille: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
                 for (i, q) in bouts.iter().enumerate() {
                     grille.entry((q[0].floor() as i32, q[1].floor() as i32)).or_default().push(i);
                 }
                 for (i, q) in bouts.iter().enumerate() {
-                    if !interieur(*q) {
+                    if !interieur(*q) || !vus.insert(((q[0] * 100.0).round() as i64, (q[1] * 100.0).round() as i64, (q[2] * 10.0).round() as i64)) {
                         continue;
                     }
                     total_bouts += 1;
@@ -1620,7 +1624,7 @@ impl Relief3d {
                     }
                 }
             }
-            let t = format!("{} tuiles · {} bouts de bords · {} non raccordés (hors bords des tuiles) · {} raccordés au site propre", cles.len(), total_bouts, libres.len(), au_site);
+            let t = format!("{} tuiles · {} bouts de bords · {} non raccordés · {} raccordés au site propre", cles.len(), total_bouts, libres.len(), au_site);
             libres.sort_by(|a, b| a.d_voisin.total_cmp(&b.d_voisin));
             (t, libres)
         })();
@@ -1962,7 +1966,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
         for (ka, a) in r.aretes.iter().enumerate() {
             let f = a.files;
             let n = f.total as usize;
-            if n < 2 || a.points.len() < 2 {
+            if n < 2 || a.points.len() < 2 || crate::fils::est_amorce(r, ka) {
                 continue;
             }
             let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));
@@ -2007,7 +2011,7 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
     // sens en cône au milieu (aucun pour une file partagée) ; en rose, réservées au bus
     if axes {
         for (ka, a) in r.aretes.iter().enumerate() {
-            if a.files.total == 0 || a.points.len() < 2 || (!pietons && !sage_reel::carrossable(a.genre)) {
+            if a.files.total == 0 || a.points.len() < 2 || (!pietons && !sage_reel::carrossable(a.genre)) || crate::fils::est_amorce(r, ka) {
                 continue;
             }
             let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));

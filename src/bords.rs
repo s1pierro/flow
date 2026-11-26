@@ -26,6 +26,11 @@ const EPS: f32 = 0.02;
 /// Deux bouts de bords près d'un nœud à moins de tant (m) l'un de l'autre sont confondus.
 const SOUDURE: f32 = 1.0;
 /// Partout, deux bouts à moins de tant (m) l'un de l'autre sont confondus.
+/// Le biseau dans l'alignement : l'écart d'angle admis (degrés), sa longueur par
+/// mètre de demi-largeur perdu, et au moins.
+const BISEAU_ANGLE: f32 = 20.0;
+const BISEAU_PENTE: f32 = 5.0;
+const BISEAU_MIN: f32 = 4.0;
 /// Le dépassement d'une bande au-delà d'un nœud où une autre voie la prolonge (m).
 const RECOUVRE: f32 = 0.5;
 const SOUDURE_FINE: f32 = 0.15;
@@ -309,7 +314,7 @@ impl Bandes {
 pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32>, [Option<crate::fils::Raccord>; 2])) -> (Vec<Poly>, Bandes) {
     let carrossable = |k: usize| {
         let a = &r.aretes[k];
-        sage_reel::carrossable(a.genre) && a.files.total > 0 && a.points.len() >= 2
+        sage_reel::carrossable(a.genre) && a.files.total > 0 && a.points.len() >= 2 && !crate::fils::est_amorce(r, k)
     };
     let est_bus = |k: usize| r.aretes[k].genre == sage_reel::BUS;
     let utiles: Vec<usize> = aretes.iter().copied().filter(|&k| carrossable(k)).collect();
@@ -443,9 +448,85 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
         })
     };
     for &k in &utiles {
-        let (p, ws, raccords) = axes.remove(&k).unwrap();
+        let (mut p, mut ws, raccords) = axes.remove(&k).unwrap();
         if p.len() < 2 || ws.len() != p.len() {
             continue;
+        }
+        // Le biseau dans l'alignement : la voie la plus large, prolongée tout droit par
+        // une plus étroite (sans raccord de files), se rétrécit jusqu'à elle au nœud
+        for (idx, fin) in [(0usize, false), (1usize, true)] {
+            if raccords[idx].is_some() {
+                continue;
+            }
+            let n = if fin { r.aretes[k].b } else { r.aretes[k].a };
+            let Some(d) = direction(k, fin) else { continue };
+            let wk = r.aretes[k].largeur * 0.5;
+            let mut cible: Option<f32> = None;
+            let mut alignees = 0usize;
+            for &j in &r.noeuds[n].aretes {
+                if !carrossable(j) || r.aretes[j].a == r.aretes[j].b {
+                    continue;
+                }
+                for f in [false, true] {
+                    if (j, f) == (k, fin) || (if f { r.aretes[j].b } else { r.aretes[j].a }) != n {
+                        continue;
+                    }
+                    let Some(e) = direction(j, f) else { continue };
+                    let wj = r.aretes[j].largeur * 0.5;
+                    if -(d[0] * e[0] + d[1] * e[1]) >= BISEAU_ANGLE.to_radians().cos() {
+                        alignees += 1;
+                        if wk - wj > 0.3 {
+                            cible = Some(wj);
+                        }
+                    }
+                }
+            }
+            // Une seule voie dans l'alignement (deux : une fourche, ses branches posées
+            // côte à côte sur le tronc, qui garde sa largeur)
+            let Some(wt) = cible.filter(|_| alignees == 1) else { continue };
+            // Le sens de parcours depuis le nœud
+            if !fin {
+                p.reverse();
+                ws.reverse();
+            }
+            let m = p.len();
+            let total: f32 = p.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+            let l = (BISEAU_PENTE * (wk - wt)).clamp(BISEAU_MIN, BISEAU_MIN.max(0.45 * total));
+            // Un point à la longueur du biseau, pour qu'il ne s'étire pas jusqu'au
+            // point suivant du tracé
+            let mut cumul = 0.0f32;
+            for i in (1..m).rev() {
+                let sg = (p[i][0] - p[i - 1][0]).hypot(p[i][1] - p[i - 1][1]);
+                if cumul + sg > l + 0.3 && cumul < l - 0.3 {
+                    let t = (l - cumul) / sg;
+                    let q = [p[i][0] + (p[i - 1][0] - p[i][0]) * t, p[i][1] + (p[i - 1][1] - p[i][1]) * t, p[i][2] + (p[i - 1][2] - p[i][2]) * t];
+                    let wq = ws[i] + (ws[i - 1] - ws[i]) * t;
+                    p.insert(i, q);
+                    ws.insert(i, wq);
+                    break;
+                }
+                cumul += sg;
+                if cumul >= l {
+                    break;
+                }
+            }
+            let m = p.len();
+            let mut s_ = 0.0f32;
+            for i in (0..m).rev() {
+                if i < m - 1 {
+                    s_ += (p[i + 1][0] - p[i][0]).hypot(p[i + 1][1] - p[i][1]);
+                }
+                if s_ >= l {
+                    break;
+                }
+                let u = s_ / l;
+                let lisse = u * u * (3.0 - 2.0 * u);
+                ws[i] = wt + (ws[i] - wt) * lisse;
+            }
+            if !fin {
+                p.reverse();
+                ws.reverse();
+            }
         }
         bandes.noeuds.insert(k, [r.aretes[k].a, r.aretes[k].b]);
         let portail_de = |a: [f32; 3], b: [f32; 3]| -> Option<usize> {
