@@ -1311,7 +1311,7 @@ pub struct Raccord {
 }
 
 /// Une amorce : une petite impasse carrossable (moins de AMORCE_MAX), dont un bout ne
-/// rejoint aucune autre voie carrossable (une passerelle, un chemin) et l'autre un
+/// rejoint qu'une voie non carrossable (une passerelle, un chemin) et l'autre un
 /// carrefour d'au moins deux voies. Elle fait partie du carrefour (le sommet d'une
 /// épingle) : ni fourche, ni chaussée à part.
 pub fn est_amorce(r: &Reseau, k: usize) -> bool {
@@ -1334,8 +1334,11 @@ pub fn est_amorce(r: &Reseau, k: usize) -> bool {
             }
         }).sum()
     };
+    // Une voie non carrossable (passerelle, chemin, escalier) arrive à son bout : une
+    // impasse qui ne mène à rien est une vraie petite rue, pas une amorce
+    let pieton = |n: usize| r.noeuds[n].aretes.iter().any(|&j| j != k && !sage_reel::carrossable(r.aretes[j].genre));
     let (na, nb) = (autres(a.a), autres(a.b));
-    (na == 0 && nb >= 2) || (nb == 0 && na >= 2)
+    (na == 0 && nb >= 2 && pieton(a.a)) || (nb == 0 && na >= 2 && pieton(a.b))
 }
 
 /// Retire de la polyligne `l` la longueur `d` (m) à son bout (`fin`) ou à son début.
@@ -3231,6 +3234,8 @@ pub struct Giration {
     cibles: [f32; 8],
     nc: u8,
     t_max: f32,
+    /// La voie d'en face.
+    pub voie: usize,
 }
 
 fn a_gauche(u: [f32; 2]) -> [f32; 2] {
@@ -3452,7 +3457,7 @@ pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Racc
             *c_ = crate::files::decalage(bj, i);
         }
         let t_max = (0..a.files.total as usize).map(|i| crate::files::decalage(a, i).abs()).fold(0.0f32, f32::max);
-        out[idx] = Some(Giration { o, u1, u2, t_in, rapport, gauche, relais, droit, cibles, nc: nc as u8, t_max });
+        out[idx] = Some(Giration { o, u1, u2, t_in, rapport, gauche, relais, droit, cibles, nc: nc as u8, t_max, voie: j });
     }
     out
 }
