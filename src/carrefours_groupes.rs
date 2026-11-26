@@ -23,7 +23,7 @@ use i_overlay::float::single::SingleFloatOverlay;
 use i_overlay::float::simplify::SimplifyShape;
 use i_overlay::mesh::float::outline::offset::OutlineOffset;
 use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
-use sage_reel::reseau::Reseau;
+use crate::reseau::Reseau;
 use std::collections::{HashMap, HashSet};
 
 /// Un tronçon entre deux nœuds de carrefour plus court que ça (m) les met dans le même

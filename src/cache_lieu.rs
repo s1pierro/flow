@@ -2,7 +2,7 @@
 //! `Flow/cache` : un fichier par lieu et par calcul, reconnu par l'empreinte de ce
 //! dont il dépend et la version de Flow (une nouvelle version refait les calculs).
 
-use sage_reel::reseau::{Arete, Noeud, Origine, Passage, Reseau};
+use crate::reseau::{Arete, Noeud, Origine, Passage, Reseau};
 use sage_reel::{Files, Lieu};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -16,8 +16,29 @@ pub fn regler(flow: Option<PathBuf>) {
     }
 }
 
+/// Le fichier d'un calcul : son nom, la version de Flow et l'empreinte.
 fn fichier(nom: &str, h: u64) -> Option<PathBuf> {
-    DOSSIER.lock().ok()?.as_ref().map(|d| d.join(format!("{nom}-{h:016x}.bin")))
+    DOSSIER.lock().ok()?.as_ref().map(|d| d.join(format!("{nom}-v{}-{h:016x}.bin", env!("CARGO_PKG_VERSION"))))
+}
+
+/// Efface les anciens fichiers du calcul `nom` autres que `f` : tous ceux d'une autre
+/// version de Flow (ils ne resserviront pas), et ceux de cette version laissés depuis
+/// plus d'une semaine (un autre lieu, pas rouvert).
+fn nettoyer(nom: &str, f: &std::path::Path) {
+    let Some(d) = f.parent() else { return };
+    let _ = std::fs::create_dir_all(d);
+    let version = format!("{nom}-v{}-", env!("CARGO_PKG_VERSION"));
+    let Ok(v) = std::fs::read_dir(d) else { return };
+    for e in v.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if !n.starts_with(&format!("{nom}-")) || e.path() == f {
+            continue;
+        }
+        let vieux = e.metadata().is_ok_and(|m| m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|a| a.as_secs() > 7 * 86400)));
+        if !n.starts_with(&version) || vieux {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// FNV-1a sur 64 bits.
@@ -243,17 +264,7 @@ pub fn lire(nom: &str, h: u64) -> Option<Vec<u8>> {
 /// ceux du même nom vieux de plus d'une semaine.
 pub fn garder(nom: &str, h: u64, o: &[u8]) {
     let Some(f) = fichier(nom, h) else { return };
-    if let Some(d) = f.parent() {
-        let _ = std::fs::create_dir_all(d);
-        if let Ok(v) = std::fs::read_dir(d) {
-            for e in v.flatten() {
-                let n = e.file_name().to_string_lossy().into_owned();
-                if n.starts_with(&format!("{nom}-")) && e.path() != f && e.metadata().is_ok_and(|m| m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|a| a.as_secs() > 7 * 86400))) {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
-    }
+    nettoyer(nom, &f);
     let tmp = f.with_extension("tmp");
     if std::fs::write(&tmp, o).is_ok() {
         let _ = std::fs::rename(&tmp, &f);
@@ -270,18 +281,7 @@ pub fn reseau(h: u64) -> Option<Reseau> {
 /// Range le réseau nivelé dans le cache (sans erreur : le cache est facultatif).
 pub fn garder_reseau(h: u64, r: &Reseau) {
     let Some(f) = fichier("reseau", h) else { return };
-    if let Some(d) = f.parent() {
-        let _ = std::fs::create_dir_all(d);
-        // Les anciens réseaux de ce cache (autre lieu ou autre version) : effacés
-        if let Ok(v) = std::fs::read_dir(d) {
-            for e in v.flatten() {
-                let n = e.file_name().to_string_lossy().into_owned();
-                if n.starts_with("reseau-") && e.path() != f && e.metadata().is_ok_and(|m| m.modified().is_ok_and(|t| t.elapsed().is_ok_and(|a| a.as_secs() > 7 * 86400))) {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
-    }
+    nettoyer("reseau", &f);
     let tmp = f.with_extension("tmp");
     if std::fs::write(&tmp, ecrire_reseau(r)).is_ok() {
         let _ = std::fs::rename(&tmp, &f);

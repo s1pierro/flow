@@ -26,7 +26,7 @@
 //! Matérialisation fait ses rubans de toute la chaîne (`chaines_dans`).
 
 use crate::materialisation::{au_sol, code_passage, lisser, plan, rang, Pt};
-use sage_reel::reseau::Reseau;
+use crate::reseau::Reseau;
 use std::collections::HashMap;
 
 /// Au-delà du bord d'une voie, son poids décroît jusqu'à zéro sur cette distance (m).
@@ -421,7 +421,7 @@ fn fourches(r: &Reseau, voies: &mut [Chaine], bouts: &[(usize, usize)], deports:
                 eprintln!("  chaîne {k} ({}) : bout {:?}, {} points, prise {}", if debut { "début" } else { "fin" }, p.map(|q| [q[0], q[1], q[5], q[6]]), voies[k].points.len(), prises.contains(&(k, debut)));
             }
         }
-        if bs.len() != 3 || rs.len() != 3 || rs.iter().any(|&k| r.aretes[k].passage != sage_reel::reseau::Passage::Sol) || bs.iter().any(|b| prises.contains(b)) {
+        if bs.len() != 3 || rs.len() != 3 || rs.iter().any(|&k| r.aretes[k].passage != crate::reseau::Passage::Sol) || bs.iter().any(|b| prises.contains(b)) {
             continue;
         }
         // Les bouts au nœud : leurs points depuis le nœud, leur direction (vers 15 m),

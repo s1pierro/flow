@@ -61,13 +61,30 @@ pub struct Donnees {
     berges: std::sync::OnceLock<Arc<crate::berges::Types>>,
     /// Les contours à plat des remblais des quais, calculés au premier besoin.
     remblais: std::sync::OnceLock<Arc<crate::remblais::Remblais>>,
-    /// Le réseau des voies nivelé (`sage_reel::reseau`), calculé au premier besoin.
-    reseau: std::sync::OnceLock<Arc<sage_reel::reseau::Reseau>>,
+    /// Le réseau des voies nivelé (`crate::reseau`), calculé au premier besoin.
+    reseau: std::sync::OnceLock<Arc<crate::reseau::Reseau>>,
     /// Le champ de hauteur de la voirie au sol (`champ_voirie`), fait à la demande.
     champ_voirie: std::sync::OnceLock<Arc<crate::champ_voirie::Champ>>,
 }
 
 /// La boîte (x0, z0, x1, z1) d'une suite de points.
+/// Le calcul du réseau nivelé en cours, pour la barre d'état : son étape (et, pendant
+/// le nivellement, son avancement) ; `None` s'il ne tourne pas.
+pub fn etat_reseau() -> Option<String> {
+    let v = crate::suivi::en_cours();
+    let c = v.iter().filter(|(c, _)| c.chemin.starts_with("réseau nivelé (calcul)")).max_by_key(|(c, _)| c.chemin.len())?;
+    let etape = c.0.chemin.rsplit(" › ").next().unwrap_or("");
+    let t = c.1;
+    Some(if etape.starts_with("nivellement") {
+        let a = crate::reseau::AVANCEMENT.load(Ordering::Relaxed);
+        format!("réseau : nivellement {} % · {t:.0} s", a / 10)
+    } else if etape.starts_with("réseau nivelé") {
+        format!("réseau : calcul · {t:.0} s")
+    } else {
+        format!("réseau : {etape} · {t:.0} s")
+    })
+}
+
 pub fn boite<'a>(pts: impl Iterator<Item = &'a [f32]>) -> [f32; 4] {
     let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     for p in pts {
@@ -267,7 +284,7 @@ impl Donnees {
             .clone()
     }
 
-    pub fn reseau(&self) -> Arc<sage_reel::reseau::Reseau> {
+    pub fn reseau(&self) -> Arc<crate::reseau::Reseau> {
         self.reseau.get_or_init(|| {
             // Dans le cache, s'il y est pour ce lieu et cette version
             let h = {
@@ -283,8 +300,8 @@ impl Donnees {
                 t.detail("absent");
             }
             let mut t = crate::suivi::tache("réseau nivelé (calcul)");
-            // `sage_reel::reseau::nivele`, étape par étape (pour le suivi)
-            use sage_reel::reseau as rs;
+            // `crate::reseau::nivele`, étape par étape (pour le suivi)
+            use crate::reseau as rs;
             let mut r = {
                 let _t = crate::suivi::tache("graphe");
                 rs::reseau(&self.lieu)
@@ -317,7 +334,7 @@ impl Donnees {
     }
 
     /// Le réseau nivelé s'il est déjà calculé (sans attendre).
-    pub fn reseau_pret(&self) -> Option<Arc<sage_reel::reseau::Reseau>> {
+    pub fn reseau_pret(&self) -> Option<Arc<crate::reseau::Reseau>> {
         self.reseau.get().cloned()
     }
 
@@ -1464,8 +1481,8 @@ const COUVERTURE_MIN: f32 = 2.5;
 
 /// Met au sol les tunnels (d'un portail à l'autre : les arêtes en tunnel liées par leurs
 /// nœuds) dont la couverture n'atteint nulle part `COUVERTURE_MIN` ; rend leur nombre.
-pub fn au_sol_les_tunnels_affleurants(r: &mut sage_reel::reseau::Reseau, l: &Lieu) -> usize {
-    use sage_reel::reseau::Passage;
+pub fn au_sol_les_tunnels_affleurants(r: &mut crate::reseau::Reseau, l: &Lieu) -> usize {
+    use crate::reseau::Passage;
     let n = r.aretes.len();
     let mut chef: Vec<usize> = (0..n).collect();
     fn racine(c: &mut [usize], mut i: usize) -> usize {

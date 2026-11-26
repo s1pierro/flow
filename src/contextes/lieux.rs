@@ -2004,6 +2004,32 @@ impl Lieux {
                                 }
                             }
                         }
+                        cx.section(&mut b, "Dénivelé des voies");
+                        cx.paragraph(&mut b, "Les cassures de pente des voies carrossables, sur tout le réseau nivelé : là où la pente mesurée sur 2,5 m avant un point et celle d'après diffèrent de plus de 8 points (le long d'une voie, et à travers un nœud où deux voies se prolongent). En magenta un creux (la pente augmente), en jaune une bosse. Un tremplin donne un creux et une bosse proches.");
+                        if cx.button(&mut b, sub_id(base, 691), "Diagnostiquer le dénivelé") {
+                            if let Some(r) = self.trois_d.as_mut() {
+                                r.diagnostiquer_denivele(&carte.donnees);
+                            }
+                        }
+                        if let Some(r) = self.trois_d.as_mut() {
+                            for l in r.deniv_diag.lines() {
+                                cx.paragraph(&mut b, l);
+                            }
+                            let mut aller = None;
+                            for (i, c) in r.cassures.iter().take(40).enumerate() {
+                                let texte = format!("Nœud {} · {:+.0} % puis {:+.0} %", c.noeud, c.avant * 100.0, c.apres * 100.0);
+                                if cx.row(&mut b, sub_id(sub_id(base, 692), i), &texte, None, false) {
+                                    aller = Some((c.noeud, c.p));
+                                }
+                                cx.paragraph(&mut b, c.texte().trim_start());
+                            }
+                            if r.cassures.len() > 40 {
+                                cx.paragraph(&mut b, &format!("… et {} autres", r.cassures.len() - 40));
+                            }
+                            if let Some((n, p)) = aller {
+                                r.aller_bout(n, p);
+                            }
+                        }
                         let avant_brut = s.brut;
                         cx.toggle(&mut b, sub_id(base, 670), "Tracé brut des voies", &mut s.brut);
                         let avant_pietons = s.pietons;
@@ -2933,12 +2959,14 @@ impl Lieux {
             (_, Some(carte)) if self.trois_d.is_some() => {
                 let r = self.trois_d.as_ref().unwrap();
                 let attente = if r.en_attente || carte.en_attente() { " · dessin…" } else { "" };
-                format!("3D · {} tuiles · {} de bâti{attente}", r.dessinees, r.bati_dessinees)
+                let reseau = crate::carte::etat_reseau().map(|e| format!(" · {e}")).unwrap_or_default();
+                format!("3D · {} tuiles · {} de bâti{attente}{reseau}", r.dessinees, r.bati_dessinees)
             }
             (_, Some(carte)) => {
                 let z = self.vue.map_or(0, |v| carte.niveau(v.echelle));
                 let attente = if carte.en_attente() { " · dessin…" } else { "" };
-                format!("{} · niveau {z}{attente}", OUTILS[self.outil])
+                let reseau = crate::carte::etat_reseau().map(|e| format!(" · {e}")).unwrap_or_default();
+                format!("{} · niveau {z}{attente}{reseau}", OUTILS[self.outil])
             }
             _ => String::new(),
         };
@@ -3048,6 +3076,10 @@ impl Contexte for Lieux {
                     (Some("bords"), _) => {
                         let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
                         return Some(Ok(r.diagnostiquer_bords(&carte.donnees)));
+                    }
+                    (Some("denivele"), _) => {
+                        let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
+                        return Some(Ok(r.diagnostiquer_denivele(&carte.donnees)));
                     }
                     (Some("lissage"), _) => {
                         self.sur.lissage = m.get(2).is_none_or(|v| v != "non");
@@ -3289,7 +3321,7 @@ impl Contexte for Lieux {
     }
 
     fn anime(&self, _c: &Commun) -> bool {
-        crate::generer_carte::en_cours() || (self.maquette3d && self.suivi3d && self.trois_d.is_some() && crate::suivi::occupe()) || (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
+        crate::generer_carte::en_cours() || (self.carte.is_some() && crate::carte::etat_reseau().is_some()) || (self.maquette3d && self.suivi3d && self.trois_d.is_some() && crate::suivi::occupe()) || (self.maquette3d && self.trois_d.is_some() && crate::placage::en_cours()) || self.carte.as_ref().is_some_and(|c| c.en_attente()) || self.trois_d.as_ref().is_some_and(|r| r.en_attente) || self.generation.is_some() || self.chargement.is_some() || self.enregistrement.is_some() || self.cherche.is_some() || self.plan.as_ref().is_some_and(|p| p.en_attente())
     }
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {

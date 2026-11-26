@@ -17,7 +17,7 @@
 
 use crate::champ_voirie::Chaine;
 use crate::materialisation::{au_sol, plan, Plan, Pt};
-use sage_reel::reseau::{Passage, Reseau};
+use crate::reseau::{Passage, Reseau};
 use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 

@@ -3,7 +3,7 @@
 //! Choisit près de (x, z) un carrefour de chaque sorte (T, croix, Y aigu, groupe de
 //! nœuds proches), matérialise sa tuile et compte ses triangles près du nœud.
 use flow::carte::Donnees;
-use sage_reel::reseau::Passage;
+use flow::reseau::Passage;
 
 const R: f32 = 12.0;
 

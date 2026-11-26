@@ -1,9 +1,9 @@
 //! L'origine des nœuds du réseau, telle que la construction l'a tracée
-//! (`sage_reel::reseau::Origine`) : un point des données (les tracés du lieu : OSM,
+//! (`crate::reseau::Origine`) : un point des données (les tracés du lieu : OSM,
 //! coupé aux ponts et aux tunnels, ou retouché), le bord de la carte, ou un point que
 //! le réseau a ajouté (raccord d'un bout libre, croisement à niveau).
 
-use sage_reel::reseau::{Origine, Reseau};
+use crate::reseau::{Origine, Reseau};
 
 /// Le nœud `n` est un point des données téléchargées.
 pub fn osm(r: &Reseau, n: usize) -> bool {
@@ -25,7 +25,7 @@ pub fn texte(r: &Reseau, n: usize) -> String {
             }
         }
         Origine::Bord => "Origine : bord de la carte (voie coupée)".into(),
-        Origine::Raccord => format!("Origine : réseau, bout libre raccordé à moins de {:.0} m (point ajouté)", sage_reel::reseau::RACCORD),
+        Origine::Raccord => format!("Origine : réseau, bout libre raccordé à moins de {:.0} m (point ajouté)", crate::reseau::RACCORD),
         Origine::RaccordSommet => "Origine : réseau, bout libre raccordé sur un point existant".into(),
         Origine::Croisement => "Origine : réseau, croisement de deux voies sans point commun (point ajouté)".into(),
     }

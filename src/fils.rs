@@ -16,13 +16,13 @@
 //! droite, de celle de gauche pour tourner à gauche. Les files d'une voie qui ne fait que
 //! tourner (une rue perpendiculaire) s'arrêtent au bord des autres.
 //!
-//! Le réseau (`sage_reel::reseau::Reseau`) est seulement lu : ni lui, ni ses files, ni
+//! Le réseau (`crate::reseau::Reseau`) est seulement lu : ni lui, ni ses files, ni
 //! la chaussée ne changent. Les axes sont ceux du réseau, sans les déports des fourches.
 //! Les points sont ceux du réseau : x, z du jeu, et la hauteur.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use sage_reel::reseau::Reseau;
+use crate::reseau::Reseau;
 use std::collections::HashMap;
 
 /// Au plus cette part de la longueur d'une arête reculée ou fondue à chaque bout.
@@ -512,7 +512,7 @@ pub fn regler_raccourcis(tolerance: f32) {
 
 /// Le sens d'un bout de voie à sens unique : vrai si la circulation entre au nœud
 /// (rien pour une voie à double sens ou sans file).
-fn entrant(a: &sage_reel::reseau::Arete, fin: bool) -> Option<bool> {
+fn entrant(a: &crate::reseau::Arete, fin: bool) -> Option<bool> {
     let f = a.files;
     if f.total == 0 {
         return None;
@@ -579,7 +579,7 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         [(s_[0] - o[0]) / l, (s_[1] - o[1]) / l]
     };
     // Le sens d'une file du tronc au nœud : vrai si elle y entre (rien : partagée)
-    let file_entre = |t: &sage_reel::reseau::Arete, tf: bool, i: usize| match crate::files::sens(t, i) {
+    let file_entre = |t: &crate::reseau::Arete, tf: bool, i: usize| match crate::files::sens(t, i) {
         crate::files::Sens::Avant => Some(tf),
         crate::files::Sens::Arriere => Some(!tf),
         crate::files::Sens::Partagee => None,
@@ -1081,12 +1081,12 @@ fn raccourcir_double(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tol
         return None;
     }
     // Le sens de chaque file au nœud : vrai si elle y entre
-    let sens = |b: &sage_reel::reseau::Arete, f: bool, i: usize| match crate::files::sens(b, i) {
+    let sens = |b: &crate::reseau::Arete, f: bool, i: usize| match crate::files::sens(b, i) {
         crate::files::Sens::Avant => Some(f),
         crate::files::Sens::Arriere => Some(!f),
         crate::files::Sens::Partagee => None,
     };
-    let compte = |b: &sage_reel::reseau::Arete, f: bool| -> Option<(usize, usize)> {
+    let compte = |b: &crate::reseau::Arete, f: bool| -> Option<(usize, usize)> {
         let (mut e_, mut s_) = (0, 0);
         for i in 0..b.files.total as usize {
             if sens(b, f, i)? {
@@ -3012,7 +3012,7 @@ fn fil(r: &Reseau, k: usize, i: usize, fontes: &Fontes, reculs: &Reculs, sortie:
 /// Une rampe ou un ouvrage : la voie est en tunnel ou sur un pont, ou elle touche à
 /// l'un de ses bouts une voie qui l'est (une rampe d'accès, une tête de pont).
 fn rampe(r: &Reseau, k: usize) -> bool {
-    use sage_reel::reseau::Passage;
+    use crate::reseau::Passage;
     let a = &r.aretes[k];
     a.passage != Passage::Sol || [a.a, a.b].iter().any(|&n| r.noeuds[n].aretes.iter().any(|&j| j != k && r.aretes[j].passage != Passage::Sol))
 }
@@ -3062,7 +3062,7 @@ pub fn dans(r: &Reseau, b: [f32; 4]) -> Vec<Fil> {
     // Les voies qui touchent la boîte, puis leurs voisines (celles des mêmes nœuds) :
     // le lissage d'un fil dépend de ses voisins, la même voie se lisse alors de la même
     // façon dans chaque tuile (pas de rupture au bord)
-    let touche = |a: &sage_reel::reseau::Arete| {
+    let touche = |a: &crate::reseau::Arete| {
         let w = a.largeur * 0.5;
         let (x0, z0, x1, z1) = a.points.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |m, p| (m.0.min(p[0]), m.1.min(p[1]), m.2.max(p[0]), m.3.max(p[1])));
         !(x1 + w < b[0] || x0 - w > b[2] || z1 + w < b[1] || z0 - w > b[3])
@@ -3255,7 +3255,7 @@ pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Racc
         [v[0] / l, v[1] / l]
     };
     // Les files d'un bout qui entrent au nœud, et celles qui en sortent
-    let sens = |b: &sage_reel::reseau::Arete, f: bool| {
+    let sens = |b: &crate::reseau::Arete, f: bool| {
         let (mut e, mut s_) = (0usize, 0usize);
         for i in 0..b.files.total as usize {
             match crate::files::sens(b, i) {

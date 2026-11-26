@@ -8,7 +8,7 @@
 //!
 
 use crate::carte::{boite_tuile, Cle, Donnees};
-use sage_reel::reseau::{Passage, Reseau};
+use crate::reseau::{Passage, Reseau};
 
 /// Des triangles aux sommets de `relief3d::SOMMET` flottants (position, normale,
 /// couleur).
@@ -95,7 +95,7 @@ pub const REMBLAIS: [([f32; 3], &str); sage_reel::GENRES as usize] = [
 
 /// Les suites de points (x, z, h) des arêtes au sol coupées à la boîte `b` : un
 /// segment coupé à l'entrée ou à la sortie commence ou finit une suite.
-fn suites(a: &sage_reel::reseau::Arete, b: [f32; 4]) -> Vec<Vec<[f32; 3]>> {
+fn suites(a: &crate::reseau::Arete, b: [f32; 4]) -> Vec<Vec<[f32; 3]>> {
     let mut v: Vec<Vec<[f32; 3]>> = Vec::new();
     let mut cur: Vec<[f32; 3]> = Vec::new();
     for w in a.points.windows(2) {

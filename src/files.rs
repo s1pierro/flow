@@ -12,7 +12,7 @@
 //! C'est le calcul des lignes des files de la surimpression, gardé : les lignes en sont
 //! tirées (`separations`), et le reste du programme peut lire les files elles-mêmes.
 
-use sage_reel::reseau::Arete;
+use crate::reseau::Arete;
 
 /// Le sens d'une file par rapport au tracé de son arête.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

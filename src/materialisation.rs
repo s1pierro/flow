@@ -31,7 +31,7 @@ use crate::maquette as mq;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use crate::carrefours::{Bouche, Carrefour};
-use sage_reel::reseau::{Passage, Reseau};
+use crate::reseau::{Passage, Reseau};
 
 /// Des volumes disjoints en une seule forme (plusieurs coques).
 #[allow(dead_code)]
@@ -248,7 +248,7 @@ pub(crate) fn rang(genre: u8) -> u8 {
 
 /// D'un nœud le long d'une arête : la direction (x, z) vers le point à `PENTE_SUR`
 /// mètres (ou le bout), sa hauteur et la distance parcourue.
-fn depuis_noeud(a: &sage_reel::reseau::Arete, n: usize) -> Option<([f32; 2], f32, f32)> {
+fn depuis_noeud(a: &crate::reseau::Arete, n: usize) -> Option<([f32; 2], f32, f32)> {
     let pts: Vec<[f32; 3]> = if a.a == n { a.points.clone() } else { a.points.iter().rev().copied().collect() };
     let o = *pts.first()?;
     let mut s = 0.0;
@@ -257,7 +257,7 @@ fn depuis_noeud(a: &sage_reel::reseau::Arete, n: usize) -> Option<([f32; 2], f32
         let l = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
         if s + l >= PENTE_SUR && l > 1e-6 {
             let t = (PENTE_SUR - s) / l;
-            q = sage_reel::reseau::entre(w[0], w[1], t);
+            q = crate::reseau::entre(w[0], w[1], t);
             s = PENTE_SUR;
             break;
         }
@@ -277,7 +277,7 @@ fn depuis_noeud(a: &sage_reel::reseau::Arete, n: usize) -> Option<([f32; 2], f32
 /// était à plat : des paliers, en escalier, le long des rues en pente).
 pub(crate) fn plan(r: &Reseau, n: usize) -> Option<Plan> {
     let noeud = &r.noeuds[n];
-    let routes: Vec<(&sage_reel::reseau::Arete, Option<([f32; 2], f32, f32)>)> = noeud.aretes.iter().map(|&k| &r.aretes[k]).filter(|a| a.genre != sage_reel::PIETONNE).map(|a| (a, depuis_noeud(a, n))).collect();
+    let routes: Vec<(&crate::reseau::Arete, Option<([f32; 2], f32, f32)>)> = noeud.aretes.iter().map(|&k| &r.aretes[k]).filter(|a| a.genre != sage_reel::PIETONNE).map(|a| (a, depuis_noeud(a, n))).collect();
     if routes.len() < 2 {
         return None;
     }

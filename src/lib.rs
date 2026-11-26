@@ -23,6 +23,7 @@ pub mod remblais;
 pub mod materialisation;
 pub mod remblais_voies;
 pub mod relief3d;
+pub mod reseau;
 pub mod bati_ferme;
 pub mod generer_carte;
 pub mod charge;

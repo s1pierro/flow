@@ -1,11 +1,11 @@
 //! La chaussée en volume dans la maquette, posée sur le réseau nivelé du lieu
-//! (`sage_reel::reseau`, `Donnees::reseau`). Chaque arête au sol devient un ruban : le dessus à la hauteur
+//! (`crate::reseau`, `Donnees::reseau`). Chaque arête au sol devient un ruban : le dessus à la hauteur
 //! du profil, épais de `EPAISSEUR` ; au-dessus, le terrain est dégagé (la voie ne
 //! s'enfouit pas). Les ponts et les tunnels viendront ensuite.
 
 use crate::booleens::{Forme, Op};
 use crate::maquette as mq;
-use sage_reel::reseau::{Arete, Passage, Reseau};
+use crate::reseau::{Arete, Passage, Reseau};
 
 /// L'épaisseur de la chaussée (m).
 pub const EPAISSEUR: f32 = 0.5;

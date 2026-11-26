@@ -136,6 +136,10 @@ pub struct Relief3d {
     pub bords_diag: String,
     pub bords_libres: Vec<BoutLibre>,
     bords_rev: u64,
+    /// Le dernier diagnostic du dénivelé (`diagnostiquer_denivele`) : son bilan et ses
+    /// cassures de pente (des sphères magenta).
+    pub deniv_diag: String,
+    pub cassures: Vec<Cassure>,
     /// Les nœuds montrés en sphères, et le maillage des sphères (avec sa clé).
     noeuds_montres: Vec<usize>,
     spheres: Option<(u64, Maillage3d)>,
@@ -300,7 +304,7 @@ impl Relief3d {
         let (cx, cz) = (((e[0] + e[2]) / 2.0) as f32, ((e[1] + e[3]) / 2.0) as f32);
         let cote = (e[2] - e[0]).max(e[3] - e[1]) as f32;
         let camera = Camera { lacet: 0.0, tangage: 0.55, distance: cote * 0.7, cible: [cx, d.lieu.relief(cx as f64, cz as f64) as f32, cz] };
-        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), noeud_choisi: None, bords_diag: String::new(), bords_libres: Vec::new(), bords_rev: 0, noeuds_montres: Vec::new(), spheres: None, faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None, bati_mat: false, bati_mat_faits: HashMap::new(), bati_mat_bilan: (0, 0, 0, 0, 0), mur: None }
+        Relief3d { camera, morceaux: HashMap::new(), batis: HashMap::new(), image: 0, num: INSTANCES.fetch_add(1, Ordering::Relaxed), revision: 0, dessinees: 0, bati_dessinees: 0, en_attente: false, generation: None, blanc: false, defonce: false, maquette: false, fabrique: None, tuiles_maquette: HashMap::new(), selection: Default::default(), seules: false, placage: None, accent: [0.2, 0.4, 0.9], montrees: Vec::new(), traces: HashMap::new(), traces_de: 0, reseau_lance: false, traces_tuiles: TRACES_TUILES, traces_bilan: String::new(), noeud_choisi: None, bords_diag: String::new(), bords_libres: Vec::new(), bords_rev: 0, deniv_diag: String::new(), cassures: Vec::new(), noeuds_montres: Vec::new(), spheres: None, faces: HashMap::new(), sur: Surimpression::default(), bornes: Default::default(), bornes_de: 0, fabrique_materialise: false, zone: None, zone_cles: None, zone_etat: None, zone_debut: None, bati_mat: false, bati_mat_faits: HashMap::new(), bati_mat_bilan: (0, 0, 0, 0, 0), mur: None }
     }
 
     /// La projection : proche et lointain selon la distance, assez loin pour l'horizon.
@@ -856,6 +860,28 @@ impl Relief3d {
         // rouges
         for l in &self.bords_libres {
             let (p, rayon, c) = (l.p, SPHERE_RAYON * 0.6, [0.95f32, 0.1, 0.1]);
+            let base = (s.len() / 9) as u32;
+            for a in 0..=anneaux {
+                let t = std::f32::consts::PI * a as f32 / anneaux as f32;
+                for q in 0..=quartiers {
+                    let f = std::f32::consts::TAU * q as f32 / quartiers as f32;
+                    let nrm = [t.sin() * f.cos(), t.cos(), t.sin() * f.sin()];
+                    s.extend_from_slice(&[p[0] + nrm[0] * rayon, p[2] + TRACES_DESSUS + nrm[1] * rayon, p[1] + nrm[2] * rayon, nrm[0], nrm[1], nrm[2], c[0], c[1], c[2]]);
+                }
+            }
+            let l_ = quartiers as u32 + 1;
+            for a in 0..anneaux as u32 {
+                for q in 0..quartiers as u32 {
+                    let (i0, i1) = (base + a * l_ + q, base + (a + 1) * l_ + q);
+                    ix.extend_from_slice(&[i0, i1, i0 + 1, i0 + 1, i1, i1 + 1]);
+                }
+            }
+        }
+        // Les cassures de pente du dernier diagnostic du dénivelé : magenta (creux) ou
+        // jaune (bosse)
+        for c_ in &self.cassures {
+            let (p, rayon) = (c_.p, SPHERE_RAYON * 0.6);
+            let c = if c_.apres > c_.avant { [0.9f32, 0.1, 0.85] } else { [0.95f32, 0.85, 0.1] };
             let base = (s.len() / 9) as u32;
             for a in 0..=anneaux {
                 let t = std::f32::consts::PI * a as f32 / anneaux as f32;
@@ -1435,6 +1461,46 @@ pub struct BoutLibre {
     pub cause: String,
 }
 
+/// Une cassure de pente le long d'une voie (diagnostic du dénivelé) : la pente change
+/// brutalement en ce point (sur DENIV_FENETRE mètres de part et d'autre).
+#[derive(Clone, Debug)]
+pub struct Cassure {
+    /// x, z, hauteur.
+    pub p: [f32; 3],
+    /// La voie (ou, à un nœud, les deux voies qui s'y prolongent).
+    pub aretes: (usize, Option<usize>),
+    /// Le nœud le plus proche et sa distance (m).
+    pub noeud: usize,
+    pub d_noeud: f32,
+    /// Les pentes avant et après (dans le sens de parcours), en fraction (0,1 = 10 %).
+    pub avant: f32,
+    pub apres: f32,
+}
+
+impl Cassure {
+    /// Une ligne : le nœud, la voie, les pentes avant et après.
+    pub fn texte(&self) -> String {
+        let voie = match self.aretes {
+            (k, None) => format!("a{k}"),
+            (k, Some(j)) => format!("a{k} → a{j}"),
+        };
+        let forme = if self.apres > self.avant { "creux" } else { "bosse" };
+        format!("\nnœud {} à {:.1} m · {voie} · {forme} : {:+.0} % puis {:+.0} % · x {:.1} z {:.1} h {:.1}", self.noeud, self.d_noeud, self.avant * 100.0, self.apres * 100.0, self.p[0], self.p[1], self.p[2]).replace('.', ",")
+    }
+
+    /// Le changement de pente (en points de pourcentage, fraction).
+    pub fn ecart(&self) -> f32 {
+        (self.apres - self.avant).abs()
+    }
+}
+
+/// Le diagnostic du dénivelé : la longueur sur laquelle une pente est mesurée de part et
+/// d'autre d'un point (m), le changement de pente à partir duquel il est signalé
+/// (fraction), et la distance en deçà de laquelle deux cassures sont confondues.
+pub const DENIV_FENETRE: f32 = 2.5;
+pub const DENIV_SEUIL: f32 = 0.08;
+const DENIV_ECART: f32 = 4.0;
+
 /// Les réglages de la surimpression sur la maquette : les tracés du réseau et les
 /// remblais des voies, chacun montré ou non, avec la distance de la caméra
 /// à sa cible en deçà de laquelle il paraît (m) et son rayon autour de la cible (en
@@ -1639,6 +1705,119 @@ impl Relief3d {
             t.push_str(&format!(" · {}", l.cause));
         }
         self.bords_diag = bilan;
+        t
+    }
+
+    /// Le diagnostic du dénivelé des voies carrossables, sur tout le réseau nivelé : les
+    /// points où la pente change brutalement (plus de DENIV_SEUIL entre la pente mesurée
+    /// sur DENIV_FENETRE mètres avant et celle d'après), le long de chaque voie et à
+    /// travers les nœuds où deux voies se prolongent. Un tremplin donne deux cassures
+    /// proches, un creux puis une bosse. Rend (et garde) le bilan et les pires.
+    pub fn diagnostiquer_denivele(&mut self, donnees: &Arc<std::sync::RwLock<Donnees>>) -> String {
+        let (bilan, cassures) = (|| -> (String, Vec<Cassure>) {
+            let Ok(d) = donnees.read() else { return ("données indisponibles".into(), Vec::new()) };
+            let Some(r) = d.reseau_pret() else { return ("réseau pas encore calculé".into(), Vec::new()) };
+            let carrossable = |k: usize| {
+                let a = &r.aretes[k];
+                sage_reel::carrossable(a.genre) && a.files.total > 0 && a.points.len() >= 2
+            };
+            let plat = |p: [f32; 3], q: [f32; 3]| (q[0] - p[0]).hypot(q[1] - p[1]);
+            // La pente moyenne en partant du point i de q, vers l'avant (pas +1) ou
+            // l'arrière (-1), sur DENIV_FENETRE mètres (ou jusqu'au bout) ; et la longueur
+            let pente = |q: &[[f32; 3]], i: usize, pas: isize| -> Option<f32> {
+                let mut j = i as isize;
+                let mut l = 0.0f32;
+                while l < DENIV_FENETRE {
+                    let k = j + pas;
+                    if k < 0 || k as usize >= q.len() {
+                        break;
+                    }
+                    l += plat(q[j as usize], q[k as usize]);
+                    j = k;
+                }
+                (l >= 0.5).then(|| (q[j as usize][2] - q[i][2]) / l)
+            };
+            let mut v: Vec<Cassure> = Vec::new();
+            let pres = |n: usize, p: [f32; 3]| plat(r.noeuds[n].p, p);
+            let mut voies = 0usize;
+            for k in (0..r.aretes.len()).filter(|&k| carrossable(k)) {
+                voies += 1;
+                let a = &r.aretes[k];
+                let q = &a.points;
+                // Les cassures de cette voie, puis seule la plus forte à DENIV_ECART près
+                let mut ici: Vec<(usize, f32, f32)> = Vec::new();
+                for i in 1..q.len() - 1 {
+                    let (Some(av), Some(ap)) = (pente(q, i, -1), pente(q, i, 1)) else { continue };
+                    // av est mesurée vers l'arrière : la pente dans le sens de parcours
+                    // est son opposée
+                    let av = -av;
+                    if (ap - av).abs() >= DENIV_SEUIL {
+                        ici.push((i, av, ap));
+                    }
+                }
+                let mut gardes: Vec<(usize, f32, f32)> = Vec::new();
+                for c in ici {
+                    if let Some(g) = gardes.iter_mut().find(|g| plat(q[g.0], q[c.0]) < DENIV_ECART) {
+                        if (c.2 - c.1).abs() > (g.2 - g.1).abs() {
+                            *g = c;
+                        }
+                    } else {
+                        gardes.push(c);
+                    }
+                }
+                for (i, av, ap) in gardes {
+                    let p = q[i];
+                    let (n, dn) = if pres(a.a, p) <= pres(a.b, p) { (a.a, pres(a.a, p)) } else { (a.b, pres(a.b, p)) };
+                    v.push(Cassure { p, aretes: (k, None), noeud: n, d_noeud: dn, avant: av, apres: ap });
+                }
+            }
+            // À travers les nœuds : deux voies qui se prolongent (à moins de 30°)
+            for (n, nd) in r.noeuds.iter().enumerate() {
+                let mut bouts: Vec<(usize, Vec<[f32; 3]>)> = Vec::new();
+                for &k in nd.aretes.iter().filter(|&&k| carrossable(k)) {
+                    let a = &r.aretes[k];
+                    if a.a == n {
+                        bouts.push((k, a.points.clone()));
+                    }
+                    if a.b == n {
+                        bouts.push((k, a.points.iter().rev().copied().collect()));
+                    }
+                }
+                let dir = |q: &[[f32; 3]]| {
+                    let s = q.iter().find(|p| plat(q[0], **p) >= 5.0).unwrap_or(&q[q.len() - 1]);
+                    let (dx, dz) = (s[0] - q[0][0], s[1] - q[0][1]);
+                    let l = dx.hypot(dz).max(1e-6);
+                    [dx / l, dz / l]
+                };
+                for i in 0..bouts.len() {
+                    for j in i + 1..bouts.len() {
+                        let (di, dj) = (dir(&bouts[i].1), dir(&bouts[j].1));
+                        if -(di[0] * dj[0] + di[1] * dj[1]) < 30f32.to_radians().cos() {
+                            continue;
+                        }
+                        let (Some(gi), Some(gj)) = (pente(&bouts[i].1, 0, 1), pente(&bouts[j].1, 0, 1)) else { continue };
+                        // En arrivant par i : la pente est -gi ; en repartant par j : gj
+                        let (av, ap) = (-gi, gj);
+                        if (ap - av).abs() >= DENIV_SEUIL {
+                            v.push(Cassure { p: nd.p, aretes: (bouts[i].0, Some(bouts[j].0)), noeud: n, d_noeud: 0.0, avant: av, apres: ap });
+                        }
+                    }
+                }
+            }
+            v.sort_by(|a, b| b.ecart().total_cmp(&a.ecart()));
+            let t = format!("{voies} voies · {} cassures de pente de plus de {:.0} points", v.len(), DENIV_SEUIL * 100.0);
+            (t, v)
+        })();
+        self.cassures = cassures;
+        self.bords_rev += 1;
+        let tranche = |a: f32, b: f32| self.cassures.iter().filter(|c| c.ecart() >= a && c.ecart() < b).count();
+        let bilan = format!("{bilan}
+de 8 à 15 points : {} · de 15 à 30 : {} · au-delà de 30 : {}", tranche(0.0, 0.15), tranche(0.15, 0.30), tranche(0.30, f32::MAX));
+        let mut t = bilan.clone();
+        for c in self.cassures.iter().take(20) {
+            t.push_str(&c.texte());
+        }
+        self.deniv_diag = bilan;
         t
     }
 
@@ -1892,14 +2071,14 @@ fn cone(s: &mut Vec<f32>, ix: &mut Vec<u32>, m: [f32; 3], d: [f32; 2], poser: &d
 }
 
 /// Un nœud où arrive au moins une voie carrossable.
-fn noeud_carrossable(r: &sage_reel::reseau::Reseau, n: &sage_reel::reseau::Noeud) -> bool {
+fn noeud_carrossable(r: &crate::reseau::Reseau, n: &crate::reseau::Noeud) -> bool {
     n.aretes.iter().any(|&k| sage_reel::carrossable(r.aretes[k].genre))
 }
 
 /// Les tracés du réseau `r` dans la boîte `b` : un maillage de traits par passage, et
 /// les nœuds en croix.
-fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, axes: bool, bords: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
-    use sage_reel::reseau::Passage;
+fn traces_reseau(r: &crate::reseau::Reseau, deports: &HashMap<usize, Vec<crate::champ_voirie::Deport>>, b: [f32; 4], cle: Cle, num: u64, revision: u64, files: bool, fils: bool, axes: bool, bords: bool, pietons: bool, brut: bool) -> Vec<(Maillage3d, [f32; 3], f32)> {
+    use crate::reseau::Passage;
     // Les points d'une arête, déportés près d'une fourche (comme la chaussée)
     let points = |k: usize| -> std::borrow::Cow<'_, [[f32; 3]]> {
         let a = &r.aretes[k];

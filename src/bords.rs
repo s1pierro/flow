@@ -17,7 +17,7 @@
 //! bus ; les voies qui les traversent s'arrêtent à leur bord et s'y referment. Les
 //! liens aux nœuds se font entre voies de même sorte.
 
-use sage_reel::reseau::{Passage, Reseau};
+use crate::reseau::{Passage, Reseau};
 use std::collections::HashMap;
 
 /// Les bandes sont rétrécies d'autant (m) : un bord posé sur le bord d'une autre bande
