@@ -247,6 +247,8 @@ pub struct Lieux {
     selection: crate::selection::Selection,
     resume: Option<(std::collections::BTreeSet<crate::carte::Cle>, u64, crate::selection::Resume)>,
     orbite: Option<(f32, f32)>,
+    /// L'encart du nœud choisi (3D), à l'image d'avant : le toucher le ferme.
+    encart: Option<Rect>,
     /// Le plan où choisir la zone à générer, quand il est ouvert ; la recherche d'un
     /// nom (Nominatim), en cours ou faite.
     plan: Option<crate::plan::Plan>,
@@ -334,6 +336,7 @@ impl Default for Lieux {
             selection: Default::default(),
             resume: None,
             orbite: None,
+            encart: None,
             plan: None,
             recherche: Edition::default(),
             cherche: None,
@@ -1395,6 +1398,11 @@ impl Lieux {
                 // l'en retire
                 // La sphère d'un nœud du réseau : le choisit (ou le laisse, touchée de
                 // nouveau)
+                // L'encart du nœud choisi : le toucher le ferme
+                Geste::Tap { x, y, .. } if self.maquette3d && r.noeud_choisi.is_some() && self.encart.is_some_and(|e| e.contains(x, y)) => {
+                    r.noeud_choisi = None;
+                    self.encart = None;
+                }
                 Geste::Tap { x, y, .. } if self.maquette3d => {
                     if let Some(carte) = &self.carte {
                         if let Ok(d) = carte.donnees.read() {
@@ -1519,6 +1527,7 @@ impl Lieux {
             cx.dl.rrect(Rect::new(bx, by, (bw * f).max(bh), bh), bh / 2.0, c.accent);
         }
         // Le nœud choisi : ce qu'on en sait, en bas à gauche (au-dessus de la génération)
+        let mut encart = None;
         if let (true, Some(n), Some(carte)) = (self.maquette3d, r.noeud_choisi, &self.carte) {
             let lignes = carte.donnees.read().ok().and_then(|d| {
                 let res = d.reseau_pret()?;
@@ -1548,12 +1557,13 @@ impl Lieux {
                     }
                     coupees.push((k, cours));
                 }
-                coupees.push((usize::MAX, "Toucher de nouveau sa sphère pour fermer".into()));
+                coupees.push((usize::MAX, "Toucher l'encart ou de nouveau sa sphère pour fermer".into()));
                 let lignes = coupees;
                 let w = lignes.iter().map(|l| cx.measure(&l.1, taille)).fold(0.0f32, f32::max).min(largeur) + 2.0 * pad;
                 let h = lignes.len() as f32 * lh + 2.0 * pad * 0.6;
                 let bas = zone.y + zone.h - m - if r.generation.is_some() { cx.commande() + m } else { 0.0 };
                 let p = Rect::new(zone.x + m, bas - h, w, h);
+                encart = Some(p);
                 cx.ombre(p, 6.0 * cx.dp, 6.0);
                 cx.dl.rrect(p, 6.0 * cx.dp, c.surface);
                 for (i, (k, l)) in lignes.iter().enumerate() {
@@ -1562,6 +1572,7 @@ impl Lieux {
                 }
             }
         }
+        self.encart = encart;
         if self.maquette3d && self.suivi3d {
             let haut = y + cx.commande() + m;
             let bas = zone.y + zone.h - m - if r.generation.is_some() { cx.commande() + m } else { 0.0 };
@@ -2006,6 +2017,7 @@ impl Lieux {
                             }
                         }
                     }
+                    cx.toggle(&mut b, sub_id(base, 690), "Sol des tuiles", &mut s.tuiles);
                     cx.toggle(&mut b, sub_id(base, 663), "Remblais des voies", &mut s.remblai);
                     if s.remblai {
                         cx.slider(&mut b, sub_id(base, 664), "Distance", &format!("{:.0} m", s.remblai_distance), &mut s.remblai_distance, 50.0, 3000.0);

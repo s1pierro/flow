@@ -29,7 +29,15 @@ use std::collections::HashMap;
 const PART_MAX: f32 = 0.45;
 /// Une file continue (fourche, jonction, passage) vers les bouts à moins de cet écart
 /// de sa direction (degrés) ; au-delà, jusqu'à `VIRAGE_MAX`, c'est un virage.
-const TOUT_DROIT: f32 = 40.0;
+pub const TOUT_DROIT: f32 = 40.0;
+/// Un tronçon plus court que cela (m) est traversé par la giration de ses voisines.
+/// Désactivé (0) : chaque nœud se raccorde pour lui-même — un angle droit par
+/// prolongement des bords, un quasi-alignement par arc ou intersection — ce qui tient
+/// dans un tronçon de quelques mètres.
+const GIR_COURT: f32 = 0.0;
+/// L'écart à l'angle droit (degrés) en deçà duquel deux voies bout à bout se
+/// rejoignent en coin des deux côtés, sans arc.
+const ANGLE_DROIT: f32 = 25.0;
 
 /// La portée (m) de la direction d'un bout au nœud.
 const DIR_PORTEE: f32 = 15.0;
@@ -318,6 +326,153 @@ pub fn regler_deports(d: Arc<HashMap<usize, Vec<crate::champ_voirie::Deport>>>) 
     if let Ok(mut g) = DEPORTS.write() {
         *g = Some(d);
     }
+}
+
+/// Les déports des branches de fourche, par réseau (sa clé : son adresse).
+static DEPORTS_BRANCHES: std::sync::Mutex<Option<(usize, Arc<HashMap<usize, Vec<crate::champ_voirie::Deport>>>)>> = std::sync::Mutex::new(None);
+
+/// Les branches d'une fourche (ou d'une séparation de chaussée, d'une voie qui se
+/// greffe) qui tiennent chacune dans le tronc et le couvrent à elles deux : OSM les fait partir du même point,
+/// elles se chevauchent alors sur des dizaines de mètres. Chacune est déportée sur ses
+/// files du tronc (le centre de leur portion de la largeur), le déport décroissant
+/// jusqu'à zéro là où les deux axes, non déportés, sont assez écartés pour que les
+/// chaussées soient côte à côte.
+pub fn deports_branches(r: &Reseau, cle: usize) -> Arc<HashMap<usize, Vec<crate::champ_voirie::Deport>>> {
+    if let Ok(g) = DEPORTS_BRANCHES.lock() {
+        if let Some((c, m)) = g.as_ref() {
+            if *c == cle {
+                return m.clone();
+            }
+        }
+    }
+    let mut m: HashMap<usize, Vec<crate::champ_voirie::Deport>> = HashMap::new();
+    // Les points d'un bout depuis le nœud
+    let depuis = |k: usize, f: bool| -> Vec<[f32; 2]> {
+        let q = &r.aretes[k].points;
+        let v: Vec<[f32; 2]> = q.iter().map(|p| [p[0], p[1]]).collect();
+        if f { v.into_iter().rev().collect() } else { v }
+    };
+    let corde = |pts: &[[f32; 2]]| -> Option<[f32; 2]> {
+        let o = pts[0];
+        let mut s_ = pts[1];
+        let mut cumul = 0.0f32;
+        for i in 1..pts.len() {
+            cumul += (pts[i][0] - pts[i - 1][0]).hypot(pts[i][1] - pts[i - 1][1]);
+            s_ = pts[i];
+            if cumul >= DIR_PORTEE {
+                break;
+            }
+        }
+        let l = (s_[0] - o[0]).hypot(s_[1] - o[1]);
+        (l > 1e-3).then(|| [(s_[0] - o[0]) / l, (s_[1] - o[1]) / l])
+    };
+    // La distance d'un point à une polyligne
+    let distance = |p: [f32; 2], l: &[[f32; 2]]| -> f32 {
+        l.windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let d = [b[0] - a[0], b[1] - a[1]];
+                let ll = d[0] * d[0] + d[1] * d[1];
+                let t = if ll < 1e-9 { 0.0 } else { (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / ll).clamp(0.0, 1.0) };
+                (p[0] - a[0] - t * d[0]).hypot(p[1] - a[1] - t * d[1])
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    let longueur = |l: &[[f32; 2]]| l.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum::<f32>();
+    for n in 0..r.noeuds.len() {
+        let mut bouts: Vec<(usize, bool)> = Vec::new();
+        for &k in &r.noeuds[n].aretes {
+            let a = &r.aretes[k];
+            if !sage_reel::carrossable(a.genre) || a.points.len() < 2 || a.files.total == 0 || a.a == a.b {
+                continue;
+            }
+            for f in [false, true] {
+                if (if f { a.b } else { a.a }) == n {
+                    bouts.push((k, f));
+                }
+            }
+        }
+        if bouts.len() != 3 {
+            continue;
+        }
+        let c = [r.noeuds[n].p[0], r.noeuds[n].p[1]];
+        for t in 0..3 {
+            let (tk, tf) = bouts[t];
+            let ta = &r.aretes[tk];
+            let (bi, bj) = (bouts[(t + 1) % 3], bouts[(t + 2) % 3]);
+            let (fa, fb) = (r.aretes[bi.0].files.total as usize, r.aretes[bj.0].files.total as usize);
+            let nt = ta.files.total as usize;
+            // Chaque branche tient dans le tronc, et à elles deux elles le couvrent :
+            // chacune est posée contre le bord du tronc de son côté, sur ses files (une
+            // somme exacte, une file partagée, une voie qui se greffe sur une autre)
+            if fa > nt || fb > nt || fa + fb < nt || ta.genre != r.aretes[bi.0].genre || ta.genre != r.aretes[bj.0].genre {
+                continue;
+            }
+            let (pt, pa, pb) = (depuis(tk, tf), depuis(bi.0, bi.1), depuis(bj.0, bj.1));
+            let (Some(dt), Some(da), Some(db)) = (corde(&pt), corde(&pa), corde(&pb)) else { continue };
+            // Le prolongement du tronc, et les branches à moins de TOUT_DROIT de lui
+            let f_ = [-dt[0], -dt[1]];
+            let ecart = |d: [f32; 2]| (f_[0] * d[0] + f_[1] * d[1]).clamp(-1.0, 1.0).acos();
+            if ecart(da) > TOUT_DROIT.to_radians() || ecart(db) > TOUT_DROIT.to_radians() {
+                continue;
+            }
+            // À gauche du prolongement (+g) : la plus « à gauche » des deux
+            let g = [-f_[1], f_[0]];
+            let cote = |d: [f32; 2]| f_[0] * d[1] - f_[1] * d[0];
+            let ((ga, gpa), (dr, dpa), (kg, kd)) = if cote(da) >= cote(db) { ((bi, pa.clone()), (bj, pb.clone()), (fa, fb)) } else { ((bj, pb.clone()), (bi, pa.clone()), (fb, fa)) };
+            // Les centres des files de chaque branche sur le tronc, en travers (vers +g)
+            let w = ta.largeur * 0.5;
+            let lw = ta.largeur / nt as f32;
+            let og = w - kg as f32 * lw / 2.0;
+            let od = -(w - kd as f32 * lw / 2.0);
+            // Le chevauchement : jusqu'où les axes non déportés sont à moins de la
+            // somme des demi-largeurs des chaussées (sur leurs files)
+            let besoin = (kg + kd) as f32 * lw / 2.0;
+            // Mesuré le long de la plus longue des deux (l'autre peut n'être qu'un bout
+            // de quelques mètres avant le nœud suivant)
+            let (gpa, dpa) = if longueur(&gpa) >= longueur(&dpa) { (gpa, dpa) } else { (dpa, gpa) };
+            let mut l = 0.0f32;
+            let mut cumul = 0.0f32;
+            for i in 1..gpa.len() {
+                cumul += (gpa[i][0] - gpa[i - 1][0]).hypot(gpa[i][1] - gpa[i - 1][1]);
+                // Des points tous les mètres sur le segment
+                let seg = (gpa[i][0] - gpa[i - 1][0]).hypot(gpa[i][1] - gpa[i - 1][1]);
+                let pas = seg.ceil().max(1.0) as usize;
+                let mut fini = false;
+                for j in 1..=pas {
+                    let u = j as f32 / pas as f32;
+                    let p = [gpa[i - 1][0] + (gpa[i][0] - gpa[i - 1][0]) * u, gpa[i - 1][1] + (gpa[i][1] - gpa[i - 1][1]) * u];
+                    if distance(p, &dpa) >= besoin {
+                        l = cumul - seg * (1.0 - u);
+                        fini = true;
+                        break;
+                    }
+                }
+                if fini {
+                    break;
+                }
+                l = cumul;
+            }
+            if og.abs() < 0.05 && od.abs() < 0.05 {
+                continue;
+            }
+            // Chaque branche : jusqu'à 90 % de sa propre longueur ; celle qui garde déjà
+            // le centre du tronc (une file partagée, 3 + 1 sur 3) n'est pas déportée
+            for (b, o) in [(ga, og), (dr, od)] {
+                let lb = l.min(0.9 * longueur(&depuis(b.0, b.1)));
+                if o.abs() < 0.05 || lb < 3.0 {
+                    continue;
+                }
+                m.entry(b.0).or_default().push(crate::champ_voirie::Deport { aretes: vec![b.0], c, decal: [g[0] * o, g[1] * o], l: lb });
+            }
+            break;
+        }
+    }
+    let m = Arc::new(m);
+    if let Ok(mut g) = DEPORTS_BRANCHES.lock() {
+        *g = Some((cle, m.clone()));
+    }
+    m
 }
 
 /// L'axe de l'arête `k`, déporté près d'une fourche.
@@ -638,7 +793,7 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
     let elargie = if tous.len() == 2 {
         let (t, tf) = if tous[0] == (k, fin) { tous[1] } else { tous[0] };
         let ta_ = &r.aretes[t];
-        if t != k && tous.contains(&(k, fin)) && entrant(ta_, tf) == Some(!e) && ta_.genre == a.genre && alignee((t, tf), (k, fin)) && a.files.total == ta_.files.total + 1 {
+        if t != k && tous.contains(&(k, fin)) && entrant(ta_, tf) == Some(!e) && ta_.genre == a.genre && alignee((t, tf), (k, fin)) && a.files.total > ta_.files.total {
             Some((t, tf))
         } else {
             None
@@ -647,7 +802,9 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         None
     };
     let ((t, tf), bouts, mode) = match elargie {
-        Some((t, tf)) => ((t, tf), tous.clone(), Mode::Elargie(cote_libere(t, tf))),
+        // Une seule file de plus : elle naît du côté libéré s'il est connu ; plusieurs
+        // (un élargissement, 2 → 4) : les files se répartissent en symétrie
+        Some((t, tf)) => ((t, tf), tous.clone(), Mode::Elargie(if a.files.total == r.aretes[t].files.total + 1 { cote_libere(t, tf) } else { None })),
         None => match chercher(&meme_genre).or_else(|| chercher(&alignee)) {
             Some((t, b)) => (t, b, Mode::Fourche),
             None => {
@@ -812,6 +969,10 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
             cibles = Some(match cote {
                 Some(true) => fs.iter().copied().chain(std::iter::once(fs[n - 1])).collect(),
                 Some(false) => std::iter::once(fs[0]).chain(fs.iter().copied()).collect(),
+                // Plusieurs files de plus (un élargissement) : chaque file étroite en
+                // nourrit plusieurs larges, groupées dans l'ordre (2 → 4 : f0 f1 sur la
+                // première, f2 f3 sur la seconde)
+                None if a.files.total as usize > n + 1 => (0..a.files.total as usize).map(|j| fs[j * n / a.files.total as usize]).collect(),
                 None => (0..=n)
                     .map(|j| {
                         let x = j as f32 * (n - 1) as f32 / n as f32;
@@ -839,6 +1000,7 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         Mode::Fourche => "fourche",
         Mode::Naissante(_) => "voie naissante",
         Mode::Elargie(Some(_)) => "file naissante, côté libéré",
+        Mode::Elargie(None) if a.files.total as usize > fs.len() + 1 => "élargissement",
         Mode::Elargie(None) => "file naissante, symétrie",
     };
     // Le raccord : une droite de la cassure au centre des files sur le tronc
@@ -1146,6 +1308,35 @@ pub struct Raccord {
     pub regle: &'static str,
 }
 
+/// Retire de la polyligne `l` la longueur `d` (m) à son bout (`fin`) ou à son début.
+pub fn rogner_bout(l: &mut Vec<[f32; 3]>, fin: bool, d: f32) {
+    if d <= 0.0 || l.len() < 2 {
+        return;
+    }
+    if !fin {
+        l.reverse();
+    }
+    let mut reste = d;
+    while l.len() >= 2 {
+        let (a, b) = (l[l.len() - 2], l[l.len() - 1]);
+        let s = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if s > reste + 1e-4 {
+            let t = (s - reste) / s;
+            let m = l.len();
+            l[m - 1] = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+            break;
+        }
+        reste -= s;
+        l.pop();
+    }
+    if l.len() < 2 {
+        l.clear();
+    }
+    if !fin {
+        l.reverse();
+    }
+}
+
 /// Pose les bouts raccordés d'une polyligne de l'arête (une file, une ligne entre
 /// files) : au début et à la fin, le point que `bout` donne pour le raccord de ce bout.
 pub fn raccorder_bouts(raccords: &[Option<Raccord>; 2], l: &mut [[f32; 3]], bout: impl Fn(&Raccord) -> Option<[f32; 2]>) {
@@ -1181,6 +1372,11 @@ impl Raccord {
     pub fn bout_bord(&self, gauche: bool, n: usize) -> Option<[f32; 2]> {
         let i = if gauche { 0 } else { n.checked_sub(1)? };
         self.noeuds.iter().find(|x| x.rang == i).map(|x| x.bords[if gauche { 0 } else { 1 }])
+    }
+    /// Les files `i − 1` et `i` aboutissent à la même file du tronc.
+    pub fn fondues(&self, i: usize) -> bool {
+        let r = |j: usize| self.noeuds.iter().find(|x| x.rang == j).map(|x| x.rang_tronc);
+        i >= 1 && r(i - 1).is_some() && r(i - 1) == r(i)
     }
     /// Le point au nœud de la ligne entre les files `i − 1` et `i`.
     pub fn bout_ligne(&self, i: usize) -> Option<[f32; 2]> {
@@ -2990,6 +3186,19 @@ pub struct Giration {
     rapport: f32,
     /// Le virage tourne à gauche.
     gauche: bool,
+    /// À travers un petit tronçon (plus court que la giration) : une polyligne tout
+    /// entière dans le virage disparaît, et celle qui finit avant la coupe reste telle
+    /// quelle (le tronçon voisin porte le coin ou l'arc).
+    relais: bool,
+    /// Un angle presque droit : pas d'arc, les bords et les files prolongés sans
+    /// rétrécir jusqu'à se couper (un coin à l'intérieur comme à l'extérieur).
+    droit: bool,
+    /// Les places en travers des files de l'autre voie (au plus 8), et la plus grande
+    /// des nôtres : à angle droit, une file (ou une ligne entre files) va jusqu'à la
+    /// plus lointaine des files d'en face ; un bord, jusqu'au bord d'en face.
+    cibles: [f32; 8],
+    nc: u8,
+    t_max: f32,
 }
 
 fn a_gauche(u: [f32; 2]) -> [f32; 2] {
@@ -3061,7 +3270,9 @@ pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Racc
         let partenaire = if boucle(k) {
             Some((k, !fin))
         } else if bouts.len() == 2 {
-            autres.first().copied().filter(|&(j, _)| j != k && r.aretes[j].files.total == a.files.total)
+            // Bout à bout : même de largeurs différentes (le rapport des largeurs fait
+            // correspondre les places en travers)
+            autres.first().copied().filter(|&(j, _)| j != k)
         } else {
             // La voie qui nous prolonge : même disposition, alignée, et seule
             let v: Vec<(usize, bool)> = autres
@@ -3075,8 +3286,120 @@ pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Racc
                 .collect();
             if v.len() == 1 { Some(v[0]) } else { None }
         };
+        // Les bouts carrossables de notre genre à un nœud
+        let bouts_de = |n: usize| -> Vec<(usize, bool)> {
+            let mut v = Vec::new();
+            for &j in &r.noeuds[n].aretes {
+                let b = &r.aretes[j];
+                if !sage_reel::carrossable(b.genre) || b.points.len() < 2 || b.files.total == 0 || b.genre != a.genre || b.a == b.b {
+                    continue;
+                }
+                for f in [false, true] {
+                    if (if f { b.b } else { b.a }) == n {
+                        v.push((j, f));
+                    }
+                }
+            }
+            v
+        };
+        let longueur = |j: usize| r.aretes[j].points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum::<f32>();
+        // Un petit tronçon `s` (pris à son bout `fs` au nœud `n`), seul entre deux
+        // nœuds à deux bouts : la voie qui le prolonge à son autre nœud, alignée
+        let au_dela = |s_: usize, fs: bool, u: [f32; 2]| -> Option<(usize, bool, usize)> {
+            if longueur(s_) >= GIR_COURT {
+                return None;
+            }
+            let n2 = if fs { r.aretes[s_].a } else { r.aretes[s_].b };
+            let b2 = bouts_de(n2);
+            if b2.len() != 2 {
+                return None;
+            }
+            let (q, fq) = b2.into_iter().find(|&(q, _)| q != s_)?;
+            let _ = u;
+            Some((q, fq, n2))
+        };
+        // Le point à `d` m le long de la voie `j` depuis son bout `f` (déportée)
+        let point_a = |j: usize, f: bool, d: f32| -> Option<[f32; 2]> {
+            let q = deporte(r, j);
+            if q.len() < 2 {
+                return None;
+            }
+            let v: Vec<[f32; 2]> = if f { q.iter().rev().map(|p| [p[0], p[1]]).collect() } else { q.iter().map(|p| [p[0], p[1]]).collect() };
+            let mut cumul = 0.0f32;
+            for i in 1..v.len() {
+                let sg = (v[i][0] - v[i - 1][0]).hypot(v[i][1] - v[i - 1][1]);
+                if cumul + sg >= d && sg > 1e-6 {
+                    let t = (d - cumul) / sg;
+                    return Some([v[i - 1][0] + (v[i][0] - v[i - 1][0]) * t, v[i - 1][1] + (v[i][1] - v[i - 1][1]) * t]);
+                }
+                cumul += sg;
+            }
+            v.last().copied()
+        };
+        // Le relais : notre voie arrive à un petit tronçon aligné, au-delà duquel la
+        // voie suivante tourne
+        let mut relais = false;
+        let mut o = [pts[ie][0], pts[ie][1]];
+        let mut u1 = u1;
+        // La direction de sortie, quand la voie d'en face n'est qu'un petit tronçon :
+        // la corde jusqu'à la voie qui le prolonge (commune aux deux girations)
+        let mut u2_chaine: Option<[f32; 2]> = None;
+        let partenaire = match partenaire {
+            Some((j, f)) => {
+                // Nous sommes nous-mêmes le petit tronçon (la voie d'en face nous
+                // prolonge à notre autre bout)
+                let autre = if fin { a.a } else { a.b };
+                relais = longueur(k) < GIR_COURT && bouts_de(autre).len() == 2;
+                // Notre direction : la même corde que nos deux voisines (du nœud du
+                // virage jusqu'à DIR_PORTEE sur la voie qui nous prolonge), pour que
+                // les coins des trois tombent au même point
+                if relais {
+                    if let Some((q, fq)) = bouts_de(autre).into_iter().find(|&(q, _)| q != k) {
+                        if let Some(pq) = point_a(q, fq, DIR_PORTEE) {
+                            let d = [o[0] - pq[0], o[1] - pq[1]];
+                            if d[0].hypot(d[1]) > 1.0 {
+                                u1 = norm(d);
+                            }
+                        }
+                    }
+                }
+                // La voie d'en face est un petit tronçon : la corde vers celle qui le
+                // prolonge
+                if bouts.len() == 2 {
+                    if let Some((q, fq, _)) = au_dela(j, f, u1) {
+                        if let Some(pq) = point_a(q, fq, DIR_PORTEE) {
+                            let d = [pq[0] - o[0], pq[1] - o[1]];
+                            if d[0].hypot(d[1]) > 1.0 {
+                                u2_chaine = Some(norm(d));
+                            }
+                        }
+                    }
+                }
+                Some((j, f))
+            }
+            None if bouts.len() == 2 => {
+                let Some((s_, fs)) = autres.first().copied().filter(|&(j, _)| j != k) else { continue };
+                match (depart(s_, fs), au_dela(s_, fs, u1)) {
+                    (Some(us), Some((q, fq, n2))) if u1[0] * us[0] + u1[1] * us[1] >= TOUT_DROIT.to_radians().cos() => {
+                        relais = true;
+                        o = [r.noeuds[n2].p[0], r.noeuds[n2].p[1]];
+                        // Notre direction d'arrivée : la corde depuis notre point à
+                        // DIR_PORTEE jusqu'au nœud du virage (la même que la sienne)
+                        if let Some(pk) = point_a(k, fin, DIR_PORTEE) {
+                            let d = [o[0] - pk[0], o[1] - pk[1]];
+                            if d[0].hypot(d[1]) > 1.0 {
+                                u1 = norm(d);
+                            }
+                        }
+                        Some((q, fq))
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        };
         let Some((j, f)) = partenaire else { continue };
-        let Some(u2) = depart(j, f) else { continue };
+        let Some(u2) = u2_chaine.or_else(|| depart(j, f)) else { continue };
         let c = u1[0] * u2[0] + u1[1] * u2[1];
         if c > GIRATION.to_radians().cos() || c < -0.95 {
             continue;
@@ -3089,7 +3412,15 @@ pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Racc
         let ts = (0..a.files.total as usize).map(|i| crate::files::decalage(a, i) * sg);
         let t_in = if gauche { ts.fold(f32::MIN, f32::max) } else { ts.fold(f32::MAX, f32::min) };
         let rapport = r.aretes[j].largeur / a.largeur.max(0.1);
-        out[idx] = Some(Giration { o: [pts[ie][0], pts[ie][1]], u1, u2, t_in, rapport, gauche });
+        let droit = c.abs() <= ANGLE_DROIT.to_radians().sin();
+        let mut cibles = [0.0f32; 8];
+        let bj = &r.aretes[j];
+        let nc = (bj.files.total as usize).min(8);
+        for (i, c_) in cibles.iter_mut().enumerate().take(nc) {
+            *c_ = crate::files::decalage(bj, i);
+        }
+        let t_max = (0..a.files.total as usize).map(|i| crate::files::decalage(a, i).abs()).fold(0.0f32, f32::max);
+        out[idx] = Some(Giration { o, u1, u2, t_in, rapport, gauche, relais, droit, cibles, nc: nc as u8, t_max });
     }
     out
 }
@@ -3137,6 +3468,20 @@ fn girer_fin(g: &Giration, l: &mut Vec<[f32; 3]>) {
     let proj = |p: [f32; 2]| (p[0] - g.o[0]) * g.u1[0] + (p[1] - g.o[1]) * g.u1[1];
     // On ne raccourcit que la fin de la polyligne (une boucle revient près du nœud par
     // son autre bout : ses points-là restent)
+    // À travers un petit tronçon : la polyligne tout entière dans le virage disparaît ;
+    // celle qui finit avant la coupe la laisse au tronçon voisin
+    let p0 = proj([l[0][0], l[0][1]]);
+    let pe = proj([l[l.len() - 1][0], l[l.len() - 1][1]]);
+    let relais = |l: &mut Vec<[f32; 3]>, coupe: f32| -> bool {
+        if !g.relais {
+            return false;
+        }
+        if p0 >= coupe - 1e-3 {
+            l.clear();
+            return true;
+        }
+        pe < coupe - 1e-3
+    };
     let garder = |l: &mut Vec<[f32; 3]>, coupe: f32| {
         while l.len() > 1 && proj([l[l.len() - 1][0], l[l.len() - 1][1]]) >= coupe - 1e-3 {
             l.pop();
@@ -3145,6 +3490,21 @@ fn girer_fin(g: &Giration, l: &mut Vec<[f32; 3]>) {
     // Deux voies de largeurs différentes presque dans l'axe : leurs parallèles ne se
     // coupent que très loin (l'écart divisé par le sinus de l'angle). On les rejoint
     // alors au milieu de leurs deux bouts au nœud, en biseau.
+    // À angle droit : prolongés sans rétrécir jusqu'à se couper ; un bord jusqu'au
+    // bord d'en face, une file jusqu'à la plus lointaine des files d'en face
+    if g.droit {
+        let p = if t1.abs() > g.t_max + 0.2 || g.nc == 0 {
+            x(t1, t2)
+        } else {
+            g.cibles[..g.nc as usize].iter().map(|&b| x(t1, b)).max_by(|a, b| proj(*a).total_cmp(&proj(*b))).unwrap_or_else(|| x(t1, t2))
+        };
+        if relais(l, proj(p)) {
+            return;
+        }
+        garder(l, proj(p));
+        l.push([p[0], p[1], z]);
+        return;
+    }
     let ecart = (t2 - t1).abs();
     if ecart > 0.05 && ecart / det.abs() > 1.0 {
         let m = [g.o[0] + (t1 * l1[0] + t2 * l2[0]) / 2.0, g.o[1] + (t1 * l1[1] + t2 * l2[1]) / 2.0];
@@ -3156,8 +3516,11 @@ fn girer_fin(g: &Giration, l: &mut Vec<[f32; 3]>) {
         l.push([m[0], m[1], z]);
         return;
     }
-    if rho <= 0.01 {
+    if rho <= 0.01 || g.droit {
         let p = x(t1, t2);
+        if relais(l, proj(p)) {
+            return;
+        }
         garder(l, proj(p));
         l.push([p[0], p[1], z]);
         return;
@@ -3170,6 +3533,9 @@ fn girer_fin(g: &Giration, l: &mut Vec<[f32; 3]>) {
         [v[0] / n, v[1] / n]
     };
     let mm = [cc[0] - sgn * rho * b[0], cc[1] - sgn * rho * b[1]];
+    if relais(l, proj(t_1)) {
+        return;
+    }
     garder(l, proj(t_1));
     let a0 = (t_1[1] - cc[1]).atan2(t_1[0] - cc[0]);
     let a1 = (mm[1] - cc[1]).atan2(mm[0] - cc[0]);

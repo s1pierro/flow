@@ -664,7 +664,9 @@ impl Relief3d {
                     aretes_sol.push(a.clone());
                 }
             }
-            morceaux.push(Morceau3d { maillage: f.morceau.maillage.clone(), image: Some(f.image.clone()), uv: [0.0, 0.0, 1.0, 1.0], couleur: [0.72, 0.76, 0.62] });
+            if self.sur.tuiles {
+                morceaux.push(Morceau3d { maillage: f.morceau.maillage.clone(), image: Some(f.image.clone()), uv: [0.0, 0.0, 1.0, 1.0], couleur: [0.72, 0.76, 0.62] });
+            }
             if let Some(e) = &f.eau {
                 eaux.push(e.clone());
             }
@@ -1467,11 +1469,13 @@ pub struct Surimpression {
     /// cassure et sa distance (m) au plus du nœud (0 : aucun).
     /// La tolérance (°) d'une section strictement droite aux fourches de sens unique.
     pub raccourci_tolerance: f32,
+    /// Le sol des tuiles (masqué : les tracés du réseau seuls, et le reste).
+    pub tuiles: bool,
 }
 
 impl Default for Surimpression {
     fn default() -> Self {
-        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false, bords: false, raccourci_tolerance: crate::fils::RACCOURCI_TOLERANCE }
+        Surimpression { traces: true, traces_distance: TRACES_DISTANCE, traces_rayon: 1.0, remblai: true, remblai_distance: 2.0 * TRACES_DISTANCE, remblai_rayon: 2.0, files: true, fils: false, pietons: true, brut: true, virage_droite: crate::fils::RAYON_DROITE, virage_gauche: crate::fils::RAYON_GAUCHE, lissage: true, tolerance: crate::fils::TOLERANCE_DEFAUT, axes: false, bords: false, raccourci_tolerance: crate::fils::RACCOURCI_TOLERANCE, tuiles: true }
     }
 }
 
@@ -1482,11 +1486,11 @@ impl Surimpression {
         let [t, td, tr, r, rd, rr] = *<&[f32; 6]>::try_from(v.get(..6)?).ok()?;
         let f = v.get(6);
         let fi = v.get(7);
-        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0), bords: v.get(15).is_some_and(|x| *x != 0.0), raccourci_tolerance: v.get(18).copied().unwrap_or(crate::fils::RACCOURCI_TOLERANCE) })
+        Some(Surimpression { traces: t != 0.0, traces_distance: td, traces_rayon: tr, remblai: r != 0.0, remblai_distance: rd, remblai_rayon: rr, files: f.is_none_or(|f| *f != 0.0), fils: fi.is_some_and(|f| *f != 0.0), pietons: v.get(8).is_none_or(|p| *p != 0.0), brut: v.get(9).is_none_or(|p| *p != 0.0), virage_droite: v.get(10).copied().unwrap_or(crate::fils::RAYON_DROITE), virage_gauche: v.get(11).copied().unwrap_or(crate::fils::RAYON_GAUCHE), lissage: v.get(12).is_none_or(|x| *x != 0.0), tolerance: crate::fils::TOLERANCE_DEFAUT, axes: v.get(14).is_some_and(|x| *x != 0.0), bords: v.get(15).is_some_and(|x| *x != 0.0), raccourci_tolerance: v.get(18).copied().unwrap_or(crate::fils::RACCOURCI_TOLERANCE), tuiles: v.get(19).is_none_or(|x| *x != 0.0) })
     }
 
     pub fn ecrire(&self) -> String {
-        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} 0 0 {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes), u8::from(self.bords), self.raccourci_tolerance)
+        format!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} 0 0 {} {}", u8::from(self.traces), self.traces_distance, self.traces_rayon, u8::from(self.remblai), self.remblai_distance, self.remblai_rayon, u8::from(self.files), u8::from(self.fils), u8::from(self.pietons), u8::from(self.brut), self.virage_droite, self.virage_gauche, u8::from(self.lissage), self.tolerance, u8::from(self.axes), u8::from(self.bords), self.raccourci_tolerance, u8::from(self.tuiles))
     }
 }
 
@@ -1522,6 +1526,7 @@ impl Relief3d {
             }
             let mut libres: Vec<BoutLibre> = Vec::new();
             let mut total_bouts = 0usize;
+            let mut au_site = 0usize;
             for cle in &cles {
                 let b = boite_tuile(&d, *cle);
                 let marge = 40.0;
@@ -1548,6 +1553,14 @@ impl Relief3d {
                     })
                     .unzip();
                 let bouts: Vec<[f32; 3]> = lignes.iter().flat_map(|l| [l[0], l[l.len() - 1]]).collect();
+                // Les bords des sites propres eux-mêmes
+                let lignes_bus: Vec<bool> = origines
+                    .iter()
+                    .map(|o| {
+                        let o = o.split(" : ").nth(1).unwrap_or("");
+                        o.contains("bus") || o.strip_prefix('a').and_then(|x| x.split(' ').next()).and_then(|x| x.parse::<usize>().ok()).is_some_and(|k| k < r.aretes.len() && r.aretes[k].genre == sage_reel::BUS)
+                    })
+                    .collect();
                 // Le point un peu au-delà d'un bout, dans le prolongement de son bord
                 let au_dela = |i: usize| -> [f32; 3] {
                     let l = lignes[i / 2];
@@ -1579,6 +1592,12 @@ impl Relief3d {
                             }
                         }
                     }
+                    // Un bord de voiture qui aboutit sur un site propre de bus s'y
+                    // raccorde : le bord du site prend le relais
+                    if !rejoint && !lignes_bus[i / 2] && bandes.sur_bus(au_dela(i)) {
+                        au_site += 1;
+                        rejoint = true;
+                    }
                     if !rejoint {
                         // Le plus proche bout d'un autre bord
                         let moi = i / 2;
@@ -1601,7 +1620,7 @@ impl Relief3d {
                     }
                 }
             }
-            let t = format!("{} tuiles · {} bouts de bords · {} non raccordés (hors bords des tuiles)", cles.len(), total_bouts, libres.len());
+            let t = format!("{} tuiles · {} bouts de bords · {} non raccordés (hors bords des tuiles) · {} raccordés au site propre", cles.len(), total_bouts, libres.len(), au_site);
             libres.sort_by(|a, b| a.d_voisin.total_cmp(&b.d_voisin));
             (t, libres)
         })();
@@ -1745,6 +1764,12 @@ impl Relief3d {
         if adresse != self.traces_de {
             self.traces.clear();
             self.traces_de = adresse;
+        }
+        // Les branches d'une fourche dont les files continuent exactement celles du
+        // tronc : posées côte à côte sur leurs files dès le nœud (si le champ ne les a
+        // pas déjà déportées)
+        for (k, v) in crate::fils::deports_branches(&r, Arc::as_ptr(&r) as usize).iter() {
+            deports.entry(*k).or_insert_with(|| v.clone());
         }
         crate::fils::regler_deports(Arc::new(deports.clone()));
         crate::fils::regler_rayons(self.sur.virage_droite, self.sur.virage_gauche);
@@ -1951,6 +1976,18 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             for (rang, (ligne, mut l)) in crate::files::separations(a, &pts).into_iter().enumerate() {
                 // Au raccord, la ligne finit entre les files qu'elle sépare
                 crate::fils::raccorder_bouts(&raccords, &mut l, |rc| rc.bout_ligne(rang + 1));
+                // Entre deux files qui aboutissent à la même file (un élargissement, une
+                // file naissante) : la ligne s'arrête où elles cessent d'être parallèles
+                for (idx, rc) in raccords.iter().enumerate() {
+                    if let Some(rc) = rc {
+                        if rc.fondues(rang + 1) {
+                            crate::fils::rogner_bout(&mut l, idx == 1, rc.noeuds.first().map_or(0.0, |x| x.distance));
+                        }
+                    }
+                }
+                if l.len() < 2 {
+                    continue;
+                }
                 crate::fils::girer(&girs, &mut l);
                 let k = match ligne {
                     crate::files::Ligne::Sens => 6,

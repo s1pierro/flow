@@ -26,6 +26,8 @@ const EPS: f32 = 0.02;
 /// Deux bouts de bords près d'un nœud à moins de tant (m) l'un de l'autre sont confondus.
 const SOUDURE: f32 = 1.0;
 /// Partout, deux bouts à moins de tant (m) l'un de l'autre sont confondus.
+/// Le dépassement d'une bande au-delà d'un nœud où une autre voie la prolonge (m).
+const RECOUVRE: f32 = 0.5;
 const SOUDURE_FINE: f32 = 0.15;
 /// La maille (m) de l'index des bandes.
 const CASE: f32 = 10.0;
@@ -271,6 +273,15 @@ pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32
 impl Bandes {
     /// Ce qui couvre le point `p` (x, z, hauteur) : les voies dont la bande le contient
     /// (« aN »), les joints de nœud, les morceaux près d'un portail (diagnostic).
+    /// Le point `p` est sur un site propre de bus (de son niveau).
+    pub fn sur_bus(&self, p: [f32; 3]) -> bool {
+        let q = [p[0], p[1]];
+        self.index.get(&case(p[0], p[1])).map(|x| x.as_slice()).unwrap_or(&[]).iter().any(|i| {
+            let b = &self.bandes[*i as usize];
+            b.bus && (b.h - p[2]).abs() <= ECART_H && dedans(q, q, b).is_some()
+        })
+    }
+
     pub fn couvrent(&self, p: [f32; 3]) -> Vec<String> {
         let q = [p[0], p[1]];
         let mut v: Vec<String> = Vec::new();
@@ -395,6 +406,42 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
             }
         }
     }
+    // Le bout d'arête `k` (à sa fin si `fin`) est prolongé, au-delà de son nœud, par
+    // une autre voie carrossable à moins de TOUT_DROIT : une continuation, simple ou
+    // dans une fourche
+    let direction = |k: usize, fin: bool| -> Option<[f32; 2]> {
+        let q = &r.aretes[k].points;
+        if q.len() < 2 {
+            return None;
+        }
+        let it: Vec<[f32; 2]> = if fin { q.iter().rev().map(|p| [p[0], p[1]]).collect() } else { q.iter().map(|p| [p[0], p[1]]).collect() };
+        let o = it[0];
+        let mut s_ = it[1];
+        let mut cumul = 0.0f32;
+        for i in 1..it.len() {
+            cumul += (it[i][0] - it[i - 1][0]).hypot(it[i][1] - it[i - 1][1]);
+            s_ = it[i];
+            if cumul >= 5.0 {
+                break;
+            }
+        }
+        let l = (s_[0] - o[0]).hypot(s_[1] - o[1]);
+        (l > 1e-3).then(|| [(s_[0] - o[0]) / l, (s_[1] - o[1]) / l])
+    };
+    let prolongee = |k: usize, fin: bool| -> bool {
+        let n = if fin { r.aretes[k].b } else { r.aretes[k].a };
+        let Some(d) = direction(k, fin) else { return false };
+        let cos = crate::fils::TOUT_DROIT.to_radians().cos();
+        r.noeuds[n].aretes.iter().any(|&j| {
+            let b = &r.aretes[j];
+            if !sage_reel::carrossable(b.genre) || b.files.total == 0 {
+                return false;
+            }
+            [false, true].into_iter().any(|f| {
+                (if f { b.b } else { b.a }) == n && (j, f) != (k, fin) && direction(j, f).is_some_and(|e| -(d[0] * e[0] + d[1] * e[1]) >= cos)
+            })
+        })
+    };
     for &k in &utiles {
         let (p, ws, raccords) = axes.remove(&k).unwrap();
         if p.len() < 2 || ws.len() != p.len() {
@@ -424,7 +471,25 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
                 let f = if l > 2.0 * EPS { EPS / l } else { 0.5 };
                 [a[0] + dx * f, a[1] + dz * f]
             };
-            let q = [serre(gauche[i], droite[i]), serre(gauche[j], droite[j]), serre(droite[j], gauche[j]), serre(droite[i], gauche[i])];
+            let mut q = [serre(gauche[i], droite[i]), serre(gauche[j], droite[j]), serre(droite[j], gauche[j]), serre(droite[i], gauche[i])];
+            // Aux continuations (une autre voie la prolonge au-delà du nœud), la bande
+            // dépasse le nœud de RECOUVRE : celle de la voie suivante la recouvre, sans fente entre
+            // elles où un bord voisin survivrait
+            let (dx, dz) = (p[j][0] - p[i][0], p[j][1] - p[i][1]);
+            let ld = dx.hypot(dz);
+            if ld > 1e-3 {
+                let (ux, uz) = (dx / ld * RECOUVRE, dz / ld * RECOUVRE);
+                if i == 0 && prolongee(k, false) {
+                    for v in [0, 3] {
+                        q[v] = [q[v][0] - ux, q[v][1] - uz];
+                    }
+                }
+                if j == p.len() - 1 && prolongee(k, true) {
+                    for v in [1, 2] {
+                        q[v] = [q[v][0] + ux, q[v][1] + uz];
+                    }
+                }
+            }
             let Some(sens) = convexe(&q) else { continue };
             let id = bandes.bandes.len() as u32;
             let (x0, z0) = q.iter().fold((f32::MAX, f32::MAX), |m, a| (m.0.min(a[0]), m.1.min(a[1])));
@@ -463,6 +528,10 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
         let mut aux: HashMap<(usize, Passage), (Vec<[f32; 2]>, f32, Vec<usize>, bool, Passage)> = HashMap::new();
         for &k in &utiles {
             let Some([g, d]) = cotes.get(&k) else { continue };
+            // Un bord effacé par une giration (un petit tronçon traversé)
+            if g.is_empty() || d.is_empty() {
+                continue;
+            }
             let a = &r.aretes[k];
             // Les deux bords n'ont pas toujours autant de points (girations)
             for (n, fin) in [(a.a, false), (a.b, true)] {
@@ -550,6 +619,10 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
         let Some(c) = cotes.get(&k) else { continue };
         for (cote, p) in c.iter().enumerate() {
             let nom = if cote == 0 { "gauche" } else { "droit" };
+            // Un bord tout entier dans une giration (un petit tronçon traversé)
+            if p.len() < 2 {
+                continue;
+            }
             let v = bandes.garder(p, r.aretes[k].passage, est_bus(k), &[k]);
             origines.extend(v.iter().map(|_| origine(k, &format!("bord {nom}"))));
             sortie.extend(v);
@@ -683,6 +756,9 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
         }
         let (k, debut) = bouts[0];
         let c = &cotes[&k];
+        if c[0].is_empty() || c[1].is_empty() {
+            continue;
+        }
         let bout = |p: &Poly| if debut { p[0] } else { p[p.len() - 1] };
         let v = bandes.garder(&[bout(&c[0]), bout(&c[1])], r.aretes[k].passage, est_bus(k), &[k]);
         origines.extend(v.iter().map(|_| origine(k, "impasse")));
