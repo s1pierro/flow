@@ -30,6 +30,9 @@ const PART_MAX: f32 = 0.45;
 /// Une file continue (fourche, jonction, passage) vers les bouts à moins de cet écart
 /// de sa direction (degrés) ; au-delà, jusqu'à `VIRAGE_MAX`, c'est un virage.
 const TOUT_DROIT: f32 = 40.0;
+
+/// La portée (m) de la direction d'un bout au nœud.
+const DIR_PORTEE: f32 = 15.0;
 const VIRAGE_MAX: f32 = 160.0;
 /// Les files d'un bout qui ne fait que tourner s'arrêtent à la demi-largeur de la plus
 /// large des autres voies, plus cette marge (m).
@@ -382,7 +385,9 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
     if a.a == a.b || p.len() < 2 {
         return None;
     }
-    let e = entrant(a, fin)?;
+    let Some(e) = entrant(a, fin) else {
+        return raccourcir_double(r, k, fin, p, tolerance, arret);
+    };
     // Les bouts carrossables au nœud
     let mut tous: Vec<(usize, bool)> = Vec::new();
     for &j in &r.noeuds[n].aretes {
@@ -396,10 +401,23 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
             }
         }
     }
-    // La direction d'un bout en s'éloignant du nœud
+    // La direction d'un bout en s'éloignant du nœud : la corde vers le point à
+    // DIR_PORTEE le long du tracé (un premier segment court et coudé, le dessin du
+    // carrefour, ne la fausse pas)
     let dir = |j: usize, f: bool| -> [f32; 2] {
         let q = &r.aretes[j].points;
-        let (o, s_) = if f { (q[q.len() - 1], q[q.len() - 2]) } else { (q[0], q[1]) };
+        let m = q.len();
+        let pt = |i: usize| if f { q[m - 1 - i] } else { q[i] };
+        let o = pt(0);
+        let mut s_ = pt(1);
+        let mut cumul = 0.0f32;
+        for i in 1..m {
+            cumul += (pt(i)[0] - pt(i - 1)[0]).hypot(pt(i)[1] - pt(i - 1)[1]);
+            s_ = pt(i);
+            if cumul >= DIR_PORTEE {
+                break;
+            }
+        }
         let l = (s_[0] - o[0]).hypot(s_[1] - o[1]).max(1e-6);
         [(s_[0] - o[0]) / l, (s_[1] - o[1]) / l]
     };
@@ -679,12 +697,19 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
     // travers (la cassure, ou à défaut l'avant-dernier point)
     let cassure = |q: &[[f32; 3]], arret: usize| -> (usize, [f32; 2]) {
         let m = q.len();
+        // L'écart se mesure à la direction du dernier segment (au nœud), pas d'angle
+        // à angle : une courbe faite de petits coudes n'est pas une droite
+        let u2 = [q[m - 1][0] - q[m - 2][0], q[m - 1][1] - q[m - 2][1]];
         for i in (1..m - 1).rev() {
             if i <= arret {
                 return (i, [q[i][0], q[i][1]]);
             }
+            // La droite du raccord s'écarterait trop du tracé : la cassure au point d'avant
+            if fleche(q, i) > FLECHE_MAX {
+                let j = (i + 1).min(m - 2);
+                return (j, [q[j][0], q[j][1]]);
+            }
             let u1 = [q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]];
-            let u2 = [q[i + 1][0] - q[i][0], q[i + 1][1] - q[i][1]];
             let (l1, l2) = (u1[0].hypot(u1[1]), u2[0].hypot(u2[1]));
             if l1 < 1e-6 || l2 < 1e-6 {
                 continue;
@@ -808,6 +833,7 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
         _ => (cibles.iter().fold([0.0f32; 2], |s, x| [s[0] + x.1[0] / nf as f32, s[1] + x.1[1] / nf as f32]), nf),
     };
     let regle = match mode {
+        Mode::Fourche if bs.len() == 1 && (0..ta.files.total as usize).any(|x| file_entre(ta, tf, x) == Some(e)) => "séparation de chaussée",
         Mode::Fourche if partagee => "fourche, file partagée",
         Mode::Fourche if bus_ferme => "fourche, file de bus fermée",
         Mode::Fourche => "fourche",
@@ -861,6 +887,233 @@ fn raccourcir(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance:
     noeuds.sort_by_key(|x| x.rang);
     Some(Raccord { demi, points: RACCORD_POINTS, noeuds, entier: i == 0, regle })
 }
+
+/// Une file naissante dans une voie à double sens (n → n + 1, deux bouts de la même
+/// voie alignés) : un sens garde ses files, l'autre en gagne une, qui naît du côté
+/// extérieur (à l'opposé de l'autre sens : une file pour tourner). La voie large est
+/// raccordée sur l'étroite, qui sert de tronc : ses files continuent celles du tronc
+/// dans l'ordre, la nouvelle est piquée sur sa voisine.
+fn raccourcir_double(r: &Reseau, k: usize, fin: bool, p: &mut Vec<[f32; 3]>, tolerance: f32, arret: usize) -> Option<Raccord> {
+    let a = &r.aretes[k];
+    let n = if fin { a.b } else { a.a };
+    let mut tous: Vec<(usize, bool)> = Vec::new();
+    for &j in &r.noeuds[n].aretes {
+        let b = &r.aretes[j];
+        if !sage_reel::carrossable(b.genre) || b.points.len() < 2 || b.files.total == 0 {
+            continue;
+        }
+        for f in [false, true] {
+            if (if f { b.b } else { b.a }) == n {
+                tous.push((j, f));
+            }
+        }
+    }
+    if tous.len() != 2 || !tous.contains(&(k, fin)) {
+        return None;
+    }
+    let (t, tf) = if tous[0] == (k, fin) { tous[1] } else { tous[0] };
+    let ta = &r.aretes[t];
+    if t == k || ta.genre != a.genre || a.files.total != ta.files.total + 1 {
+        return None;
+    }
+    // Le sens de chaque file au nœud : vrai si elle y entre
+    let sens = |b: &sage_reel::reseau::Arete, f: bool, i: usize| match crate::files::sens(b, i) {
+        crate::files::Sens::Avant => Some(f),
+        crate::files::Sens::Arriere => Some(!f),
+        crate::files::Sens::Partagee => None,
+    };
+    let compte = |b: &sage_reel::reseau::Arete, f: bool| -> Option<(usize, usize)> {
+        let (mut e_, mut s_) = (0, 0);
+        for i in 0..b.files.total as usize {
+            if sens(b, f, i)? {
+                e_ += 1
+            } else {
+                s_ += 1
+            }
+        }
+        Some((e_, s_))
+    };
+    let ((ek, sk), (et, st)) = (compte(a, fin)?, compte(ta, tf)?);
+    // Nos files qui entrent continuent celles du tronc qui sortent, et l'inverse ; le
+    // sens qui gagne une file
+    let gagne_entrant = if ek == st + 1 && sk == et {
+        true
+    } else if sk == et + 1 && ek == st {
+        false
+    } else {
+        return None;
+    };
+    if ek == 0 || sk == 0 {
+        return None;
+    }
+    // Le tronc depuis le nœud
+    let tp = deporte(r, t);
+    let m = tp.len();
+    if m < 2 {
+        return None;
+    }
+    let tg = crate::files::normales(&tp);
+    let (i0, i1) = if tf { (m - 1, m - 2) } else { (0, 1) };
+    let o = tp[i0];
+    let dl = (tp[i1][0] - o[0]).hypot(tp[i1][1] - o[1]).max(1e-6);
+    let d = [(tp[i1][0] - o[0]) / dl, (tp[i1][1] - o[1]) / dl];
+    // Alignées : notre voie part à l'opposé du tronc
+    {
+        let q = &a.points;
+        let (x0, x1) = if fin { (q[q.len() - 1], q[q.len() - 2]) } else { (q[0], q[1]) };
+        let l = (x1[0] - x0[0]).hypot(x1[1] - x0[1]).max(1e-6);
+        let v = [(x1[0] - x0[0]) / l, (x1[1] - x0[1]) / l];
+        if (-(d[0] * v[0] + d[1] * v[1])).clamp(-1.0, 1.0).acos() > TOUT_DROIT.to_radians() {
+            return None;
+        }
+    }
+    let travers = |q: [f32; 2]| (q[0] - o[0]) * -d[1] + (q[1] - o[1]) * d[0];
+    let mut fs: Vec<(usize, [f32; 2], bool)> = (0..ta.files.total as usize)
+        .map(|i| {
+            let y = crate::files::decalage(ta, i);
+            (i, [o[0] + tg[i0][0] * y, o[1] + tg[i0][1] * y], sens(ta, tf, i).unwrap_or(false))
+        })
+        .collect();
+    fs.sort_by(|x, y| travers(x.1).total_cmp(&travers(y.1)));
+    // Notre cassure
+    let vers_noeud = |pts: &[[f32; 3]]| -> Vec<[f32; 3]> { if fin { pts.to_vec() } else { pts.iter().rev().copied().collect() } };
+    let mut q = vers_noeud(p);
+    let mq = q.len();
+    if mq < 2 {
+        return None;
+    }
+    // La cassure : en remontant depuis le nœud, le premier point où le tracé s'écarte
+    // de la direction de son dernier segment (écart cumulé, pas d'angle à angle : une
+    // courbe douce n'est pas droite), ou au plus RACC_DOUBLE_MAX m du nœud
+    let fin_dir = {
+        let v = [q[mq - 1][0] - q[mq - 2][0], q[mq - 1][1] - q[mq - 2][1]];
+        let l = v[0].hypot(v[1]).max(1e-6);
+        [v[0] / l, v[1] / l]
+    };
+    let mut i = 0usize;
+    let mut cumul = 0.0f32;
+    for j in (1..mq - 1).rev() {
+        cumul += (q[j + 1][0] - q[j][0]).hypot(q[j + 1][1] - q[j][1]);
+        if j <= arret || cumul >= RACC_DOUBLE_MAX {
+            i = j;
+            break;
+        }
+        if fleche(&q, j) > FLECHE_MAX {
+            i = (j + 1).min(mq - 2);
+            break;
+        }
+        let u1 = [q[j][0] - q[j - 1][0], q[j][1] - q[j - 1][1]];
+        let l1 = u1[0].hypot(u1[1]);
+        if l1 < 1e-6 {
+            continue;
+        }
+        if ((u1[0] * fin_dir[0] + u1[1] * fin_dir[1]) / l1).clamp(-1.0, 1.0).acos() > tolerance {
+            i = j;
+            break;
+        }
+    }
+    if i == 0 && cumul + (q[1][0] - q[0][0]).hypot(q[1][1] - q[0][1]) > RACC_DOUBLE_MAX {
+        // Une seule longue droite : la cassure à RACC_DOUBLE_MAX du nœud
+        let (a_, b_) = (q[mq - 2], q[mq - 1]);
+        let l = (b_[0] - a_[0]).hypot(b_[1] - a_[1]).max(1e-6);
+        if mq == 2 && l > RACC_DOUBLE_MAX {
+            let t_ = 1.0 - RACC_DOUBLE_MAX / l;
+            q.insert(1, [a_[0] + (b_[0] - a_[0]) * t_, a_[1] + (b_[1] - a_[1]) * t_, a_[2] + (b_[2] - a_[2]) * t_]);
+            i = 1;
+        }
+    }
+    let mq = q.len();
+    let (zc, zn) = (q[i][2], q[mq - 1][2]);
+    let pc = q[i];
+    let u = {
+        let v = if i == 0 { [q[1][0] - q[0][0], q[1][1] - q[0][1]] } else { [q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]] };
+        let l = v[0].hypot(v[1]).max(1e-6);
+        [v[0] / l, v[1] / l]
+    };
+    let g0 = [u[1], -u[0]];
+    // Nos files à la cassure, en travers du tronc
+    let nf = a.files.total as usize;
+    let mut noeuds: Vec<NoeudsDeFile> = (0..nf)
+        .map(|r_| {
+            let y0 = crate::files::decalage(a, r_);
+            let y0 = if fin { y0 } else { -y0 };
+            let cassure = [pc[0] + g0[0] * y0, pc[1] + g0[1] * y0, zc];
+            NoeudsDeFile { rang: r_, cassure, distance: 0.0, tronc: t, rang_tronc: 0, sur_tronc: [0.0, 0.0, zn], bords: [[0.0; 2]; 2] }
+        })
+        .collect();
+    noeuds.sort_by(|x, y| travers([x.cassure[0], x.cassure[1]]).total_cmp(&travers([y.cassure[0], y.cassure[1]])));
+    // Le groupe qui gagne une file est à un bout en travers ; sa file extrême naît
+    let entre = |r_: usize| sens(a, fin, r_).unwrap_or(false);
+    let premier_gagne = entre(noeuds[0].rang) == gagne_entrant;
+    let dernier_gagne = entre(noeuds[nf - 1].rang) == gagne_entrant;
+    if premier_gagne == dernier_gagne {
+        return None;
+    }
+    let nouvelle = if premier_gagne { 0 } else { nf - 1 };
+    // Les cibles : les autres files dans l'ordre du tronc, la nouvelle sur sa voisine
+    let mut cibles: Vec<(usize, [f32; 2])> = Vec::with_capacity(nf);
+    let mut it = fs.iter();
+    for x in 0..nf {
+        if x == nouvelle {
+            cibles.push((0, [0.0, 0.0]));
+            continue;
+        }
+        let f_ = it.next()?;
+        cibles.push((f_.0, f_.1));
+    }
+    let voisine = if nouvelle == 0 { 1 } else { nf - 2 };
+    cibles[nouvelle] = cibles[voisine];
+    // Les sens doivent correspondre : nos files entrantes sur les sortantes du tronc
+    for (x, nd) in noeuds.iter().enumerate() {
+        if x == nouvelle {
+            continue;
+        }
+        let ft = fs.iter().find(|f_| f_.0 == cibles[x].0)?;
+        if entre(nd.rang) == ft.2 {
+            return None;
+        }
+    }
+    // Le raccord : une droite de la cassure au centre du tronc
+    let c = fs.iter().fold([0.0f32; 2], |s_, x| [s_[0] + x.1[0] / fs.len() as f32, s_[1] + x.1[1] / fs.len() as f32]);
+    let dist: f32 = (i..mq - 1).map(|j| (q[j + 1][0] - q[j][0]).hypot(q[j + 1][1] - q[j][1])).sum();
+    q.truncate(i + 1);
+    q.push([c[0], c[1], zn]);
+    if !fin {
+        q.reverse();
+    }
+    *p = q;
+    let fw = ta.largeur / ta.files.total.max(1) as f32;
+    let sg = if fin { 1.0 } else { -1.0 };
+    let gb = [sg * d[1], -sg * d[0]];
+    for (nd, cb) in noeuds.iter_mut().zip(&cibles) {
+        nd.distance = dist;
+        nd.rang_tronc = cb.0;
+        nd.sur_tronc = [cb.1[0], cb.1[1], zn];
+        let h = fw * 0.5;
+        nd.bords = [[cb.1[0] + gb[0] * h, cb.1[1] + gb[1] * h], [cb.1[0] - gb[0] * h, cb.1[1] - gb[1] * h]];
+    }
+    noeuds.sort_by_key(|x| x.rang);
+    Some(Raccord { demi: ta.largeur * 0.5, points: RACCORD_POINTS, noeuds, entier: i == 0, regle: "file naissante à double sens, côté extérieur" })
+}
+
+/// La plus grande flèche (m) tolérée entre la droite d'un raccord et le tracé brut :
+/// au-delà, la cassure est avancée vers le nœud.
+const FLECHE_MAX: f32 = 0.15;
+
+/// La flèche de la corde de `q[i]` au dernier point (le nœud) : le plus grand écart des
+/// points entre eux à cette droite.
+fn fleche(q: &[[f32; 3]], i: usize) -> f32 {
+    let (a, b) = (q[i], q[q.len() - 1]);
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let l = d[0].hypot(d[1]);
+    if l < 1e-6 {
+        return 0.0;
+    }
+    q[i + 1..q.len() - 1].iter().map(|p| ((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]).abs() / l).fold(0.0, f32::max)
+}
+
+/// La plus grande longueur (m) du biseau d'une file naissante à double sens.
+const RACC_DOUBLE_MAX: f32 = 25.0;
 
 /// Les points du raccord d'une branche de fourche après la cassure (une droite).
 const RACCORD_POINTS: usize = 1;
@@ -2711,5 +2964,225 @@ mod tests {
         assert_eq!(v.len(), 2);
         assert!((v[0][0] - 2.0).abs() < 1e-4 && (v[1][0] - 7.0).abs() < 1e-4);
         assert!(rogner(&p, 6.0, 5.0).is_empty());
+    }
+}
+
+/// Au-delà de cet écart (°) entre deux voies bout à bout, leurs files tournent : les
+/// intérieures se rejoignent où elles se coupent, les autres décrivent des arcs. En deçà,
+/// leurs tracés sont presque parallèles.
+const GIRATION: f32 = 3.0;
+
+/// Une giration : deux voies bout à bout (seules de leur genre au nœud, ou qui se
+/// prolongent : même disposition de files, alignées) qui font un angle. Les files
+/// intérieures (du côté du virage) se rejoignent où elles se coupent ; les autres
+/// suivent un arc tangent à leurs deux tracés, de rayon leur distance aux intérieures.
+#[derive(Clone, Copy, Debug)]
+pub struct Giration {
+    /// Le nœud.
+    o: [f32; 2],
+    /// La direction de notre voie vers le nœud, et celle de l'autre en le quittant.
+    u1: [f32; 2],
+    u2: [f32; 2],
+    /// La place en travers (à gauche de u1) des files intérieures, chez nous.
+    t_in: f32,
+    /// Le rapport des largeurs (l'autre voie sur la nôtre) : une place t chez nous est
+    /// t × rapport chez elle.
+    rapport: f32,
+    /// Le virage tourne à gauche.
+    gauche: bool,
+}
+
+fn a_gauche(u: [f32; 2]) -> [f32; 2] {
+    [-u[1], u[0]]
+}
+
+/// Les girations des deux bouts de l'arête `k`, d'axe `pts` (aucune à un bout raccordé).
+pub fn girations(r: &Reseau, k: usize, pts: &[[f32; 3]], raccords: &[Option<Raccord>; 2]) -> [Option<Giration>; 2] {
+    let mut out = [None, None];
+    let a = &r.aretes[k];
+    let m = pts.len();
+    if m < 2 || a.files.total == 0 {
+        return out;
+    }
+    let norm = |v: [f32; 2]| {
+        let l = v[0].hypot(v[1]).max(1e-6);
+        [v[0] / l, v[1] / l]
+    };
+    // Les files d'un bout qui entrent au nœud, et celles qui en sortent
+    let sens = |b: &sage_reel::reseau::Arete, f: bool| {
+        let (mut e, mut s_) = (0usize, 0usize);
+        for i in 0..b.files.total as usize {
+            match crate::files::sens(b, i) {
+                crate::files::Sens::Avant => {
+                    if f { e += 1 } else { s_ += 1 }
+                }
+                crate::files::Sens::Arriere => {
+                    if f { s_ += 1 } else { e += 1 }
+                }
+                crate::files::Sens::Partagee => {}
+            }
+        }
+        (e, s_)
+    };
+    for (idx, fin) in [(0usize, false), (1usize, true)] {
+        if raccords[idx].is_some() {
+            continue;
+        }
+        let n = if fin { a.b } else { a.a };
+        let mut bouts: Vec<(usize, bool)> = Vec::new();
+        for &j in &r.noeuds[n].aretes {
+            let b = &r.aretes[j];
+            // Seules comptent les voies de notre genre (une voie de service qui s'y
+            // greffe ne l'empêche pas)
+            if !sage_reel::carrossable(b.genre) || b.points.len() < 2 || b.files.total == 0 || b.genre != a.genre {
+                continue;
+            }
+            for f in [false, true] {
+                if (if f { b.b } else { b.a }) == n {
+                    bouts.push((j, f));
+                }
+            }
+        }
+        let (ie, ip) = if fin { (m - 1, m - 2) } else { (0, 1) };
+        let u1 = norm([pts[ie][0] - pts[ip][0], pts[ie][1] - pts[ip][1]]);
+        let depart = |j: usize, f: bool| -> Option<[f32; 2]> {
+            let q = deporte(r, j);
+            let mq = q.len();
+            if mq < 2 {
+                return None;
+            }
+            Some(if f { norm([q[mq - 2][0] - q[mq - 1][0], q[mq - 2][1] - q[mq - 1][1]]) } else { norm([q[1][0] - q[0][0], q[1][1] - q[0][1]]) })
+        };
+        let (ek, sk) = sens(a, fin);
+        // Une boucle (ses deux bouts au même nœud, souvent une voie de service en
+        // raquette) se raccorde à elle-même ; les autres voies n'y cherchent pas de suite
+        let boucle = |j: usize| r.aretes[j].a == r.aretes[j].b;
+        let autres: Vec<(usize, bool)> = bouts.iter().copied().filter(|&(j, f)| (j, f) != (k, fin) && !boucle(j)).collect();
+        let partenaire = if boucle(k) {
+            Some((k, !fin))
+        } else if bouts.len() == 2 {
+            autres.first().copied().filter(|&(j, _)| j != k && r.aretes[j].files.total == a.files.total)
+        } else {
+            // La voie qui nous prolonge : même disposition, alignée, et seule
+            let v: Vec<(usize, bool)> = autres
+                .iter()
+                .copied()
+                .filter(|&(j, f)| {
+                    let b = &r.aretes[j];
+                    let (ej, sj) = sens(b, f);
+                    j != k && b.files.total == a.files.total && ej == sk && sj == ek && depart(j, f).is_some_and(|u2| (u1[0] * u2[0] + u1[1] * u2[1]) >= TOUT_DROIT.to_radians().cos())
+                })
+                .collect();
+            if v.len() == 1 { Some(v[0]) } else { None }
+        };
+        let Some((j, f)) = partenaire else { continue };
+        let Some(u2) = depart(j, f) else { continue };
+        let c = u1[0] * u2[0] + u1[1] * u2[1];
+        if c > GIRATION.to_radians().cos() || c < -0.95 {
+            continue;
+        }
+        let l1 = a_gauche(u1);
+        let gauche = u1[0] * u2[1] - u1[1] * u2[0] > 0.0;
+        // La place en travers des files (le décalage suit la normale du tracé)
+        let g = crate::files::normales(pts);
+        let sg = if g[ie][0] * l1[0] + g[ie][1] * l1[1] >= 0.0 { 1.0 } else { -1.0 };
+        let ts = (0..a.files.total as usize).map(|i| crate::files::decalage(a, i) * sg);
+        let t_in = if gauche { ts.fold(f32::MIN, f32::max) } else { ts.fold(f32::MAX, f32::min) };
+        let rapport = r.aretes[j].largeur / a.largeur.max(0.1);
+        out[idx] = Some(Giration { o: [pts[ie][0], pts[ie][1]], u1, u2, t_in, rapport, gauche });
+    }
+    out
+}
+
+/// Fait tourner les bouts d'une polyligne de l'arête (une file, une ligne entre files,
+/// un bord) à ses girations : le coin où elle coupe sa suite, ou son demi-arc.
+pub fn girer(gs: &[Option<Giration>; 2], l: &mut Vec<[f32; 3]>) {
+    for (idx, g) in gs.iter().enumerate() {
+        let Some(g) = g else { continue };
+        if l.len() < 2 {
+            return;
+        }
+        if idx == 0 {
+            l.reverse();
+        }
+        girer_fin(g, l);
+        if idx == 0 {
+            l.reverse();
+        }
+    }
+}
+
+fn girer_fin(g: &Giration, l: &mut Vec<[f32; 3]>) {
+    let (l1, l2) = (a_gauche(g.u1), a_gauche(g.u2));
+    let e = l[l.len() - 1];
+    let z = e[2];
+    let t1 = (e[0] - g.o[0]) * l1[0] + (e[1] - g.o[1]) * l1[1];
+    let t2 = t1 * g.rapport;
+    let sgn = if g.gauche { 1.0 } else { -1.0 };
+    // Le rayon : la distance aux files intérieures, moyenne des deux voies
+    let rho = (g.t_in - t1) * (1.0 + g.rapport) / 2.0 * sgn;
+    let croix = |x: [f32; 2], y: [f32; 2]| x[0] * y[1] - x[1] * y[0];
+    let det = croix(g.u1, g.u2);
+    if det.abs() < 1e-4 {
+        return;
+    }
+    // Le point où se coupent la parallèle à la place a chez nous et celle à la place b
+    // chez l'autre
+    let x = |a: f32, b: f32| {
+        let p1 = [g.o[0] + a * l1[0], g.o[1] + a * l1[1]];
+        let p2 = [g.o[0] + b * l2[0], g.o[1] + b * l2[1]];
+        let s = croix([p2[0] - p1[0], p2[1] - p1[1]], g.u2) / det;
+        [p1[0] + s * g.u1[0], p1[1] + s * g.u1[1]]
+    };
+    let proj = |p: [f32; 2]| (p[0] - g.o[0]) * g.u1[0] + (p[1] - g.o[1]) * g.u1[1];
+    // On ne raccourcit que la fin de la polyligne (une boucle revient près du nœud par
+    // son autre bout : ses points-là restent)
+    let garder = |l: &mut Vec<[f32; 3]>, coupe: f32| {
+        while l.len() > 1 && proj([l[l.len() - 1][0], l[l.len() - 1][1]]) >= coupe - 1e-3 {
+            l.pop();
+        }
+    };
+    // Deux voies de largeurs différentes presque dans l'axe : leurs parallèles ne se
+    // coupent que très loin (l'écart divisé par le sinus de l'angle). On les rejoint
+    // alors au milieu de leurs deux bouts au nœud, en biseau.
+    let ecart = (t2 - t1).abs();
+    if ecart > 0.05 && ecart / det.abs() > 1.0 {
+        let m = [g.o[0] + (t1 * l1[0] + t2 * l2[0]) / 2.0, g.o[1] + (t1 * l1[1] + t2 * l2[1]) / 2.0];
+        // Le bout au nœud est remplacé par le milieu (sinon un aller-retour en travers)
+        if l.len() > 1 {
+            l.pop();
+        }
+        garder(l, proj(m));
+        l.push([m[0], m[1], z]);
+        return;
+    }
+    if rho <= 0.01 {
+        let p = x(t1, t2);
+        garder(l, proj(p));
+        l.push([p[0], p[1], z]);
+        return;
+    }
+    let cc = x(t1 + sgn * rho, t2 + sgn * rho);
+    let t_1 = [cc[0] - sgn * rho * l1[0], cc[1] - sgn * rho * l1[1]];
+    let b = {
+        let v = [l1[0] + l2[0], l1[1] + l2[1]];
+        let n = v[0].hypot(v[1]).max(1e-6);
+        [v[0] / n, v[1] / n]
+    };
+    let mm = [cc[0] - sgn * rho * b[0], cc[1] - sgn * rho * b[1]];
+    garder(l, proj(t_1));
+    let a0 = (t_1[1] - cc[1]).atan2(t_1[0] - cc[0]);
+    let a1 = (mm[1] - cc[1]).atan2(mm[0] - cc[0]);
+    let mut d = a1 - a0;
+    while d > std::f32::consts::PI {
+        d -= std::f32::consts::TAU;
+    }
+    while d < -std::f32::consts::PI {
+        d += std::f32::consts::TAU;
+    }
+    let pas = ((d.abs() / 8f32.to_radians()).ceil() as usize).max(2);
+    for s in 0..=pas {
+        let a = a0 + d * s as f32 / pas as f32;
+        l.push([cc[0] + rho * a.cos(), cc[1] + rho * a.sin(), z]);
     }
 }

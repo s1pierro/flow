@@ -1429,6 +1429,8 @@ pub struct BoutLibre {
     pub d_noeud: f32,
     /// La distance (m) au plus proche bout d'un autre bord.
     pub d_voisin: f32,
+    /// Ce qui l'a coupé : les bandes juste au-delà de lui (« a123 », « joint »), ou rien.
+    pub cause: String,
 }
 
 /// Les réglages de la surimpression sur la maquette : les tracés du réseau et les
@@ -1533,8 +1535,27 @@ impl Relief3d {
                     })
                     .map(|(k, _)| k)
                     .collect();
-                let lignes = crate::bords::bords(&r, &dans, &|k| crate::fils::trace_raccords(&r, k));
-                let bouts: Vec<[f32; 3]> = lignes.iter().filter(|l| l.len() >= 2).flat_map(|l| [l[0], l[l.len() - 1]]).collect();
+                let (lignes, bandes) = crate::bords::bords_et_bandes(&r, &dans, &|k| crate::fils::trace_raccords(&r, k));
+                // Chaque bord gardé, avec son origine et sa longueur
+                let (lignes, origines): (Vec<&Vec<[f32; 3]>>, Vec<String>) = lignes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.len() >= 2)
+                    .map(|(i, l)| {
+                        let long: f32 = l.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+                        let o = bandes.origines.get(i).cloned().unwrap_or_default();
+                        (l, format!("morceau de {} m : {o}", format!("{long:.2}").replace('.', ",")))
+                    })
+                    .unzip();
+                let bouts: Vec<[f32; 3]> = lignes.iter().flat_map(|l| [l[0], l[l.len() - 1]]).collect();
+                // Le point un peu au-delà d'un bout, dans le prolongement de son bord
+                let au_dela = |i: usize| -> [f32; 3] {
+                    let l = lignes[i / 2];
+                    let (q, v) = if i % 2 == 0 { (l[0], l[1]) } else { (l[l.len() - 1], l[l.len() - 2]) };
+                    let (dx, dz) = (q[0] - v[0], q[1] - v[1]);
+                    let n = dx.hypot(dz).max(1e-6);
+                    [q[0] + dx / n * 0.1, q[1] + dz / n * 0.1, q[2]]
+                };
                 let interieur = |q: [f32; 3]| q[0] > b[0] + 0.5 && q[0] < b[2] - 0.5 && q[1] > b[1] + 0.5 && q[1] < b[3] - 0.5;
                 // Une grille de 1 m pour chercher les bouts voisins
                 let mut grille: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
@@ -1573,7 +1594,10 @@ impl Relief3d {
                                 }
                             }
                         }
-                        libres.push(BoutLibre { p: *q, noeud: nmin, d_noeud: dmin, d_voisin });
+                        let c = bandes.couvrent(au_dela(i));
+                        let cause = if c.is_empty() { "fin du tracé".to_string() } else { format!("coupé par {}", c.join(", ")) };
+                        let cause = format!("{cause} · {}", origines[i / 2]);
+                        libres.push(BoutLibre { p: *q, noeud: nmin, d_noeud: dmin, d_voisin, cause });
                     }
                 }
             }
@@ -1589,6 +1613,7 @@ impl Relief3d {
         let mut t = bilan.clone();
         for l in self.bords_libres.iter().rev().take(12) {
             t.push_str(&format!("\nnœud {} à {:.1} m · voisin à {:.2} m · x {:.1} z {:.1}", l.noeud, l.d_noeud, l.d_voisin, l.p[0], l.p[1]).replace('.', ","));
+            t.push_str(&format!(" · {}", l.cause));
         }
         self.bords_diag = bilan;
         t
@@ -1922,9 +1947,11 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
             }
             // Les lignes, tirées des files vectorielles (`files`)
             let (pts, _, raccords) = crate::fils::trace_raccords(r, ka);
+            let girs = crate::fils::girations(r, ka, &pts, &raccords);
             for (rang, (ligne, mut l)) in crate::files::separations(a, &pts).into_iter().enumerate() {
                 // Au raccord, la ligne finit entre les files qu'elle sépare
                 crate::fils::raccorder_bouts(&raccords, &mut l, |rc| rc.bout_ligne(rang + 1));
+                crate::fils::girer(&girs, &mut l);
                 let k = match ligne {
                     crate::files::Ligne::Sens => 6,
                     crate::files::Ligne::Osm => 4,
@@ -1962,9 +1989,11 @@ fn traces_reseau(r: &sage_reel::reseau::Reseau, deports: &HashMap<usize, Vec<cra
                     }
                 }
             }
+            let girs = crate::fils::girations(r, ka, &pts, &raccords);
             for mut f in crate::files::files(ka, a, &pts) {
                 let rang = f.rang;
                 crate::fils::raccorder_bouts(&raccords, &mut f.axe, |rc| rc.bout_file(rang));
+                crate::fils::girer(&girs, &mut f.axe);
                 let k = if f.bus { 10 } else { 7 };
                 for w in f.axe.windows(2) {
                     if let Some((p, q)) = couper(w[0], w[1], b) {

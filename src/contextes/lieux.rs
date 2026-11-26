@@ -1981,6 +1981,7 @@ impl Lieux {
                                             if cx.row(&mut b, sub_id(sub_id(base, 688), t * 1000 + i), &texte, None, false) {
                                                 aller = Some((l.noeud, l.p));
                                             }
+                                            cx.paragraph(&mut b, &l.cause);
                                         }
                                         if dans.len() > 40 {
                                             cx.paragraph(&mut b, &format!("… et {} autres", dans.len() - 40));

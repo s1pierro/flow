@@ -26,18 +26,57 @@ const EPS: f32 = 0.02;
 /// Deux bouts de bords près d'un nœud à moins de tant (m) l'un de l'autre sont confondus.
 const SOUDURE: f32 = 1.0;
 /// Partout, deux bouts à moins de tant (m) l'un de l'autre sont confondus.
-const SOUDURE_FINE: f32 = 0.05;
+const SOUDURE_FINE: f32 = 0.15;
 /// La maille (m) de l'index des bandes.
 const CASE: f32 = 10.0;
 /// Une bande ne coupe un bord que s'ils sont à moins de tant de mètres en hauteur (un
 /// pont ne coupe pas la rue qu'il enjambe).
 const ECART_H: f32 = 2.0;
 
+/// Le point de croisement des segments `a`–`b` et `c`–`d`, s'ils se croisent.
+fn croisement(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> Option<[f32; 2]> {
+    let r = [b[0] - a[0], b[1] - a[1]];
+    let s = [d[0] - c[0], d[1] - c[1]];
+    let den = r[0] * s[1] - r[1] * s[0];
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let q = [c[0] - a[0], c[1] - a[1]];
+    let t = (q[0] * s[1] - q[1] * s[0]) / den;
+    let u = (q[0] * r[1] - q[1] * r[0]) / den;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then(|| [a[0] + r[0] * t, a[1] + r[1] * t])
+}
+
+/// La part (t0, t1) du segment `a`–`b` dans le cercle de centre `c` et de rayon `ray`.
+fn dans_cercle(a: [f32; 2], b: [f32; 2], c: [f32; 2], ray: f32) -> Option<(f32, f32)> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let f = [a[0] - c[0], a[1] - c[1]];
+    let qa = d[0] * d[0] + d[1] * d[1];
+    let qb = 2.0 * (f[0] * d[0] + f[1] * d[1]);
+    let qc = f[0] * f[0] + f[1] * f[1] - ray * ray;
+    if qa < 1e-12 {
+        return (qc <= 0.0).then_some((0.0, 1.0));
+    }
+    let disc = qb * qb - 4.0 * qa * qc;
+    if disc < 0.0 {
+        return None;
+    }
+    let sq = disc.sqrt();
+    let (t0, t1) = (((-qb - sq) / (2.0 * qa)).max(0.0), ((-qb + sq) / (2.0 * qa)).min(1.0));
+    (t1 > t0).then_some((t0, t1))
+}
+
 type Poly = Vec<[f32; 3]>;
 
 /// Un morceau de bande : le quadrilatère d'un segment de voie.
 struct Bande {
     arete: usize,
+    /// Les voies dont les bords ne sont pas coupés par ce morceau (un joint : celles qui
+    /// arrivent à son nœud).
+    exclues: Vec<usize>,
+    /// Le nœud d'un changement de passage près duquel ce morceau se trouve : là, il
+    /// coupe aussi les bords des voies d'autres passages qui y arrivent.
+    portail: Option<usize>,
     passage: Passage,
     bus: bool,
     q: [[f32; 2]; 4],
@@ -99,15 +138,28 @@ fn case(x: f32, z: f32) -> (i32, i32) {
 }
 
 /// Les bandes et leur index.
-struct Bandes {
+pub struct Bandes {
     bandes: Vec<Bande>,
     index: HashMap<(i32, i32), Vec<u32>>,
+    /// Les deux nœuds de chaque arête (une bouche de tunnel, une tête de pont : les
+    /// voies qui s'y rejoignent s'y coupent malgré leurs passages différents).
+    noeuds: HashMap<usize, [usize; 2]>,
+    /// Le cercle de chaque portail (centre, rayon) : un autre passage n'y coupe que dedans.
+    cercles: HashMap<usize, ([f32; 2], f32)>,
+    /// L'origine de chaque bord de la sortie (diagnostic) : voie, côté, raccords, girations.
+    pub origines: Vec<String>,
 }
 
 impl Bandes {
     /// Les morceaux de `p` hors des bandes (sauf celles des arêtes `sauf`) de son niveau.
     /// Le bord d'une voie de bus (`bus`) n'est coupé que par les voies de bus.
     fn garder(&self, p: &[[f32; 3]], passage: Passage, bus: bool, sauf: &[usize]) -> Vec<Poly> {
+        self.decouper(p, passage, bus, sauf, false)
+    }
+
+    /// `garder`, ou à l'inverse (`dedans`) les morceaux de `p` dans les bandes des voies
+    /// qui ne sont pas de bus.
+    fn decouper(&self, p: &[[f32; 3]], passage: Passage, bus: bool, sauf: &[usize], dedans_: bool) -> Vec<Poly> {
         let mut sortie = Vec::new();
         let mut cur: Poly = Vec::new();
         let mut ouvert = false;
@@ -132,27 +184,50 @@ impl Bandes {
             let mut couverts: Vec<(f32, f32)> = Vec::new();
             for &i in &vus {
                 let b = &self.bandes[i as usize];
-                if sauf.contains(&b.arete) || b.passage != passage || (bus && !b.bus) || (b.h - hm).abs() > ECART_H {
+                // Un autre passage ne coupe qu'au portail que les deux voies partagent
+                let au_portail = || b.portail.is_some_and(|n| sauf.first().and_then(|k| self.noeuds.get(k)).is_some_and(|ns| ns.contains(&n)));
+                if sauf.contains(&b.arete) || b.exclues.iter().any(|e| sauf.contains(e)) || (b.passage != passage && !au_portail()) || (b.h - hm).abs() > ECART_H {
+                    continue;
+                }
+                if if dedans_ { b.bus || b.arete == usize::MAX } else { bus && !b.bus } {
                     continue;
                 }
                 if let Some((t0, t1)) = dedans(p0, p1, b) {
+                    // Un autre passage ne coupe que dans le cercle du portail
+                    let (t0, t1) = if b.passage != passage {
+                        match b.portail.and_then(|n| self.cercles.get(&n)).and_then(|&(c, ray)| dans_cercle(p0, p1, c, ray)) {
+                            Some((c0, c1)) => (t0.max(c0), t1.min(c1)),
+                            None => continue,
+                        }
+                    } else {
+                        (t0, t1)
+                    };
                     if (t1 - t0) * l > 0.01 {
                         couverts.push((t0, t1));
                     }
                 }
             }
             couverts.sort_by(|x, y| x.0.total_cmp(&y.0));
-            // Les intervalles gardés : le complément
+            // Les intervalles gardés : le complément (ou, à l'inverse, leur réunion)
             let mut gardes: Vec<(f32, f32)> = Vec::new();
-            let mut t = 0.0f32;
-            for (t0, t1) in couverts {
-                if t0 > t {
-                    gardes.push((t, t0));
+            if dedans_ {
+                for (t0, t1) in couverts {
+                    match gardes.last_mut() {
+                        Some(g) if t0 <= g.1 => g.1 = g.1.max(t1),
+                        _ => gardes.push((t0, t1)),
+                    }
                 }
-                t = t.max(t1);
-            }
-            if t < 1.0 {
-                gardes.push((t, 1.0));
+            } else {
+                let mut t = 0.0f32;
+                for (t0, t1) in couverts {
+                    if t0 > t {
+                        gardes.push((t, t0));
+                    }
+                    t = t.max(t1);
+                }
+                if t < 1.0 {
+                    gardes.push((t, 1.0));
+                }
             }
             if gardes.is_empty() {
                 if cur.len() >= 2 {
@@ -190,6 +265,37 @@ impl Bandes {
 /// donne l'axe de chaque arête (celui de ses files), sa demi-largeur en chaque point et
 /// ses raccords aux fourches.
 pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32>, [Option<crate::fils::Raccord>; 2])) -> Vec<Poly> {
+    bords_et_bandes(r, aretes, axe).0
+}
+
+impl Bandes {
+    /// Ce qui couvre le point `p` (x, z, hauteur) : les voies dont la bande le contient
+    /// (« aN »), les joints de nœud, les morceaux près d'un portail (diagnostic).
+    pub fn couvrent(&self, p: [f32; 3]) -> Vec<String> {
+        let q = [p[0], p[1]];
+        let mut v: Vec<String> = Vec::new();
+        for i in self.index.get(&case(p[0], p[1])).map(|x| x.as_slice()).unwrap_or(&[]) {
+            let b = &self.bandes[*i as usize];
+            if (b.h - p[2]).abs() > ECART_H || dedans(q, q, b).is_none() {
+                continue;
+            }
+            let t = if b.arete == usize::MAX {
+                "joint".to_string()
+            } else if b.portail.is_some() {
+                format!("a{} (portail)", b.arete)
+            } else {
+                format!("a{}", b.arete)
+            };
+            if !v.contains(&t) {
+                v.push(t);
+            }
+        }
+        v
+    }
+}
+
+/// `bords`, et les bandes qui les ont coupés.
+pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32>, [Option<crate::fils::Raccord>; 2])) -> (Vec<Poly>, Bandes) {
     let carrossable = |k: usize| {
         let a = &r.aretes[k];
         sage_reel::carrossable(a.genre) && a.files.total > 0 && a.points.len() >= 2
@@ -200,12 +306,109 @@ pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32
     // posé aux raccords sur celui des files du tronc qu'elles continuent ; et les bandes
     // entre eux
     let mut cotes: HashMap<usize, [Poly; 2]> = HashMap::new();
-    let mut bandes = Bandes { bandes: Vec::new(), index: HashMap::new() };
+    let mut infos: HashMap<usize, String> = HashMap::new();
+    let mut bandes = Bandes { bandes: Vec::new(), index: HashMap::new(), noeuds: HashMap::new(), cercles: HashMap::new(), origines: Vec::new() };
+    // Les nœuds où se rejoignent des voies de passages différents, et leur rayon (la plus
+    // grande demi-largeur, plus une marge)
+    let mut portails: HashMap<usize, f32> = HashMap::new();
+    let mut axes: HashMap<usize, (Poly, Vec<f32>, [Option<crate::fils::Raccord>; 2])> = utiles.iter().map(|&k| (k, axe(k))).collect();
+    {
+        let mut vus: HashMap<usize, (Passage, bool, f32)> = HashMap::new();
+        for &k in &utiles {
+            let a = &r.aretes[k];
+            for n in [a.a, a.b] {
+                let e = vus.entry(n).or_insert((a.passage, false, 0.0));
+                if e.0 != a.passage {
+                    e.1 = true;
+                }
+                e.2 = e.2.max(a.largeur * 0.5);
+            }
+        }
+        // Un portail qui est aussi une fourche : jusqu'aux cassures de ses branches (leurs
+        // bords intérieurs s'y coupent jusqu'au nez)
+        let mut fourches: HashMap<usize, f32> = HashMap::new();
+        for &k in &utiles {
+            let a = &r.aretes[k];
+            for (i, rc) in axes[&k].2.iter().enumerate() {
+                if let Some(rc) = rc {
+                    let n = if i == 0 { a.a } else { a.b };
+                    let d = rc.noeuds.iter().map(|x| x.distance).fold(0.0, f32::max);
+                    let e = fourches.entry(n).or_insert(0.0);
+                    *e = e.max(d);
+                }
+            }
+        }
+        // Les deux bords d'une voie (sans giration), comme plus bas
+        let bords_de = |k: usize| -> [Poly; 2] {
+            let (p, ws, raccords) = &axes[&k];
+            let nf = r.aretes[k].files.total as usize;
+            let g = crate::files::normales(p);
+            let decale = |sg: f32| -> Poly { p.iter().zip(&g).zip(ws).map(|((q, g), w)| [q[0] + g[0] * w * sg, q[1] + g[1] * w * sg, q[2]]).collect() };
+            let (mut gauche, mut droite) = (decale(1.0), decale(-1.0));
+            crate::fils::raccorder_bouts(raccords, &mut gauche, |rc| rc.bout_bord(true, nf));
+            crate::fils::raccorder_bouts(raccords, &mut droite, |rc| rc.bout_bord(false, nf));
+            [gauche, droite]
+        };
+        // Le nez d'un portail-fourche : le croisement des bords de deux de ses branches le
+        // plus loin du nœud, en deçà des cassures (au-delà, un chevauchement des données)
+        let nez = |n: usize, limite: f32| -> Option<f32> {
+            let c = [r.noeuds[n].p[0], r.noeuds[n].p[1]];
+            let branches: Vec<usize> = utiles
+                .iter()
+                .copied()
+                .filter(|&k| {
+                    let a = &r.aretes[k];
+                    (a.a == n && axes[&k].2[0].is_some()) || (a.b == n && axes[&k].2[1].is_some())
+                })
+                .collect();
+            let bs: Vec<[Poly; 2]> = branches.iter().map(|&k| bords_de(k)).collect();
+            let mut loin: Option<f32> = None;
+            let proche = |q: &[f32; 3]| (q[0] - c[0]).hypot(q[1] - c[1]) <= limite + 1.0;
+            for i in 0..bs.len() {
+                for j in i + 1..bs.len() {
+                    if r.aretes[branches[i]].passage == r.aretes[branches[j]].passage {
+                        continue;
+                    }
+                    for l1 in &bs[i] {
+                        for l2 in &bs[j] {
+                            for s1 in l1.windows(2).filter(|s| proche(&s[0]) || proche(&s[1])) {
+                                for s2 in l2.windows(2).filter(|s| proche(&s[0]) || proche(&s[1])) {
+                                    if let Some(x) = croisement([s1[0][0], s1[0][1]], [s1[1][0], s1[1][1]], [s2[0][0], s2[0][1]], [s2[1][0], s2[1][1]]) {
+                                        let d = (x[0] - c[0]).hypot(x[1] - c[1]);
+                                        if d <= limite && loin.is_none_or(|v| d > v) {
+                                            loin = Some(d);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            loin
+        };
+        for (n, (_, mixte, w)) in vus {
+            if mixte {
+                let ray = (w + 1.5).max(fourches.get(&n).and_then(|d| nez(n, d + w)).map_or(0.0, |d| d + 0.3));
+                portails.insert(n, ray);
+                bandes.cercles.insert(n, ([r.noeuds[n].p[0], r.noeuds[n].p[1]], ray));
+            }
+        }
+    }
     for &k in &utiles {
-        let (p, ws, raccords) = axe(k);
+        let (p, ws, raccords) = axes.remove(&k).unwrap();
         if p.len() < 2 || ws.len() != p.len() {
             continue;
         }
+        bandes.noeuds.insert(k, [r.aretes[k].a, r.aretes[k].b]);
+        let portail_de = |a: [f32; 3], b: [f32; 3]| -> Option<usize> {
+            [r.aretes[k].a, r.aretes[k].b].into_iter().find(|n| {
+                portails.get(n).is_some_and(|&ray| {
+                    let c = r.noeuds[*n].p;
+                    (a[0] - c[0]).hypot(a[1] - c[1]) <= ray || (b[0] - c[0]).hypot(b[1] - c[1]) <= ray
+                })
+            })
+        };
         let n = r.aretes[k].files.total as usize;
         let g = crate::files::normales(&p);
         let decale = |sg: f32| -> Poly { p.iter().zip(&g).zip(&ws).map(|((q, g), w)| [q[0] + g[0] * w * sg, q[1] + g[1] * w * sg, q[2]]).collect() };
@@ -232,16 +435,131 @@ pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32
                     bandes.index.entry((ci, cj)).or_default().push(id);
                 }
             }
-            bandes.bandes.push(Bande { arete: k, passage: r.aretes[k].passage, bus: est_bus(k), q, sens, h: (p[i][2] + p[j][2]) / 2.0 });
+            bandes.bandes.push(Bande { arete: k, exclues: Vec::new(), portail: portail_de(p[i], p[j]), passage: r.aretes[k].passage, bus: est_bus(k), q, sens, h: (p[i][2] + p[j][2]) / 2.0 });
         }
+        // Les girations (deux voies bout à bout en angle fort) : coin ou arc, après
+        // les bandes
+        let gs = crate::fils::girations(r, k, &p, &raccords);
+        crate::fils::girer(&gs, &mut gauche);
+        crate::fils::girer(&gs, &mut droite);
         cotes.insert(k, [gauche, droite]);
+        {
+            let mut t = Vec::new();
+            for (i, nom) in ["début", "fin"].iter().enumerate() {
+                if let Some(rc) = &raccords[i] {
+                    t.push(format!("raccord {nom} ({}{})", rc.regle, if rc.entier { ", entier" } else { "" }));
+                }
+                if gs[i].is_some() {
+                    t.push(format!("giration {nom}"));
+                }
+            }
+            infos.insert(k, t.join(", "));
+        }
+    }
+    // Les joints : à chaque nœud, l'enveloppe des bouts des bandes qui y arrivent (de
+    // même niveau). Elle comble les coins vides entre deux bandes coupées d'équerre qui
+    // font un angle ; un bord qui les traverserait y est coupé.
+    {
+        let mut aux: HashMap<(usize, Passage), (Vec<[f32; 2]>, f32, Vec<usize>, bool, Passage)> = HashMap::new();
+        for &k in &utiles {
+            let Some([g, d]) = cotes.get(&k) else { continue };
+            let a = &r.aretes[k];
+            // Les deux bords n'ont pas toujours autant de points (girations)
+            for (n, fin) in [(a.a, false), (a.b, true)] {
+                let (gi, di) = if fin { (g[g.len() - 1], d[d.len() - 1]) } else { (g[0], d[0]) };
+                let e = aux.entry((n, a.passage)).or_insert((Vec::new(), 0.0, Vec::new(), true, a.passage));
+                e.0.push([gi[0], gi[1]]);
+                e.0.push([di[0], di[1]]);
+                e.1 += (gi[2] + di[2]) / 2.0;
+                e.2.push(k);
+                e.3 &= est_bus(k);
+            }
+        }
+        for (_, (pts, hs, voies, bus, passage)) in aux {
+            let nb = voies.len();
+            if nb < 2 {
+                continue;
+            }
+            let h = hs / nb as f32;
+            // L'enveloppe convexe (chaîne monotone), dans le sens direct
+            let mut v = pts.clone();
+            v.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+            v.dedup_by(|a, b| (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-4);
+            if v.len() < 3 {
+                continue;
+            }
+            let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+            let mut env: Vec<[f32; 2]> = Vec::new();
+            for pass in 0..2 {
+                let debut = env.len();
+                let it: Vec<[f32; 2]> = if pass == 0 { v.clone() } else { v.iter().rev().copied().collect() };
+                for q in it {
+                    while env.len() >= debut + 2 && cross(env[env.len() - 2], env[env.len() - 1], q) <= 1e-6 {
+                        env.pop();
+                    }
+                    env.push(q);
+                }
+                env.pop();
+            }
+            if env.len() < 3 {
+                continue;
+            }
+            // Rétrécie de EPS vers son centre
+            let c = env.iter().fold([0.0f32; 2], |s, q| [s[0] + q[0] / env.len() as f32, s[1] + q[1] / env.len() as f32]);
+            let env: Vec<[f32; 2]> = env
+                .iter()
+                .map(|q| {
+                    let (dx, dz) = (c[0] - q[0], c[1] - q[1]);
+                    let l = dx.hypot(dz);
+                    if l > 2.0 * EPS { [q[0] + dx * EPS / l, q[1] + dz * EPS / l] } else { *q }
+                })
+                .collect();
+            // En quadrilatères en éventail depuis le premier point ; le dernier, s'il ne
+            // reste qu'un triangle, avec le milieu d'un côté
+            let mut i = 1;
+            while i + 1 < env.len() {
+                let q = if i + 2 < env.len() {
+                    [env[0], env[i], env[i + 1], env[i + 2]]
+                } else {
+                    let m = [(env[i][0] + env[i + 1][0]) / 2.0, (env[i][1] + env[i + 1][1]) / 2.0];
+                    [env[0], env[i], m, env[i + 1]]
+                };
+                i += 2;
+                let Some(sens) = convexe(&q) else { continue };
+                let id = bandes.bandes.len() as u32;
+                let (x0, z0) = q.iter().fold((f32::MAX, f32::MAX), |m, a| (m.0.min(a[0]), m.1.min(a[1])));
+                let (x1, z1) = q.iter().fold((f32::MIN, f32::MIN), |m, a| (m.0.max(a[0]), m.1.max(a[1])));
+                let (a, z) = (case(x0, z0), case(x1, z1));
+                for ci in a.0..=z.0 {
+                    for cj in a.1..=z.1 {
+                        bandes.index.entry((ci, cj)).or_default().push(id);
+                    }
+                }
+                bandes.bandes.push(Bande { arete: usize::MAX, exclues: voies.clone(), portail: None, passage, bus, q, sens, h });
+            }
+        }
     }
     let mut sortie: Vec<Poly> = Vec::new();
+    let mut origines: Vec<String> = Vec::new();
+    let origine = |k: usize, quoi: &str| {
+        let i = infos.get(&k).map(|s| s.as_str()).unwrap_or("");
+        if i.is_empty() { format!("a{k} {quoi}") } else { format!("a{k} {quoi} · {i}") }
+    };
     // Les bords, hors des bandes des autres voies
     for &k in &utiles {
         let Some(c) = cotes.get(&k) else { continue };
-        for p in c {
-            sortie.extend(bandes.garder(p, r.aretes[k].passage, est_bus(k), &[k]));
+        for (cote, p) in c.iter().enumerate() {
+            let nom = if cote == 0 { "gauche" } else { "droit" };
+            let v = bandes.garder(p, r.aretes[k].passage, est_bus(k), &[k]);
+            origines.extend(v.iter().map(|_| origine(k, &format!("bord {nom}"))));
+            sortie.extend(v);
+            // Une chaussée qui rencontre une voie de bus se ferme sur elle-même, le long
+            // du bord de la voie de bus (en travers de ses files)
+            if est_bus(k) {
+                let v = bandes.decouper(p, r.aretes[k].passage, true, &[k], true);
+                origines.extend(v.iter().map(|_| origine(k, &format!("fermeture bus {nom}"))));
+                sortie.extend(v);
+            }
         }
     }
     let mut noeuds: Vec<usize> = Vec::new();
@@ -366,7 +684,10 @@ pub fn bords(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Poly, Vec<f32
         let (k, debut) = bouts[0];
         let c = &cotes[&k];
         let bout = |p: &Poly| if debut { p[0] } else { p[p.len() - 1] };
-        sortie.extend(bandes.garder(&[bout(&c[0]), bout(&c[1])], r.aretes[k].passage, est_bus(k), &[k]));
+        let v = bandes.garder(&[bout(&c[0]), bout(&c[1])], r.aretes[k].passage, est_bus(k), &[k]);
+        origines.extend(v.iter().map(|_| origine(k, "impasse")));
+        sortie.extend(v);
     }
-    sortie
+    bandes.origines = origines;
+    (sortie, bandes)
 }
