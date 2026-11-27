@@ -299,6 +299,10 @@ pub struct Reseau {
     /// Ce que la construction a fait : raccords, nœuds ajoutés aux croisements à niveau.
     pub raccords: usize,
     pub a_niveau: usize,
+    /// Les arêtes posées sur un tablier au-dessus d'un souterrain (`poser_tabliers`).
+    pub tabliers: Vec<u32>,
+    /// Les arêtes fixes : les voies rapides posées (`lisser_rapides`).
+    pub fixes: Vec<u32>,
 }
 
 /// Un tracé en cours de construction.
@@ -765,6 +769,12 @@ impl<'a> Classes<'a> {
 
     /// La classe d'une voie : celle qui longe au moins `CLASSE_PART` de sa longueur.
     pub fn classe(&self, a: &Arete) -> u8 {
+        // Seules les grandes routes (le générateur y met motorway, trunk et leurs
+        // bretelles) : une voie de service qui longe une voie rapide (au-dessus de son
+        // tunnel) n'en prend pas la classe
+        if a.genre != sage_reel::GRANDE {
+            return 0;
+        }
         let mut long = [0.0f32; 3];
         let mut tot = 0.0f32;
         for w in a.points.windows(2) {
@@ -1460,9 +1470,9 @@ pub fn preparer_souterrains(r: &mut Reseau, l: &Lieu) -> Souterrains {
             }
         }
     }
-    // 5. Les tabliers au-dessus des souterrains
-    let tabliers = poser_tabliers(r);
-    Souterrains { negatifs, courts, enfonces, tranchees, tabliers }
+    // Les tabliers au-dessus des souterrains : après les voies rapides, quand la
+    // profondeur des souterrains est connue (`poser_tabliers`)
+    Souterrains { negatifs, courts, enfonces, tranchees, tabliers: 0 }
 }
 
 /// Les croisements propres (en xz) entre arêtes qui ne se touchent pas :
@@ -1504,7 +1514,11 @@ fn croisements(r: &Reseau) -> Vec<(usize, usize, f32, usize, usize, f32)> {
 /// ajusté sur leurs hauteurs de part et d'autre (pente plafonnée à `TABLIER_PENTE`),
 /// chacune posée dessus au-dessus des souterrains et raccordée au-delà. Rend le
 /// nombre de tabliers.
-fn poser_tabliers(r: &mut Reseau) -> usize {
+/// Les tabliers au-dessus des souterrains proches de la surface : les voies au sol qui
+/// les traversent (pas les voies fixes), à moins de `TABLIER_PROCHE` mètres au-delà de
+/// l'écart nécessaire, posées sur un plan commun. Un souterrain plus profond n'en a pas
+/// besoin : les voies au-dessus suivent le relief.
+pub fn poser_tabliers(r: &mut Reseau) -> usize {
     // Les traversées : (voie au sol, abscisse sur elle, x, z, demi-largeur du souterrain)
     let abscisses = |a: &Arete| -> Vec<f32> {
         let mut v = vec![0.0f32];
@@ -1518,12 +1532,19 @@ fn poser_tabliers(r: &mut Reseau) -> usize {
     for x in croisements(r) {
         for (s, ss, su, t) in [(x.0, x.1, x.2, x.3), (x.3, x.4, x.5, x.0)] {
             let (a, b) = (&r.aretes[s], &r.aretes[t]);
-            if a.passage != Passage::Sol || b.passage != Passage::Tunnel {
+            if a.passage != Passage::Sol || b.passage != Passage::Tunnel || r.fixes.contains(&(s as u32)) {
                 continue;
             }
             let ab = abscisses(a);
             let c = ab[ss] + (ab[ss + 1] - ab[ss]) * su;
             let p = entre(a.points[ss], a.points[ss + 1], su);
+            // Le souterrain est-il proche ? L'écart à lui, au-delà de l'écart nécessaire
+            let (tt, tu) = if t == x.3 { (x.4, x.5) } else { (x.1, x.2) };
+            let q = entre(b.points[tt], b.points[tt + 1], tu);
+            let requis = if b.genre == sage_reel::PIETONNE { GABARIT_PIETON + EPAISSEUR_PIETON } else { GABARIT + EPAISSEUR };
+            if p[2] - q[2] > requis + TABLIER_PROCHE {
+                continue;
+            }
             tr.push((s, c, p[0], p[1], b.largeur * 0.5));
         }
     }
@@ -1604,6 +1625,9 @@ fn poser_tabliers(r: &mut Reseau) -> usize {
         }
         let plan = |x: f32, z: f32| ch + gr[0] * (x - cx) + gr[1] * (z - cz);
         // Chaque voie sur le plan dans sa zone, raccordée au-delà
+        for &k in zones.keys() {
+            r.tabliers.push(k as u32);
+        }
         for (&k, &(s0, s1)) in &zones {
             let a = &mut r.aretes[k];
             let ab = abscisses(a);
@@ -1638,6 +1662,8 @@ const TABLIER_LIEN: f32 = 12.0;
 const TABLIER_MARGE: f32 = 2.0;
 const TABLIER_PENTE: f32 = 0.08;
 const TABLIER_RACCORD: f32 = 10.0;
+/// Un souterrain plus profond que l'écart nécessaire plus tant (m) n'a pas de tablier.
+const TABLIER_PROCHE: f32 = 2.0;
 
 /// Ce que `preparer_souterrains` a fait.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1812,7 +1838,7 @@ pub fn decrire_voie(fin: &Reseau, l: &Lieu, k: usize) -> String {
     };
     let mut o = format!("a{k} · {} · nœuds {} → {}", nom(a0), a0.a, a0.b);
     let couv = a1.points.iter().map(|p| l.relief(p[0] as f64, p[1] as f64) as f32 - p[2]).fold(f32::MIN, f32::max);
-    o += &format!(" · couverture max {couv:.2} m\nprofil (abscisse : nivelée · relief)\n");
+    o += &format!(" · couverture max {couv:.2} m{}{}\nprofil (abscisse : nivelée · relief)\n", if fin.fixes.contains(&(k as u32)) { " · fixe" } else { "" }, if fin.tabliers.contains(&(k as u32)) { " · sur un tablier" } else { "" });
     let mut s = 0.0f32;
     for (i, p) in a0.points.iter().enumerate() {
         if i > 0 {
@@ -1828,7 +1854,14 @@ pub fn decrire_voie(fin: &Reseau, l: &Lieu, k: usize) -> String {
         }
         n += 1;
         let p = brut.point(c.haut);
-        let part = part_du_haut(brut, c);
+        // Une voie rapide posée est fixe : l'autre prend toute la correction
+        let part = if fin.fixes.contains(&(c.haut.0 as u32)) {
+            0.0
+        } else if c.bas.is_some_and(|b| fin.fixes.contains(&(b.0 as u32))) {
+            1.0
+        } else {
+            part_du_haut(brut, c)
+        };
         let bouge = if part >= 0.99 { "le dessus bouge" } else if part <= 0.01 { "le dessous bouge" } else { "les deux bougent" };
         let hh = hauteur_pres(&fin.aretes[c.haut.0], p[0], p[1]).0;
         let (autre, hb) = match c.bas {
@@ -2052,10 +2085,29 @@ pub fn niveler_fixe(r: &mut Reseau, v: &[Contrainte], iterations: usize, fixes: 
         route[a.a] = true;
         route[a.b] = true;
     }
+    // La hiérarchie (comme les bords, la surface et les plaques) : 0 les voies non
+    // carrossables, 1 les voies de service (et chemins carrossables), 2 les routes
+    // (grandes routes, routes, bus). Un point ne regarde que ses voisins de son niveau
+    // ou au-dessus ; une voie inférieure ne tire pas une route
+    let niveau_voie = |a: &Arete| -> u8 {
+        if !sage_reel::carrossable(a.genre) {
+            0
+        } else if crate::materialisation::rang(a.genre) >= 2 {
+            1
+        } else {
+            2
+        }
+    };
+    let mut niv: Vec<u8> = vec![0; nn];
+    for a in &r.aretes {
+        let x = niveau_voie(a);
+        niv[a.a] = niv[a.a].max(x);
+        niv[a.b] = niv[a.b].max(x);
+    }
     let mut somme = vec![(0.0f32, 0usize, 0.0f32, 0usize); nn];
     for a in &r.aretes {
         for (n, p) in [(a.a, a.points[0]), (a.b, *a.points.last().unwrap())] {
-            if route[n] && !sage_reel::carrossable(a.genre) {
+            if niveau_voie(a) < niv[n] {
                 continue;
             }
             let s = &mut somme[n];
@@ -2083,6 +2135,7 @@ pub fn niveler_fixe(r: &mut Reseau, v: &[Contrainte], iterations: usize, fixes: 
             cible.push(p[2]);
             retenue.push(if a.passage == Passage::Sol { RETENUE_SOL } else { RETENUE_OUVRAGE });
             route.push(sage_reel::carrossable(a.genre));
+            niv.push(niveau_voie(a));
             v.push(y.len() - 1);
         }
         v.push(a.b);
@@ -2111,11 +2164,11 @@ pub fn niveler_fixe(r: &mut Reseau, v: &[Contrainte], iterations: usize, fixes: 
                 continue;
             }
             liens.push((x, z, d, g));
-            // Une route ne regarde que ses voisines routes
-            if route[x] == route[z] || !route[x] {
+            // Un point ne regarde que ses voisins de son niveau ou au-dessus
+            if niv[z] >= niv[x] {
                 voisins[x].push(z);
             }
-            if route[x] == route[z] || !route[z] {
+            if niv[x] >= niv[z] {
                 voisins[z].push(x);
             }
         }
@@ -2265,8 +2318,9 @@ pub fn niveler_fixe(r: &mut Reseau, v: &[Contrainte], iterations: usize, fixes: 
                     (true, true, _, _) => continue,
                     (true, false, _, _) => (0.0, 1.0),
                     (false, true, _, _) => (1.0, 0.0),
-                    (_, _, true, false) => (0.0, 1.0),
-                    (_, _, false, true) => (1.0, 0.0),
+                    // La voie inférieure bouge seule
+                    _ if niv[a] > niv[b] => (0.0, 1.0),
+                    _ if niv[a] < niv[b] => (1.0, 0.0),
                     _ => (0.5, 0.5),
                 };
                 let s = if y[a] > y[b] { e } else { -e };
@@ -2360,8 +2414,8 @@ pub fn niveler_fixe(r: &mut Reseau, v: &[Contrainte], iterations: usize, fixes: 
                 continue;
             }
             for &(j, dh) in &adj[i] {
-                // Une rampe ne passe jamais d'une piétonne à une route
-                if route[j] && !route[i] {
+                // Une rampe ne passe jamais d'une voie inférieure à une voie supérieure
+                if niv[j] > niv[i] {
                     continue;
                 }
                 let voulu = h - dh;
@@ -2516,6 +2570,8 @@ pub fn nivele(l: &Lieu) -> Reseau {
     let mut r = reseau(l);
     preparer_souterrains(&mut r, l);
     let rapides = lisser_rapides(&mut r, l);
+    r.fixes = (0..r.aretes.len() as u32).filter(|&k| rapides.fixes[k as usize]).collect();
+    poser_tabliers(&mut r);
     let c = contraintes(&r, l);
     niveler_fixe(&mut r, &c, 50, &rapides.fixes);
     r

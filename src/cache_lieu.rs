@@ -202,6 +202,12 @@ fn ecrire_reseau(r: &Reseau) -> Vec<u8> {
             e.p(p);
         }
     }
+    for v in [&r.tabliers, &r.fixes] {
+        e.u(v.len() as u32);
+        for &k in v.iter() {
+            e.u(k);
+        }
+    }
     e.0
 }
 
@@ -252,7 +258,15 @@ fn lire_reseau(o: &[u8]) -> Option<Reseau> {
         }
         aretes.push(Arete { a, b, points, passage, genre, largeur, revetement, files: Files { total, avant, arriere, osm, bus }, niveau });
     }
-    (l.1 == o.len()).then_some(Reseau { noeuds, aretes, raccords, a_niveau })
+    let mut listes = [Vec::new(), Vec::new()];
+    for v in listes.iter_mut() {
+        let n = l.u()? as usize;
+        for _ in 0..n {
+            v.push(l.u()?);
+        }
+    }
+    let [tabliers, fixes] = listes;
+    (l.1 == o.len()).then_some(Reseau { noeuds, aretes, raccords, a_niveau, tabliers, fixes })
 }
 
 /// Un fichier du cache (`nom`, empreinte `h`), s'il y est.
@@ -299,6 +313,8 @@ mod tests {
             aretes: vec![Arete { a: 0, b: 1, points: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], passage: Passage::Pont, genre: 1, largeur: 7.5, revetement: 2, files: Files { total: 2, avant: 1, arriere: 1, osm: true, bus: 2 }, niveau: -1 }],
             raccords: 3,
             a_niveau: 4,
+            tabliers: vec![0],
+            fixes: vec![],
         };
         let l = lire_reseau(&ecrire_reseau(&r)).unwrap();
         assert_eq!(l.aretes[0].points, r.aretes[0].points);

@@ -309,7 +309,7 @@ impl Donnees {
             let so = {
                 let mut t = crate::suivi::tache("souterrains");
                 let x = rs::preparer_souterrains(&mut r, &self.lieu);
-                t.detail(format!("{} voies de niveau négatif, {} très courts remis au sol, {} enfoncés, {} voies en tranchée, {} tabliers", x.negatifs, x.courts, x.enfonces, x.tranchees, x.tabliers));
+                t.detail(format!("{} voies de niveau négatif, {} très courts remis au sol, {} enfoncés, {} voies en tranchée", x.negatifs, x.courts, x.enfonces, x.tranchees));
                 x
             };
             let rapides = {
@@ -318,6 +318,12 @@ impl Donnees {
                 t.detail(format!("{} chaînes de voies rapides, {} planchers", x.chaines, x.planchers));
                 x
             };
+            r.fixes = (0..r.aretes.len() as u32).filter(|&k| rapides.fixes[k as usize]).collect();
+            {
+                let mut t = crate::suivi::tache("tabliers");
+                let n = rs::poser_tabliers(&mut r);
+                t.detail(format!("{n} tabliers au-dessus de souterrains proches"));
+            }
             let c = {
                 let mut t = crate::suivi::tache("contraintes");
                 let c = rs::contraintes(&r, &self.lieu);
