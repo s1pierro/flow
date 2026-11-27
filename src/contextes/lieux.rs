@@ -68,7 +68,7 @@ const RECHERCHE: Id = id("lieux/recherche");
 pub const DOSSIER: &str = "lieux";
 const HISTORIQUE: usize = 60;
 
-const OUTILS: [&str; 7] = ["Voir", "Bâti", "Voies", "Relief", "Eau", "Sol", "Sélection"];
+const OUTILS: [&str; 8] = ["Voir", "Bâti", "Voies", "Relief", "Eau", "Sol", "Sélection", "Diagnostic"];
 const VOIR: usize = 0;
 const BATI: usize = 1;
 const VOIES: usize = 2;
@@ -77,6 +77,7 @@ const EAU: usize = 4;
 const SOL: usize = 5;
 /// La sélection de tuiles de la maquette (en 3D, comme Voir).
 const SELECTION: usize = 6;
+const DIAGNOSTIC: usize = 7;
 
 const GENRES_BATI: [&str; 5] = ["Maison", "Immeuble", "Industriel", "Édifice", "Annexe"];
 const FORMES: [&str; 4] = ["Plat", "Deux pans", "Croupe", "Appentis"];
@@ -1401,7 +1402,7 @@ impl Lieux {
         r.poser(&d);
         drop(d);
         self.trois_d = Some(r);
-        if self.outil != SELECTION {
+        if self.outil != SELECTION && self.outil != DIAGNOSTIC {
             self.outil = VOIR;
         }
         self.choix = None;
@@ -2018,83 +2019,6 @@ impl Lieux {
                         cx.toggle(&mut b, sub_id(base, 684), "Bords des chaussées", &mut s.bords);
                         if s.bords {
                             cx.paragraph(&mut b, "En noir, les bords des chaussées : le bord extérieur des files extrêmes de chaque voie, posé aux raccords des fourches sur celui des files du tronc. Un bord s'arrête où il entre dans la chaussée d'une autre voie ; deux bouts libres à moins d'un mètre près d'un nœud sont confondus en leur milieu ; un trait ferme le bout d'une impasse. Ils forment des boucles autour des pâtés de maisons. Les sites propres de bus (TEOR) sont une surface à part, jamais coupée : les voies qui les traversent s'arrêtent à leur bord.");
-                            if cx.button(&mut b, sub_id(base, 687), "Diagnostiquer les bords") {
-                                if let Some(r) = self.trois_d.as_mut() {
-                                    r.diagnostiquer_bords(&carte.donnees);
-                                }
-                            }
-                            if let Some(r) = self.trois_d.as_mut() {
-                                if let Some(l) = r.bords_diag.lines().next() {
-                                    cx.paragraph(&mut b, l);
-                                }
-                                // L'histogramme : le nombre de bouts selon la distance au plus
-                                // proche voisin
-                                if !r.bords_libres.is_empty() {
-                                    const BORNES: [(f32, &str); 11] = [(0.01, "1cm"), (0.02, "2"), (0.05, "5"), (0.1, "10"), (0.2, "20"), (0.5, "50cm"), (1.0, "1m"), (2.0, "2"), (5.0, "5"), (10.0, "10m"), (f32::MAX, "+")];
-                                    let mut n = [0usize; 11];
-                                    for l in &r.bords_libres {
-                                        let k = BORNES.iter().position(|x| l.d_voisin < x.0).unwrap_or(10);
-                                        n[k] += 1;
-                                    }
-                                    let classes: Vec<(&str, usize)> = BORNES.iter().zip(n).map(|(x, n)| (x.1, n)).collect();
-                                    cx.histogramme(&mut b, &classes, "distance au plus proche bout (jusqu'à…)");
-                                }
-                                // Les bouts non raccordés par tranche de distance au plus proche
-                                // voisin, chacune dépliable ; chaque bout amène la vue au nœud
-                                const TRANCHES: [(f32, f32, &str); 4] = [(0.0, 0.05, "Voisin à moins de 5 cm"), (0.05, 1.0, "Voisin de 5 cm à 1 m"), (1.0, 5.0, "Voisin de 1 à 5 m"), (5.0, f32::MAX, "Voisin au-delà de 5 m")];
-                                let mut aller = None;
-                                for (t, &(lo, hi, titre)) in TRANCHES.iter().enumerate() {
-                                    let dans: Vec<&crate::relief3d::BoutLibre> = r.bords_libres.iter().filter(|l| l.d_voisin >= lo && l.d_voisin < hi).collect();
-                                    if dans.is_empty() {
-                                        continue;
-                                    }
-                                    let ouverte = self.diag_tranche == Some(t);
-                                    if cx.rubrique(&mut b, sub_id(sub_id(base, 689), t), &format!("{titre} : {}", dans.len()), ouverte) {
-                                        self.diag_tranche = if ouverte { None } else { Some(t) };
-                                    }
-                                    if ouverte {
-                                        for (i, l) in dans.iter().take(40).enumerate() {
-                                            let texte = format!("Nœud {} · voisin {:.2} m", l.noeud, l.d_voisin).replace('.', ",");
-                                            if cx.row(&mut b, sub_id(sub_id(base, 688), t * 1000 + i), &texte, None, false) {
-                                                aller = Some((l.noeud, l.p));
-                                            }
-                                            cx.paragraph(&mut b, &l.cause);
-                                        }
-                                        if dans.len() > 40 {
-                                            cx.paragraph(&mut b, &format!("… et {} autres", dans.len() - 40));
-                                        }
-                                    }
-                                }
-                                if let Some((n, p)) = aller {
-                                    r.aller_bout(n, p);
-                                }
-                            }
-                        }
-                        cx.section(&mut b, "Dénivelé des voies");
-                        cx.paragraph(&mut b, "Les cassures de pente des voies carrossables, sur tout le réseau nivelé : là où la pente mesurée sur 2,5 m avant un point et celle d'après diffèrent de plus de 8 points (le long d'une voie, et à travers un nœud où deux voies se prolongent). En magenta un creux (la pente augmente), en jaune une bosse. Un tremplin donne un creux et une bosse proches.");
-                        if cx.button(&mut b, sub_id(base, 691), "Diagnostiquer le dénivelé") {
-                            if let Some(r) = self.trois_d.as_mut() {
-                                r.diagnostiquer_denivele(&carte.donnees);
-                            }
-                        }
-                        if let Some(r) = self.trois_d.as_mut() {
-                            for l in r.deniv_diag.lines() {
-                                cx.paragraph(&mut b, l);
-                            }
-                            let mut aller = None;
-                            for (i, c) in r.cassures.iter().take(40).enumerate() {
-                                let texte = format!("Nœud {} · {:+.0} % puis {:+.0} %", c.noeud, c.avant * 100.0, c.apres * 100.0);
-                                if cx.row(&mut b, sub_id(sub_id(base, 692), i), &texte, None, false) {
-                                    aller = Some((c.noeud, c.p));
-                                }
-                                cx.paragraph(&mut b, c.texte().trim_start());
-                            }
-                            if r.cassures.len() > 40 {
-                                cx.paragraph(&mut b, &format!("… et {} autres", r.cassures.len() - 40));
-                            }
-                            if let Some((n, p)) = aller {
-                                r.aller_bout(n, p);
-                            }
                         }
                         let avant_brut = s.brut;
                         cx.toggle(&mut b, sub_id(base, 670), "Tracé brut des voies", &mut s.brut);
@@ -2191,6 +2115,91 @@ impl Lieux {
                 }
             }
             SELECTION => self.panneau_selection(cx, &mut b, base),
+            DIAGNOSTIC => {
+                if self.trois_d.is_none() {
+                    cx.paragraph(&mut b, "Les diagnostics portent sur le réseau en 3D : passez en 3D (le cube de la barre).");
+                } else {
+                    cx.section(&mut b, "Bords des chaussées");
+                    cx.paragraph(&mut b, "Les bouts de bords qui ne se raccordent à rien, classés selon la distance au bout le plus proche ; toucher un bout y amène la vue.");
+                    if cx.button(&mut b, sub_id(base, 687), "Diagnostiquer les bords") {
+                        if let Some(r) = self.trois_d.as_mut() {
+                            r.diagnostiquer_bords(&carte.donnees);
+                        }
+                    }
+                    if let Some(r) = self.trois_d.as_mut() {
+                        if let Some(l) = r.bords_diag.lines().next() {
+                            cx.paragraph(&mut b, l);
+                        }
+                        // L'histogramme : le nombre de bouts selon la distance au plus
+                        // proche voisin
+                        if !r.bords_libres.is_empty() {
+                            const BORNES: [(f32, &str); 11] = [(0.01, "1cm"), (0.02, "2"), (0.05, "5"), (0.1, "10"), (0.2, "20"), (0.5, "50cm"), (1.0, "1m"), (2.0, "2"), (5.0, "5"), (10.0, "10m"), (f32::MAX, "+")];
+                            let mut n = [0usize; 11];
+                            for l in &r.bords_libres {
+                                let k = BORNES.iter().position(|x| l.d_voisin < x.0).unwrap_or(10);
+                                n[k] += 1;
+                            }
+                            let classes: Vec<(&str, usize)> = BORNES.iter().zip(n).map(|(x, n)| (x.1, n)).collect();
+                            cx.histogramme(&mut b, &classes, "distance au plus proche bout (jusqu'à…)");
+                        }
+                        // Les bouts non raccordés par tranche de distance au plus proche
+                        // voisin, chacune dépliable ; chaque bout amène la vue au nœud
+                        const TRANCHES: [(f32, f32, &str); 4] = [(0.0, 0.05, "Voisin à moins de 5 cm"), (0.05, 1.0, "Voisin de 5 cm à 1 m"), (1.0, 5.0, "Voisin de 1 à 5 m"), (5.0, f32::MAX, "Voisin au-delà de 5 m")];
+                        let mut aller = None;
+                        for (t, &(lo, hi, titre)) in TRANCHES.iter().enumerate() {
+                            let dans: Vec<&crate::relief3d::BoutLibre> = r.bords_libres.iter().filter(|l| l.d_voisin >= lo && l.d_voisin < hi).collect();
+                            if dans.is_empty() {
+                                continue;
+                            }
+                            let ouverte = self.diag_tranche == Some(t);
+                            if cx.rubrique(&mut b, sub_id(sub_id(base, 689), t), &format!("{titre} : {}", dans.len()), ouverte) {
+                                self.diag_tranche = if ouverte { None } else { Some(t) };
+                            }
+                            if ouverte {
+                                for (i, l) in dans.iter().take(40).enumerate() {
+                                    let texte = format!("Nœud {} · voisin {:.2} m", l.noeud, l.d_voisin).replace('.', ",");
+                                    if cx.row(&mut b, sub_id(sub_id(base, 688), t * 1000 + i), &texte, None, false) {
+                                        aller = Some((l.noeud, l.p));
+                                    }
+                                    cx.paragraph(&mut b, &l.cause);
+                                }
+                                if dans.len() > 40 {
+                                    cx.paragraph(&mut b, &format!("… et {} autres", dans.len() - 40));
+                                }
+                            }
+                        }
+                        if let Some((n, p)) = aller {
+                            r.aller_bout(n, p);
+                        }
+                    }
+                    cx.section(&mut b, "Dénivelé des voies");
+                    cx.paragraph(&mut b, "Les cassures de pente des voies carrossables, sur tout le réseau nivelé : là où la pente mesurée sur 2,5 m avant un point et celle d'après diffèrent de plus de 8 points (le long d'une voie, et à travers un nœud où deux voies se prolongent). En magenta un creux (la pente augmente), en jaune une bosse. Un tremplin donne un creux et une bosse proches.");
+                    if cx.button(&mut b, sub_id(base, 691), "Diagnostiquer le dénivelé") {
+                        if let Some(r) = self.trois_d.as_mut() {
+                            r.diagnostiquer_denivele(&carte.donnees);
+                        }
+                    }
+                    if let Some(r) = self.trois_d.as_mut() {
+                        for l in r.deniv_diag.lines() {
+                            cx.paragraph(&mut b, l);
+                        }
+                        let mut aller = None;
+                        for (i, c) in r.cassures.iter().take(40).enumerate() {
+                            let texte = format!("Nœud {} · {:+.0} % puis {:+.0} %", c.noeud, c.avant * 100.0, c.apres * 100.0);
+                            if cx.row(&mut b, sub_id(sub_id(base, 692), i), &texte, None, false) {
+                                aller = Some((c.noeud, c.p));
+                            }
+                            cx.paragraph(&mut b, c.texte().trim_start());
+                        }
+                        if r.cassures.len() > 40 {
+                            cx.paragraph(&mut b, &format!("… et {} autres", r.cassures.len() - 40));
+                        }
+                        if let Some((n, p)) = aller {
+                            r.aller_bout(n, p);
+                        }
+                    }
+                }
+            }
             BATI => self.panneau_bati(cx, &mut b, base),
             VOIES => self.panneau_voies(cx, &mut b, base),
             RELIEF => {
@@ -3485,7 +3494,7 @@ impl Contexte for Lieux {
             };
             self.zone = zone;
             // Un outil d'édition : la carte
-            if self.trois_d.is_some() && self.outil != VOIR && self.outil != SELECTION {
+            if self.trois_d.is_some() && self.outil != VOIR && self.outil != SELECTION && self.outil != DIAGNOSTIC {
                 self.basculer_3d();
             }
             if self.trois_d.is_some() || self.camera3d.is_some() {

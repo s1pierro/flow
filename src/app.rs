@@ -158,7 +158,7 @@ impl App {
 
     /// Les réglages de l'interface à enregistrer : l'apparence et le clavier.
     pub fn reglages(&self) -> Reglages {
-        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes, applets: self.commun.applets.clone(), veille: self.commun.veille }
+        Reglages { theme: self.commun.theme, clavier: self.commun.clavier.reglages, gestes: self.commun.gestes, applets: self.commun.applets.clone(), veille: self.commun.veille, pilote_memorise: self.commun.pilote_memorise, pilote_arme: self.commun.pilote_memorise && crate::pilote::arme() }
     }
 
     /// Applique des réglages relus.
@@ -168,6 +168,8 @@ impl App {
         self.commun.gestes = r.gestes;
         self.commun.applets = r.applets;
         self.commun.veille = r.veille;
+        self.commun.pilote_memorise = r.pilote_memorise;
+        self.commun.pilote_arme = r.pilote_arme;
     }
 
     /// L'espace de travail en texte : la disposition et l'état de chaque fenêtre.

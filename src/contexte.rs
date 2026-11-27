@@ -157,6 +157,9 @@ pub struct Commun {
     pub applets: Vec<String>,
     /// La veille de la Boombox au lancement (voir `Reglages::veille`).
     pub veille: bool,
+    /// Le pilotage garde son armement d'un lancement à l'autre ; et son état relu.
+    pub pilote_memorise: bool,
+    pub pilote_arme: bool,
     /// Le dernier texte de `mixeur.txt` lu ou écrit : il ne se réécrit que s'il change.
     pub(crate) mixeur_ecrit: Option<String>,
 }
@@ -184,6 +187,8 @@ impl Default for Commun {
             fichiers: Default::default(),
             applets: crate::applet::par_defaut(),
             veille: true,
+            pilote_memorise: false,
+            pilote_arme: false,
             mixeur_ecrit: None,
         }
     }

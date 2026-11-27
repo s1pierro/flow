@@ -38,7 +38,7 @@ fn interface(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
     cx.paragraph(b, "Full flow : les fenêtres se partagent tout l'espace. Free flow : chaque fenêtre flotte à sa place, comme sur un bureau ; tirez sa barre pour la déplacer, sa poignée pour la redimensionner, touchez-la pour la passer devant.");
     cx.toggle(b, sub_id(scroll, 90), "Free flow : fenêtres libres", &mut c.libre);
     cx.section(b, "PILOTAGE");
-    cx.paragraph(b, "Laisser une autre application (Debian, par Termux) piloter Flow par le bus d'Android : ouvrir des contextes, toucher l'écran, faire des captures. Chaque commande doit porter le jeton écrit dans Flow/pilote/jeton, tiré au hasard à chaque armement. Désarmé à chaque lancement.");
+    cx.paragraph(b, "Laisser une autre application (Debian, par Termux) piloter Flow par le bus d'Android : ouvrir des contextes, toucher l'écran, faire des captures. Chaque commande doit porter le jeton écrit dans Flow/pilote/jeton, tiré au hasard à chaque armement. Désarmé à chaque lancement, sauf si son armement est mémorisé.");
     let mut arme = crate::pilote::arme();
     cx.toggle(b, sub_id(scroll, 91), "Piloter depuis Debian", &mut arme);
     if arme != crate::pilote::arme() {
@@ -46,6 +46,7 @@ fn interface(cx: &mut Cx, b: &mut Body, scroll: Id, c: &mut Commun) {
             crate::android::log(&format!("pilotage : {e}"));
         }
     }
+    cx.toggle(b, sub_id(scroll, 92), "Mémoriser l'armement", &mut c.pilote_memorise);
     let t = &mut c.theme;
     cx.section(b, "COMMANDES");
     let shown = format!("{:.0} dp", t.commande);

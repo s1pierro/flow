@@ -26,11 +26,15 @@ pub struct Reglages {
     /// Au lancement, la Boombox décode en silence le dernier flux écouté (le tampon du
     /// magnétophone).
     pub veille: bool,
+    /// Le pilotage garde son armement d'un lancement à l'autre.
+    pub pilote_memorise: bool,
+    /// Le pilotage était armé (gardé seulement si `pilote_memorise`).
+    pub pilote_arme: bool,
 }
 
 impl Default for Reglages {
     fn default() -> Reglages {
-        Reglages { theme: Theme::default(), clavier: ReglagesClavier::default(), gestes: ReglagesGestes::default(), applets: crate::applet::par_defaut(), veille: true }
+        Reglages { theme: Theme::default(), clavier: ReglagesClavier::default(), gestes: ReglagesGestes::default(), applets: crate::applet::par_defaut(), veille: true, pilote_memorise: false, pilote_arme: false }
     }
 }
 
@@ -90,6 +94,8 @@ impl Reglages {
                 "gestes_appui_long" => g.appui_long = nombre(&v).map_or(g.appui_long, |x| x / 1000.0),
                 "gestes_retour" => g.retour = oui(&v).unwrap_or(g.retour),
                 "boombox_veille" => r.veille = oui(&v).unwrap_or(r.veille),
+                "pilote_memoriser" => r.pilote_memorise = oui(&v).unwrap_or(r.pilote_memorise),
+                "pilote_arme" => r.pilote_arme = oui(&v).unwrap_or(r.pilote_arme),
                 "applets" => {
                     let voulus: Vec<String> = v.split(|ch: char| ch.is_whitespace() || ch == ',').filter(|k| !k.is_empty()).map(|k| if k.eq_ignore_ascii_case("radio") { "boombox".to_string() } else { k.to_lowercase() }).collect();
                     // Les clés inconnues sont oubliées ; l'ordre est celui des contextes
@@ -156,7 +162,11 @@ impl Reglages {
         s += &format!("# Applets de la barre, séparés par des espaces (vide : aucun) : {}\n", tous.join(", "));
         s += &format!("applets = {}\n\n", self.applets.join(" "));
         s += "# Boombox : au lancement, décoder en silence le dernier flux écouté pour en garder\n# les cinq dernières minutes (environ 60 Mo de données par heure) : oui ou non\n";
-        s += &format!("boombox_veille = {}\n", if self.veille { "oui" } else { "non" });
+        s += &format!("boombox_veille = {}\n\n", if self.veille { "oui" } else { "non" });
+        s += "# Pilotage : garder son armement d'un lancement à l'autre : oui ou non\n";
+        s += &format!("pilote_memoriser = {}\n", if self.pilote_memorise { "oui" } else { "non" });
+        s += "# Pilotage : armé au dernier enregistrement (seulement si mémorisé) : oui ou non\n";
+        s += &format!("pilote_arme = {}\n", if self.pilote_arme { "oui" } else { "non" });
         s
     }
 }
@@ -217,6 +227,8 @@ mod tests {
             gestes: ReglagesGestes { dist: 80.0, appui: 0.4, appui_long: 1.2, retour: false },
             applets: vec!["mixeur".into()],
             veille: false,
+            pilote_memorise: true,
+            pilote_arme: true,
         };
         let lu = Reglages::lire(&r.ecrire());
         assert_eq!(lu.applets, ["mixeur"]);

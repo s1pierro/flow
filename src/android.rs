@@ -269,6 +269,16 @@ fn render_loop() -> Result<(), String> {
             app.commun.fichier_espace = espace.as_ref().map(|f| f.chemin.display().to_string());
             app.commun.dossier = espace.as_ref().and_then(|f| f.chemin.parent()).map(|d| d.to_path_buf());
             crate::cache_lieu::regler(app.commun.dossier.clone());
+            // Une fois par lancement : le pilotage armé de nouveau, s'il l'était et que
+            // son armement est mémorisé
+            static PILOTE: Once = Once::new();
+            if app.commun.pilote_memorise && app.commun.pilote_arme && app.commun.dossier.is_some() {
+                PILOTE.call_once(|| {
+                    if let Err(e) = crate::pilote::armer(true, app.commun.dossier.as_deref()) {
+                        crate::android::log(&format!("pilotage : {e}"));
+                    }
+                });
+            }
             // L'espace de travail, s'il a changé sur le disque (au premier lancement, ou
             // modifié à la main) ; sinon les fenêtres relisent ce qui a pu changer
             if let Some(f) = espace.as_mut() {
