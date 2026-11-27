@@ -805,6 +805,9 @@ const JUMELLE_POINTS: usize = 8;
 /// Aux abords d'une entrée de tunnel (tant de mètres après un point au sol), pas de
 /// plafond : le tunnel suit sa rampe d'accès.
 const ENTREE_SANS_PLAFOND: f32 = 10.0;
+/// La hauteur commune de deux jumelles s'impose entièrement à tant (m) du bord de leur
+/// zone jumelée, progressivement avant.
+const JUMELLE_RACCORD: f32 = 25.0;
 
 /// Le bilan du lissage des voies rapides.
 #[derive(Default, Debug)]
@@ -1138,6 +1141,35 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
             e.h = base;
             rels.insert(c, rel);
         }
+        // Le poids de la hauteur commune en chaque point jumelé (en pont ou en tunnel des
+        // deux côtés) : nul au bord de la zone jumelée, entier à JUMELLE_RACCORD à
+        // l'intérieur ; entre les deux, un raccord sans marche vers la hauteur propre
+        let mut poids: HashMap<usize, Vec<f32>> = HashMap::new();
+        for &c in &membres {
+            let e = &etats[c];
+            let n = e.pts.len();
+            let lie: Vec<bool> = (0..n)
+                .map(|i| match jumelle[c][i] {
+                    Some((c2, j)) => {
+                        let (pa, pb) = (passage_de(r, e, i), passage_de(r, &etats[c2], j));
+                        pa != Passage::Sol && pa == pb
+                    }
+                    None => false,
+                })
+                .collect();
+            let mut d = vec![f32::MAX; n];
+            for i in 0..n {
+                if !lie[i] {
+                    d[i] = 0.0;
+                } else if i > 0 {
+                    d[i] = d[i - 1] + (e.pts[i].3 - e.pts[i - 1].3);
+                }
+            }
+            for i in (0..n.saturating_sub(1)).rev() {
+                d[i] = d[i].min(d[i + 1] + (e.pts[i + 1].3 - e.pts[i].3));
+            }
+            poids.insert(c, d.iter().map(|&x| if x == f32::MAX { 1.0 } else { (x / JUMELLE_RACCORD).min(1.0) }).collect());
+        }
         // La base commune des jumelles : en pont la plus haute des deux (le tablier passe
         // au-dessus de ce que chacune enjambe), en tunnel la moyenne
         let partager = |etats: &mut Vec<Etat>, r: &Reseau, f: &dyn Fn(Passage, f32, f32) -> f32| {
@@ -1150,7 +1182,8 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
                     if pa == Passage::Sol || pa != pb {
                         continue;
                     }
-                    etats[c].h[i] = f(pa, copie[rang(c)][i], copie[rang(c2)][j]);
+                    let (propre, commun) = (copie[rang(c)][i], f(pa, copie[rang(c)][i], copie[rang(c2)][j]));
+                    etats[c].h[i] = propre + poids[&c][i] * (commun - propre);
                 }
             }
         };
@@ -1260,7 +1293,8 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
                         continue;
                     }
                     let (x, y) = (copie[rang(c)][i], copie[rang(c2)][j]);
-                    etats[c].h[i] = if pa == Passage::Pont { x.max(y) } else { x.min(y) };
+                    let commun = if pa == Passage::Pont { x.max(y) } else { x.min(y) };
+                    etats[c].h[i] = x + poids[&c][i] * (commun - x);
                 }
             }
         };
