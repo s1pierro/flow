@@ -797,6 +797,14 @@ const RAPIDE_PENTE: f32 = 0.04;
 const RAPIDE_MARGE: f32 = 2.0;
 const RAPIDE_ARRONDI: f32 = 25.0;
 const RAPIDE_PASSES: usize = 3;
+/// Deux chaussées de voie rapide jumelles : à moins de tant (m) d'axe à axe, de tracés
+/// parallèles (cosinus au moins), sur au moins tant de points.
+const JUMELLE_DISTANCE: f32 = 15.0;
+const JUMELLE_PARALLELE: f32 = 0.9;
+const JUMELLE_POINTS: usize = 8;
+/// Aux abords d'une entrée de tunnel (tant de mètres après un point au sol), pas de
+/// plafond : le tunnel suit sa rampe d'accès.
+const ENTREE_SANS_PLAFOND: f32 = 10.0;
 
 /// Le bilan du lissage des voies rapides.
 #[derive(Default, Debug)]
@@ -805,6 +813,8 @@ pub struct Rapides {
     pub fixes: Vec<bool>,
     pub chaines: usize,
     pub planchers: usize,
+    /// Les paires de chaînes jumelles (deux chaussées d'une même voie), lissées ensemble.
+    pub jumelles: usize,
 }
 
 /// Les voies rapides (classe `CLASSE_RAPIDE`, au sol ou en pont) posées avant toutes les
@@ -844,8 +854,9 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
         }
     }
     // Les planchers : les contraintes dont le haut est une voie rapide et le bas une
-    // autre voie rapide (lissée avant elle) ou l'eau. Une route ordinaire ou une
-    // bretelle dessous ne relève pas la voie rapide : c'est elle qui s'adapte ensuite
+    // autre voie rapide (lissée avant elle) ou l'eau ; sous un viaduc, aussi les voies au
+    // sol, à leur relief. Ailleurs, une route ordinaire ou une bretelle dessous ne relève
+    // pas la voie rapide : c'est elle qui s'adapte ensuite
     // (arête, segment, u) → (bas : voie rapide (arête, segment, u) ou niveau de l'eau,
     // écart, dépassement)
     let cs = contraintes(r, l);
@@ -857,6 +868,12 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
         }
         let (bas, demi) = match c.bas {
             Some(o) if rapide[o.0] => (Ok(o), r.aretes[o.0].largeur * 0.5 + RAPIDE_MARGE),
+            // Un viaduc enjambe les voies au sol posées sur leur terrain : leur relief au
+            // croisement (pas leur hauteur du moment, qu'elles adapteront) plus l'écart
+            Some(o) if r.aretes[k].passage == Passage::Pont && r.aretes[o.0].passage == Passage::Sol => {
+                let q = entre(r.aretes[o.0].points[o.1], r.aretes[o.0].points[o.1 + 1], o.2);
+                (Err(l.relief(q[0] as f64, q[1] as f64) as f32), r.aretes[o.0].largeur * 0.5 + RAPIDE_MARGE)
+            }
             Some(_) => continue,
             None => (Err(c.plancher), RAPIDE_MARGE * 2.0),
         };
@@ -902,48 +919,25 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
         }
         chaines.push(chaine);
     }
-    // L'ordre : du plus bas au plus haut ; une chaîne passe après toutes celles qu'elle
-    // enjambe (un cycle, s'il y en a, est rompu dans l'ordre des chaînes)
+    // Les points de chaque chaîne : (arête, indice, position, abscisse, au sol) ; les
+    // joints (le premier point d'une voie après la première, le même que le dernier de
+    // la précédente) en reçoivent la hauteur ; par voie, son sens et ses abscisses
+    struct Etat {
+        pts: Vec<(usize, usize, [f32; 3], f32, bool)>,
+        joints: Vec<(usize, usize, usize)>,
+        debut: HashMap<usize, (bool, Vec<f32>)>,
+        h: Vec<f32>,
+        strict: Vec<f32>,
+        pl: Vec<(f32, f32, f32, f32)>,
+    }
     let nc = chaines.len();
-    let mut dessous: Vec<std::collections::HashSet<usize>> = vec![Default::default(); nc];
-    for (&k, v) in &planchers {
-        for (_, _, bas, _, _) in v {
-            if let Ok(o) = bas {
-                let (ch, cb) = (chaine_de[k], chaine_de[o.0]);
-                if ch != cb && ch != usize::MAX && cb != usize::MAX {
-                    dessous[ch].insert(cb);
-                }
-            }
-        }
-    }
-    let mut ordre: Vec<usize> = Vec::with_capacity(nc);
-    let mut faite = vec![false; nc];
-    while ordre.len() < nc {
-        let avant = ordre.len();
-        for c in 0..nc {
-            if !faite[c] && dessous[c].iter().all(|&d| faite[d]) {
-                faite[c] = true;
-                ordre.push(c);
-            }
-        }
-        if ordre.len() == avant {
-            // Un cycle : la première chaîne qui reste
-            let c = (0..nc).find(|&c| !faite[c]).unwrap();
-            faite[c] = true;
-            ordre.push(c);
-        }
-    }
-    for ci in ordre {
-        let chaine = chaines[ci].clone();
-        bilan.chaines += 1;
-        // Les points de la chaîne : (arête, indice), position, abscisse, au sol
+    let mut etats: Vec<Etat> = Vec::with_capacity(nc);
+    for chaine in &chaines {
         let mut pts: Vec<(usize, usize, [f32; 3], f32, bool)> = Vec::new();
-        let mut s_ = 0.0f32;
-        let mut debut: HashMap<usize, (bool, Vec<f32>)> = HashMap::new();
-        // Le premier point de chaque voie après la première : le même que le dernier de
-        // la précédente (il en reçoit la hauteur)
         let mut joints: Vec<(usize, usize, usize)> = Vec::new();
-        for &(k, endroit) in &chaine {
+        let mut debut: HashMap<usize, (bool, Vec<f32>)> = HashMap::new();
+        let mut s_ = 0.0f32;
+        for &(k, endroit) in chaine {
             let a = &r.aretes[k];
             let m = a.points.len();
             let mut abs = vec![0.0f32; m];
@@ -962,137 +956,355 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
             }
             debut.insert(k, (endroit, abs));
         }
-        let n = pts.len();
-        // 1. Le relief lissé (triangle sur ±RAPIDE_FENETRE) des points au sol
-        let rel: Vec<f32> = pts.iter().map(|p| l.relief(p.2[0] as f64, p.2[1] as f64) as f32).collect();
-        let lisser = |h: &[f32], sol: &dyn Fn(usize) -> bool, demi: f32| -> Vec<f32> {
-            let mut out = h.to_vec();
-            let mut j0 = 0usize;
-            for i in 0..n {
-                while j0 < n && pts[j0].3 < pts[i].3 - demi {
-                    j0 += 1;
-                }
-                let (mut sw, mut sh) = (0.0f32, 0.0f32);
-                let mut j = j0;
-                while j < n && pts[j].3 <= pts[i].3 + demi {
-                    if sol(j) {
-                        let w = 1.0 - (pts[j].3 - pts[i].3).abs() / demi;
-                        sw += w;
-                        sh += w * h[j];
-                    }
-                    j += 1;
-                }
-                if sw > 1e-6 {
-                    out[i] = sh / sw;
-                }
-            }
-            out
-        };
-        let mut h: Vec<f32> = pts.iter().map(|p| p.2[2]).collect();
-        let mut base = lisser(&rel, &|j| pts[j].4, RAPIDE_FENETRE);
-        // Loin de tout point au sol (un long tunnel, un long pont) : interpolée entre
-        // les plus proches qui en ont
-        let connu: Vec<bool> = (0..n)
-            .map(|i| {
-                let (a, b) = (pts[i].3 - RAPIDE_FENETRE, pts[i].3 + RAPIDE_FENETRE);
-                pts.iter().any(|p| p.4 && p.3 >= a && p.3 <= b)
-            })
-            .collect();
-        if connu.iter().any(|&c| c) && connu.iter().any(|&c| !c) {
-            let mut i = 0;
-            while i < n {
-                if connu[i] {
-                    i += 1;
-                    continue;
-                }
-                let j0 = i;
-                while i < n && !connu[i] {
-                    i += 1;
-                }
-                let (ga, gb) = (j0.checked_sub(1), (i < n).then_some(i));
-                for j in j0..i {
-                    base[j] = match (ga, gb) {
-                        (Some(a), Some(b)) => {
-                            let t = (pts[j].3 - pts[a].3) / (pts[b].3 - pts[a].3).max(1e-3);
-                            base[a] + (base[b] - base[a]) * t
+        etats.push(Etat { pts, joints, debut, h: Vec::new(), strict: Vec::new(), pl: Vec::new() });
+    }
+    // Les jumelles : pour chaque point, le point le plus proche d'une autre chaîne à
+    // moins de JUMELLE_DISTANCE, de tracé parallèle (dans un sens ou l'autre)
+    let dir = |e: &Etat, i: usize| -> [f32; 2] {
+        let (a, b) = (i.saturating_sub(1), (i + 1).min(e.pts.len() - 1));
+        let (p, q) = (e.pts[a].2, e.pts[b].2);
+        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+        let l = dx.hypot(dz).max(1e-6);
+        [dx / l, dz / l]
+    };
+    let mut grille: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    let case = |p: [f32; 3]| ((p[0] / JUMELLE_DISTANCE).floor() as i32, (p[1] / JUMELLE_DISTANCE).floor() as i32);
+    for (c, e) in etats.iter().enumerate() {
+        for (i, p) in e.pts.iter().enumerate() {
+            grille.entry(case(p.2)).or_default().push((c, i));
+        }
+    }
+    let mut jumelle: Vec<Vec<Option<(usize, usize)>>> = etats.iter().map(|e| vec![None; e.pts.len()]).collect();
+    for (c, e) in etats.iter().enumerate() {
+        for i in 0..e.pts.len() {
+            let p = e.pts[i].2;
+            let d = dir(e, i);
+            let (cx, cz) = case(p);
+            let mut meilleur: Option<(f32, usize, usize)> = None;
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    for &(c2, j) in grille.get(&(cx + dx, cz + dz)).map_or(&[][..], |v| &v[..]) {
+                        if c2 == c {
+                            continue;
                         }
-                        (Some(a), None) => base[a],
-                        (None, Some(b)) => base[b],
-                        (None, None) => h[j],
-                    };
+                        let q = etats[c2].pts[j].2;
+                        let dd = (q[0] - p[0]).hypot(q[1] - p[1]);
+                        if dd > JUMELLE_DISTANCE || meilleur.is_some_and(|m| m.0 <= dd) {
+                            continue;
+                        }
+                        let d2 = dir(&etats[c2], j);
+                        if (d[0] * d2[0] + d[1] * d2[1]).abs() < JUMELLE_PARALLELE {
+                            continue;
+                        }
+                        meilleur = Some((dd, c2, j));
+                    }
+                }
+            }
+            jumelle[c][i] = meilleur.map(|m| (m.1, m.2));
+        }
+    }
+    // Les paires : deux chaînes jumelées sur assez de points sont lissées ensemble
+    let mut groupe: Vec<usize> = (0..nc).collect();
+    fn racine_g(g: &mut [usize], mut i: usize) -> usize {
+        while g[i] != i {
+            g[i] = g[g[i]];
+            i = g[i];
+        }
+        i
+    }
+    let mut compte: HashMap<(usize, usize), usize> = HashMap::new();
+    for c in 0..nc {
+        for &(c2, _) in jumelle[c].iter().flatten() {
+            *compte.entry((c.min(c2), c.max(c2))).or_default() += 1;
+        }
+    }
+    for (&(a, b), &n) in &compte {
+        if n >= JUMELLE_POINTS {
+            let (ra, rb) = (racine_g(&mut groupe, a), racine_g(&mut groupe, b));
+            groupe[ra] = rb;
+            bilan.jumelles += 1;
+        }
+    }
+    let g_de: Vec<usize> = (0..nc).map(|c| racine_g(&mut groupe, c)).collect();
+    // Une jumelle n'est retenue qu'entre chaînes d'un même groupe
+    for c in 0..nc {
+        for j in jumelle[c].iter_mut() {
+            if j.is_some_and(|(c2, _)| g_de[c2] != g_de[c]) {
+                *j = None;
+            }
+        }
+    }
+    // L'ordre : du plus bas au plus haut ; un groupe passe après tous ceux qu'il enjambe
+    // (un cycle, s'il y en a, est rompu dans l'ordre des groupes)
+    let mut dessous: HashMap<usize, std::collections::HashSet<usize>> = HashMap::new();
+    for (&k, v) in &planchers {
+        for (_, _, bas, _, _) in v {
+            if let Ok(o) = bas {
+                let (ch, cb) = (chaine_de[k], chaine_de[o.0]);
+                if ch != usize::MAX && cb != usize::MAX && g_de[ch] != g_de[cb] {
+                    dessous.entry(g_de[ch]).or_default().insert(g_de[cb]);
                 }
             }
         }
-        for i in 0..n {
-            h[i] = base[i];
+    }
+    let mut groupes: Vec<usize> = g_de.clone();
+    groupes.sort();
+    groupes.dedup();
+    let mut ordre: Vec<usize> = Vec::with_capacity(groupes.len());
+    let mut faite: std::collections::HashSet<usize> = Default::default();
+    while ordre.len() < groupes.len() {
+        let avant = ordre.len();
+        for &g in &groupes {
+            if !faite.contains(&g) && dessous.get(&g).map_or(true, |d| d.iter().all(|x| faite.contains(x))) {
+                faite.insert(g);
+                ordre.push(g);
+            }
         }
+        if ordre.len() == avant {
+            let g = *groupes.iter().find(|g| !faite.contains(g)).unwrap();
+            faite.insert(g);
+            ordre.push(g);
+        }
+    }
+    // Le lissage en triangle sur ±demi des points (ceux que `garder` retient)
+    fn lisser_tri(s: &[f32], h: &[f32], garder: &dyn Fn(usize) -> bool, demi: f32) -> Vec<f32> {
+        let n = s.len();
+        let mut out = h.to_vec();
+        let mut j0 = 0usize;
+        for i in 0..n {
+            while j0 < n && s[j0] < s[i] - demi {
+                j0 += 1;
+            }
+            let (mut sw, mut sh) = (0.0f32, 0.0f32);
+            let mut j = j0;
+            while j < n && s[j] <= s[i] + demi {
+                if garder(j) {
+                    let w = 1.0 - (s[j] - s[i]).abs() / demi;
+                    sw += w;
+                    sh += w * h[j];
+                }
+                j += 1;
+            }
+            if sw > 1e-6 {
+                out[i] = sh / sw;
+            }
+        }
+        out
+    }
+    let gab = Gabarits::new(l);
+    let passage_de = |r: &Reseau, e: &Etat, i: usize| r.aretes[e.pts[i].0].passage;
+    for g in ordre {
+        let membres: Vec<usize> = (0..nc).filter(|&c| g_de[c] == g).collect();
+        // 1. La base : le relief lissé (triangle sur ±RAPIDE_FENETRE) des points au sol ;
+        // loin de tout point au sol (un long tunnel, un long pont), interpolée entre les
+        // plus proches qui en ont
+        let mut rels: HashMap<usize, Vec<f32>> = HashMap::new();
+        for &c in &membres {
+            bilan.chaines += 1;
+            let e = &mut etats[c];
+            let n = e.pts.len();
+            let s: Vec<f32> = e.pts.iter().map(|p| p.3).collect();
+            let rel: Vec<f32> = e.pts.iter().map(|p| l.relief(p.2[0] as f64, p.2[1] as f64) as f32).collect();
+            let sol: Vec<bool> = e.pts.iter().map(|p| p.4).collect();
+            let mut base = lisser_tri(&s, &rel, &|j| sol[j], RAPIDE_FENETRE);
+            let connu: Vec<bool> = (0..n)
+                .map(|i| {
+                    let (a, b) = (s[i] - RAPIDE_FENETRE, s[i] + RAPIDE_FENETRE);
+                    (0..n).any(|j| sol[j] && s[j] >= a && s[j] <= b)
+                })
+                .collect();
+            if connu.iter().any(|&c| c) && connu.iter().any(|&c| !c) {
+                let mut i = 0;
+                while i < n {
+                    if connu[i] {
+                        i += 1;
+                        continue;
+                    }
+                    let j0 = i;
+                    while i < n && !connu[i] {
+                        i += 1;
+                    }
+                    let (ga, gb) = (j0.checked_sub(1), (i < n).then_some(i));
+                    for j in j0..i {
+                        base[j] = match (ga, gb) {
+                            (Some(a), Some(b)) => base[a] + (base[b] - base[a]) * (s[j] - s[a]) / (s[b] - s[a]).max(1e-3),
+                            (Some(a), None) => base[a],
+                            (None, Some(b)) => base[b],
+                            (None, None) => e.pts[j].2[2],
+                        };
+                    }
+                }
+            }
+            e.h = base;
+            rels.insert(c, rel);
+        }
+        // La base commune des jumelles : en pont la plus haute des deux (le tablier passe
+        // au-dessus de ce que chacune enjambe), en tunnel la moyenne
+        let partager = |etats: &mut Vec<Etat>, r: &Reseau, f: &dyn Fn(Passage, f32, f32) -> f32| {
+            let copie: Vec<Vec<f32>> = membres.iter().map(|&c| etats[c].h.clone()).collect();
+            let rang = |c: usize| membres.iter().position(|&m| m == c).unwrap();
+            for &c in &membres {
+                for i in 0..etats[c].pts.len() {
+                    let Some((c2, j)) = jumelle[c][i] else { continue };
+                    let (pa, pb) = (passage_de(r, &etats[c], i), passage_de(r, &etats[c2], j));
+                    if pa == Passage::Sol || pa != pb {
+                        continue;
+                    }
+                    etats[c].h[i] = f(pa, copie[rang(c)][i], copie[rang(c2)][j]);
+                }
+            }
+        };
+        partager(&mut etats, r, &|p, a, b| if p == Passage::Pont { a.max(b) } else { (a + b) * 0.5 });
         // Les plafonds : sous le relief, un tunnel garde sa hauteur nécessaire (la hauteur
         // limitée et la dalle, sinon le gabarit et l'épaisseur) ; on y descend par des
         // rampes à RAPIDE_PENTE (balayage dans les deux sens)
-        let gab = Gabarits::new(l);
-        let mut plafond: Vec<f32> = vec![f32::MAX; n];
-        for i in 0..n {
-            let (k, idx) = (pts[i].0, pts[i].1);
-            let a = &r.aretes[k];
-            if a.passage != Passage::Tunnel {
-                continue;
-            }
-            let j = idx.min(a.points.len() - 2);
-            let requis = gab.hauteur(a.points[j], a.points[j + 1], if idx == j { 0.0 } else { 1.0 }).map_or(GABARIT + EPAISSEUR, |g| g + DALLE_SOUS_SOL);
-            plafond[i] = rel[i] - requis;
-        }
-        let strict = plafond.clone();
-        for i in 1..n {
-            plafond[i] = plafond[i].min(plafond[i - 1] + RAPIDE_PENTE * (pts[i].3 - pts[i - 1].3));
-        }
-        for i in (0..n.saturating_sub(1)).rev() {
-            plafond[i] = plafond[i].min(plafond[i + 1] + RAPIDE_PENTE * (pts[i + 1].3 - pts[i].3));
-        }
-        for i in 0..n {
-            h[i] = h[i].min(plafond[i]);
-        }
-        // 2. Les planchers, à leur abscisse
-        let mut pl: Vec<(f32, f32, f32)> = Vec::new();
-        for &(k, _) in &chaine {
-            let Some(v) = planchers.get(&k) else { continue };
-            let (_, abs) = &debut[&k];
-            for &(sg, u, bas, ecart, demi) in v {
-                // Le dessous : la voie rapide déjà posée, ou l'eau
-                let hb = match bas {
-                    Ok((kb, sb, ub)) => entre(r.aretes[kb].points[sb], r.aretes[kb].points[sb + 1], ub)[2],
-                    Err(eau) => eau,
-                };
-                pl.push((abs[sg] + (abs[sg + 1] - abs[sg]) * u, hb + ecart, demi));
-            }
-        }
-        bilan.planchers += pl.len();
-        let plateau = |i: usize| -> f32 { pl.iter().filter(|p| (pts[i].3 - p.0).abs() <= p.2).map(|p| p.1).fold(f32::MIN, f32::max) };
-        let cone = |i: usize| -> f32 { pl.iter().map(|p| p.1 - RAPIDE_PENTE * ((pts[i].3 - p.0).abs() - p.2).max(0.0)).fold(f32::MIN, f32::max) };
-        for i in 0..n {
-            h[i] = h[i].max(cone(i));
-        }
-        // 3. L'arrondi, sans repasser sous un plancher
-        for _ in 0..RAPIDE_PASSES {
-            h = lisser(&h, &|_| true, RAPIDE_ARRONDI);
+        for &c in &membres {
+            let rel = &rels[&c];
+            let e = &mut etats[c];
+            let n = e.pts.len();
+            let mut plafond: Vec<f32> = vec![f32::MAX; n];
+            // La distance (le long de la chaîne) au point au sol le plus proche : aux
+            // abords d'une entrée, le tunnel suit sa rampe, la dalle n'existe qu'au-delà
+            let mut pres = vec![f32::MAX; n];
             for i in 0..n {
-                h[i] = h[i].min(strict[i]).max(plateau(i));
+                if e.pts[i].4 {
+                    pres[i] = 0.0;
+                } else if i > 0 {
+                    pres[i] = pres[i - 1] + (e.pts[i].3 - e.pts[i - 1].3);
+                }
+            }
+            for i in (0..n.saturating_sub(1)).rev() {
+                pres[i] = pres[i].min(pres[i + 1] + (e.pts[i + 1].3 - e.pts[i].3));
+            }
+            for i in 0..n {
+                let (k, idx) = (e.pts[i].0, e.pts[i].1);
+                let a = &r.aretes[k];
+                if a.passage != Passage::Tunnel || pres[i] < ENTREE_SANS_PLAFOND {
+                    continue;
+                }
+                let j = idx.min(a.points.len() - 2);
+                let requis = gab.hauteur(a.points[j], a.points[j + 1], if idx == j { 0.0 } else { 1.0 }).map_or(GABARIT + EPAISSEUR, |g| g + DALLE_SOUS_SOL);
+                plafond[i] = rel[i] - requis;
+            }
+            e.strict = plafond.clone();
+            for i in 1..n {
+                plafond[i] = plafond[i].min(plafond[i - 1] + RAPIDE_PENTE * (e.pts[i].3 - e.pts[i - 1].3));
+            }
+            for i in (0..n.saturating_sub(1)).rev() {
+                plafond[i] = plafond[i].min(plafond[i + 1] + RAPIDE_PENTE * (e.pts[i + 1].3 - e.pts[i].3));
+            }
+            for i in 0..n {
+                e.h[i] = e.h[i].min(plafond[i]);
+            }
+        }
+        // 2. Les planchers de chaque chaîne, à leur abscisse : (abscisse, hauteur,
+        // dépassement, position) ; ceux d'une jumelle valent aussi pour l'autre (le
+        // tablier est commun)
+        let mut propres: Vec<(usize, f32, f32, f32, [f32; 2])> = Vec::new();
+        for &c in &membres {
+            for &(k, _) in &chaines[c] {
+                let Some(v) = planchers.get(&k) else { continue };
+                let (_, abs) = &etats[c].debut[&k];
+                for &(sg, u, bas, ecart, demi) in v {
+                    let hb = match bas {
+                        Ok((kb, sb, ub)) => entre(r.aretes[kb].points[sb], r.aretes[kb].points[sb + 1], ub)[2],
+                        Err(x) => x,
+                    };
+                    let q = entre(r.aretes[k].points[sg], r.aretes[k].points[sg + 1], u);
+                    propres.push((c, abs[sg] + (abs[sg + 1] - abs[sg]) * u, hb + ecart, demi, [q[0], q[1]]));
+                }
+            }
+        }
+        bilan.planchers += propres.len();
+        for &c in &membres {
+            let e = &mut etats[c];
+            let base0 = e.h.clone();
+            let s: Vec<f32> = e.pts.iter().map(|p| p.3).collect();
+            let mut pl: Vec<(f32, f32, f32, f32)> = Vec::new();
+            for &(c2, sp, hp, demi, q) in &propres {
+                let x = if c2 == c {
+                    Some(sp)
+                } else {
+                    // Sur la jumelle : le point le plus proche de ce plancher
+                    e.pts.iter().map(|p| ((p.2[0] - q[0]).hypot(p.2[1] - q[1]), p.3)).filter(|d| d.0 <= JUMELLE_DISTANCE + demi).min_by(|a, b| a.0.total_cmp(&b.0)).map(|d| d.1)
+                };
+                let Some(x) = x else { continue };
+                // L'excédent du plancher sur la base, qui s'éteint à RAPIDE_PENTE : la
+                // rampe suit le terrain, elle ne porte pas une hauteur au loin
+                let i = s.partition_point(|&y| y < x).min(s.len() - 1);
+                pl.push((x, hp, demi, hp - base0[i]));
+            }
+            for i in 0..e.pts.len() {
+                let si = e.pts[i].3;
+                let cone = pl
+                    .iter()
+                    .filter(|p| p.3 > 0.0)
+                    .map(|p| {
+                        let reste = p.3 - RAPIDE_PENTE * ((si - p.0).abs() - p.2).max(0.0);
+                        if reste > 0.0 { base0[i] + reste } else { f32::MIN }
+                    })
+                    .fold(f32::MIN, f32::max);
+                e.h[i] = e.h[i].max(cone);
+            }
+            e.pl = pl;
+        }
+        // Les jumelles en pont prennent la plus haute des deux, en tunnel la plus basse
+        let haut_ou_bas = |r: &Reseau, etats: &mut Vec<Etat>| {
+            let copie: Vec<Vec<f32>> = membres.iter().map(|&c| etats[c].h.clone()).collect();
+            let rang = |c: usize| membres.iter().position(|&m| m == c).unwrap();
+            for &c in &membres {
+                for i in 0..etats[c].pts.len() {
+                    let Some((c2, j)) = jumelle[c][i] else { continue };
+                    let (pa, pb) = (passage_de(r, &etats[c], i), passage_de(r, &etats[c2], j));
+                    if pa == Passage::Sol || pa != pb {
+                        continue;
+                    }
+                    let (x, y) = (copie[rang(c)][i], copie[rang(c2)][j]);
+                    etats[c].h[i] = if pa == Passage::Pont { x.max(y) } else { x.min(y) };
+                }
+            }
+        };
+        haut_ou_bas(r, &mut etats);
+        // 3. L'arrondi, sans repasser sous un plancher ni au-dessus d'un plafond ; puis
+        // les jumelles en pont ou en tunnel à la même hauteur (la moyenne)
+        let borner = |e: &mut Etat| {
+            for i in 0..e.pts.len() {
+                let si = e.pts[i].3;
+                let plateau = e.pl.iter().filter(|p| (si - p.0).abs() <= p.2).map(|p| p.1).fold(f32::MIN, f32::max);
+                e.h[i] = e.h[i].min(e.strict[i]).max(plateau);
+            }
+        };
+        for _ in 0..RAPIDE_PASSES {
+            for &c in &membres {
+                let e = &mut etats[c];
+                let s: Vec<f32> = e.pts.iter().map(|p| p.3).collect();
+                e.h = lisser_tri(&s, &e.h, &|_| true, RAPIDE_ARRONDI);
+                borner(e);
+            }
+        }
+        if membres.len() > 1 {
+            partager(&mut etats, r, &|_, a, b| (a + b) * 0.5);
+            for &c in &membres {
+                borner(&mut etats[c]);
             }
         }
         // Rendues aux arêtes et aux nœuds
-        for (x, p) in pts.iter().enumerate() {
-            r.aretes[p.0].points[p.1][2] = h[x];
+        for &c in &membres {
+            let e = &etats[c];
+            for (x, p) in e.pts.iter().enumerate() {
+                r.aretes[p.0].points[p.1][2] = e.h[x];
+            }
+            for &(k, i, x) in &e.joints {
+                r.aretes[k].points[i][2] = e.h[x];
+            }
+            for &(k, _) in &chaines[c] {
+                let a = &r.aretes[k];
+                let (na_, nb_) = (a.a, a.b);
+                let (ha, hb) = (a.points[0][2], a.points[a.points.len() - 1][2]);
+                r.noeuds[na_].p[2] = ha;
+                r.noeuds[nb_].p[2] = hb;
+            }
         }
-        for &(k, i, x) in &joints {
-            r.aretes[k].points[i][2] = h[x];
-        }
-        for &(k, _) in &chaine {
-            let a = &r.aretes[k];
-            let (na_, nb_) = (a.a, a.b);
-            let (ha, hb) = (a.points[0][2], a.points[a.points.len() - 1][2]);
-            r.noeuds[na_].p[2] = ha;
-            r.noeuds[nb_].p[2] = hb;
-        }
-        // Les bouts des arêtes voisines (bretelles…) au nœud : à sa hauteur
     }
     // Les autres arêtes qui touchent un nœud de voie rapide y prennent sa hauteur
     for k in 0..na {
