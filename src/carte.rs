@@ -324,7 +324,13 @@ impl Donnees {
                 let c = rs::contraintes(&r, &self.lieu);
                 rs::niveler(&mut r, &c, 50);
             }
-            t.detail(format!("{} nœuds, {} arêtes, {n} tunnels affleurants mis au sol", r.noeuds.len(), r.aretes.len()));
+            let pl = {
+                let mut t = crate::suivi::tache("plaques de carrefour");
+                let b = crate::plaques::poser(&mut r);
+                t.detail(format!("{} plaques ({} groupes), {} branches posées", b.plaques, b.groupes, b.branches));
+                b
+            };
+            t.detail(format!("{} nœuds, {} arêtes, {n} tunnels affleurants mis au sol, {} plaques", r.noeuds.len(), r.aretes.len(), pl.plaques));
             {
                 let _t = crate::suivi::tache("réseau nivelé (mise en cache)");
                 crate::cache_lieu::garder_reseau(h, &r);

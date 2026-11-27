@@ -1719,7 +1719,7 @@ impl Relief3d {
             let Some(r) = d.reseau_pret() else { return ("réseau pas encore calculé".into(), Vec::new()) };
             let carrossable = |k: usize| {
                 let a = &r.aretes[k];
-                sage_reel::carrossable(a.genre) && a.files.total > 0 && a.points.len() >= 2
+                sage_reel::carrossable(a.genre) && a.genre != sage_reel::SERVICE && a.files.total > 0 && a.points.len() >= 2
             };
             let plat = |p: [f32; 3], q: [f32; 3]| (q[0] - p[0]).hypot(q[1] - p[1]);
             // La pente moyenne en partant du point i de q, vers l'avant (pas +1) ou

@@ -312,6 +312,44 @@ struct Brut {
     points: Vec<[f32; 3]>,
 }
 
+/// La relecture des voies au sol : un point tous les `RELIEF_PAS` mètres au plus, la
+/// hauteur prise au relief moyenné sur une fenêtre d'environ `RELIEF_FENETRE` mètres
+/// (des points de la grille, pondérés en pyramide) : un relief lissé en surface,
+/// le même pour toutes les voies.
+pub const RELIEF_FENETRE: f64 = 6.0;
+pub const RELIEF_PAS: f32 = 4.0;
+
+/// La hauteur du relief adouci en (x, z).
+pub fn relief_adouci(l: &Lieu, x: f64, z: f64) -> f32 {
+    let n = ((RELIEF_FENETRE * 0.5 / l.pas).round() as i64).max(1);
+    let (mut somme, mut poids) = (0.0f64, 0.0f64);
+    for i in -n..=n {
+        for j in -n..=n {
+            let w = ((n + 1 - i.abs()) * (n + 1 - j.abs())) as f64;
+            somme += w * l.relief(x + i as f64 * l.pas, z + j as f64 * l.pas);
+            poids += w;
+        }
+    }
+    (somme / poids) as f32
+}
+
+fn relire(l: &Lieu, p: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut v: Vec<[f32; 3]> = Vec::with_capacity(p.len() * 2);
+    let h = |x: f32, z: f32| relief_adouci(l, x as f64, z as f64);
+    v.push([p[0][0], p[0][1], h(p[0][0], p[0][1])]);
+    for w in p.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let d = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let n = (d / RELIEF_PAS).ceil().max(1.0) as usize;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            let (x, z) = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+            v.push([x, z, h(x, z)]);
+        }
+    }
+    v
+}
+
 fn projeter(p: [f32; 3], a: [f32; 3], b: [f32; 3]) -> (f32, f32) {
     let (ux, uz) = (b[0] - a[0], b[1] - a[1]);
     let l2 = (ux * ux + uz * uz).max(1e-12);
@@ -353,6 +391,14 @@ impl Index {
 /// Le réseau des voies d'un lieu : tous les tracés (sol, ponts, tunnels) en un graphe.
 pub fn reseau(l: &Lieu) -> Reseau {
     let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, niveau: x.route.niveau, files: x.route.files, genre: x.route.genre, revetement: x.route.revetement, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
+    // Les voies au sol relues sur le relief adouci (au lieu du profil du lieu, lissé
+    // voie par voie le long de son axe) : toutes lisent la même surface, et se
+    // rejoignent sans écart
+    if !l.h.is_empty() {
+        for b in t.iter_mut().filter(|b| b.passage == Passage::Sol) {
+            b.points = relire(l, &b.points);
+        }
+    }
     let mut r = Reseau::default();
     // Les sommets de tous les tracés, au centimètre
     let compter = |t: &[Brut]| {
