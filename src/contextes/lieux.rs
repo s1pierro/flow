@@ -114,6 +114,36 @@ enum Liste {
     Bati,
     Routes,
     Ponts,
+    /// Les souterrains (`transports.tunnels`).
+    Tunnels,
+}
+
+/// La liste d'une voie choisie : un pont, une route, ou un souterrain quand l'outil
+/// Voies ne montre que les souterrains.
+fn liste_de(pont: bool, souterrains: bool) -> Liste {
+    if souterrains {
+        Liste::Tunnels
+    } else if pont {
+        Liste::Ponts
+    } else {
+        Liste::Routes
+    }
+}
+
+fn voies(l: &Lieu, li: Liste) -> &Vec<Route> {
+    match li {
+        Liste::Ponts => &l.ponts,
+        Liste::Tunnels => &l.transports.tunnels,
+        _ => &l.routes,
+    }
+}
+
+fn voies_mut(l: &mut Lieu, li: Liste) -> &mut Vec<Route> {
+    match li {
+        Liste::Ponts => &mut l.ponts,
+        Liste::Tunnels => &mut l.transports.tunnels,
+        _ => &mut l.routes,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -189,6 +219,8 @@ pub struct Lieux {
     /// Le nœud choisi de la voie choisie (son indice dans ses points).
     noeud: Option<usize>,
     trace: Option<Vec<[f32; 2]>>,
+    /// L'outil Voies ne montre et ne choisit que les souterrains.
+    souterrains: bool,
     pinceau: usize,
     rayon: f32,
     force: f32,
@@ -301,6 +333,7 @@ impl Default for Lieux {
             choix: None,
             noeud: None,
             trace: None,
+            souterrains: false,
             pinceau: 0,
             rayon: 40.0,
             force: 1.0,
@@ -755,6 +788,7 @@ impl Lieux {
                     (Liste::Bati, Elem::B(b)) => Elem::B(std::mem::replace(&mut l.batiments[k], b.clone())),
                     (Liste::Routes, Elem::R(r)) => Elem::R(std::mem::replace(&mut l.routes[k], r.clone())),
                     (Liste::Ponts, Elem::R(r)) => Elem::R(std::mem::replace(&mut l.ponts[k], r.clone())),
+                    (Liste::Tunnels, Elem::R(r)) => Elem::R(std::mem::replace(&mut l.transports.tunnels[k], r.clone())),
                     _ => return (Retouche::Groupe(Vec::new()), vide, false),
                 };
                 let z = union(zone_elem(&avant), zone_elem(&e));
@@ -766,6 +800,7 @@ impl Lieux {
                     (Liste::Bati, Elem::B(b)) => l.batiments.insert(k.min(l.batiments.len()), b),
                     (Liste::Routes, Elem::R(r)) => l.routes.insert(k.min(l.routes.len()), r),
                     (Liste::Ponts, Elem::R(r)) => l.ponts.insert(k.min(l.ponts.len()), r),
+                    (Liste::Tunnels, Elem::R(r)) => l.transports.tunnels.insert(k.min(l.transports.tunnels.len()), r),
                     _ => {}
                 }
                 (Retouche::Retire(li, k), z, true)
@@ -775,6 +810,7 @@ impl Lieux {
                     Liste::Bati => Elem::B(l.batiments.remove(k)),
                     Liste::Routes => Elem::R(l.routes.remove(k)),
                     Liste::Ponts => Elem::R(l.ponts.remove(k)),
+                    Liste::Tunnels => Elem::R(l.transports.tunnels.remove(k)),
                 };
                 let z = zone_elem(&e);
                 (Retouche::Insere(li, k, e), z, true)
@@ -930,7 +966,7 @@ impl Lieux {
             let b = &l.batiments[k];
             v.push(format!("{} · {} · faîtage à {:.1} m", GENRES_BATI[(b.genre as usize).min(4)], FORMES[(b.forme as usize).min(3)], b.toit - b.pied - 1.0).replace('.', ","));
         }
-        if let Some((pont, k)) = Lieux::voie_pres(d, x, z, 6.0) {
+        if let Some((pont, k)) = Lieux::voie_pres(d, x, z, 6.0, false) {
             let r = if pont { &l.ponts[k] } else { &l.routes[k] };
             v.push(format!("{}{} · {:.1} m de large", GENRES_VOIE[(r.genre as usize).min(GENRES_VOIE.len() - 1)], if pont { " (pont)" } else { "" }, r.largeur).replace('.', ","));
         }
@@ -1013,8 +1049,21 @@ impl Lieux {
 
     /// La voie la plus proche de (x, z), à `marge` mètres de son bord au plus ; les ponts
     /// d'abord.
-    fn voie_pres(d: &Donnees, x: f32, z: f32, marge: f32) -> Option<(bool, usize)> {
+    fn voie_pres(d: &Donnees, x: f32, z: f32, marge: f32, souterrains: bool) -> Option<(bool, usize)> {
         let mut mieux: Option<(f32, bool, usize)> = None;
+        if souterrains {
+            let t = &d.lieu.transports.tunnels;
+            for k in d.tunnels_dans([x - marge, z - marge, x + marge, z + marge]) {
+                let r = &t[k as usize];
+                for s in r.points.windows(2) {
+                    let e = distance_segment((x, z), [s[0][0], s[0][1]], [s[1][0], s[1][1]]) - r.largeur / 2.0;
+                    if e < marge && mieux.is_none_or(|m| e < m.0) {
+                        mieux = Some((e, false, k as usize));
+                    }
+                }
+            }
+            return mieux.map(|m| (m.1, m.2));
+        }
         for pont in [true, false] {
             let liste = if pont { &d.lieu.ponts } else { &d.lieu.routes };
             for k in d.routes_dans([x - marge, z - marge, x + marge, z + marge], pont) {
@@ -1154,7 +1203,7 @@ impl Lieux {
                             VOIES => {
                                 // Un nœud de la voie choisie, sinon une autre voie
                                 let n = match self.choix {
-                                    Some(Choix::Voie(pont, k)) => (if pont { d.lieu.ponts.get(k) } else { d.lieu.routes.get(k) }).and_then(|r| {
+                                    Some(Choix::Voie(pont, k)) => voies(&d.lieu, liste_de(pont, self.souterrains)).get(k).and_then(|r| {
                                         r.points.iter().enumerate().map(|(i, q)| {
                                             let s = vue.ecran(zone, q[0], q[1]);
                                             (i, (s[0] - x).hypot(s[1] - y))
@@ -1165,7 +1214,7 @@ impl Lieux {
                                 if n.is_some() {
                                     self.noeud = n;
                                 } else {
-                                    self.choix = Lieux::voie_pres(&d, wx, wz, 14.0 / vue.echelle).map(|(p, k)| Choix::Voie(p, k));
+                                    self.choix = Lieux::voie_pres(&d, wx, wz, 14.0 / vue.echelle, self.souterrains).map(|(p, k)| Choix::Voie(p, k));
                                     self.noeud = None;
                                 }
                             }
@@ -1189,7 +1238,7 @@ impl Lieux {
                                 self.trait_ = Some(Trait::Bati { k, dernier: (wx, wz), avant: d.lieu.batiments[k].clone() });
                             }
                             Choix::Voie(pont, k) => {
-                                let r = if pont { d.lieu.ponts.get(k) } else { d.lieu.routes.get(k) };
+                                let r = voies(&d.lieu, liste_de(pont, self.souterrains)).get(k);
                                 if let Some(r) = r {
                                     let proche = r.points.iter().enumerate().map(|(i, q)| {
                                         let s = vue.ecran(zone, q[0], q[1]);
@@ -1250,13 +1299,14 @@ impl Lieux {
                         }
                     }
                     Some(Trait::Point { pont, k, i, avant }) => {
+                        let sout = self.souterrains;
                         if let Some(carte) = &mut self.carte {
                             let zone = carte.donnees.write().ok().and_then(|mut d| {
                                 let h = d.lieu.relief(wx as f64, wz as f64) as f32;
-                                let r = if pont { d.lieu.ponts.get_mut(k) } else { d.lieu.routes.get_mut(k) }?;
+                                let r = voies_mut(&mut d.lieu, liste_de(pont, sout)).get_mut(k)?;
                                 let z1 = boite_route(r);
                                 if let Some(q) = r.points.get_mut(i) {
-                                    *q = [wx, wz, if pont { q[2] } else { h }];
+                                    *q = [wx, wz, if pont || sout { q[2] } else { h }];
                                 }
                                 Some(union(z1, boite_route(r)))
                             });
@@ -1327,7 +1377,7 @@ impl Lieux {
                         d.reindexer();
                     }
                 }
-                self.empiler(Retouche::Pose(if pont { Liste::Ponts } else { Liste::Routes }, k, Elem::R(avant)));
+                self.empiler(Retouche::Pose(liste_de(pont, self.souterrains), k, Elem::R(avant)));
             }
             _ => {}
         }
@@ -1638,6 +1688,22 @@ impl Lieux {
                 }
             }
         }
+        // Les souterrains seuls (outil Voies) : la carte voilée, les souterrains par-dessus
+        if self.outil == VOIES && self.souterrains {
+            if let Ok(dn) = carte.donnees.read() {
+                cx.dl.rrect(zone, 0.0, [0, 0, 0, 150]);
+                let (a, c) = (vue.monde(zone, zone.x, zone.y), vue.monde(zone, zone.x + zone.w, zone.y + zone.h));
+                let boite = [a.0.min(c.0), a.1.min(c.1), a.0.max(c.0), a.1.max(c.1)];
+                let t = &dn.lieu.transports.tunnels;
+                for k in dn.tunnels_dans(boite) {
+                    let r = &t[k as usize];
+                    let large = (r.largeur * vue.echelle).max(3.0 * d);
+                    for s in r.points.windows(2) {
+                        cx.dl.line(vue.ecran(zone, s[0][0], s[0][1]), vue.ecran(zone, s[1][0], s[1][1]), large, [0x4F, 0xC3, 0xF7, 255]);
+                    }
+                }
+            }
+        }
         // Ce qui est choisi
         if let Ok(dn) = carte.donnees.read() {
             match self.choix {
@@ -1649,7 +1715,7 @@ impl Lieux {
                     }
                 }
                 Some(Choix::Voie(pont, k)) => {
-                    let r = if pont { dn.lieu.ponts.get(k) } else { dn.lieu.routes.get(k) };
+                    let r = voies(&dn.lieu, liste_de(pont, self.souterrains)).get(k);
                     if let Some(r) = r {
                         let large = (r.largeur * vue.echelle).max(3.0 * d);
                         for s in r.points.windows(2) {
@@ -2480,10 +2546,22 @@ impl Lieux {
             }
             return;
         }
+        let mut sout = self.souterrains;
+        cx.toggle(b, sub_id(base, 278), "Souterrains seulement", &mut sout);
+        if sout != self.souterrains {
+            self.souterrains = sout;
+            self.choix = None;
+            self.noeud = None;
+        }
+        let souterrains = self.souterrains;
         let Some(carte) = &self.carte else { return };
         let (pont, k) = match self.choix {
             Some(Choix::Voie(p, k)) => (p, k),
             _ => {
+                if souterrains {
+                    cx.paragraph(b, "Touchez un souterrain pour le choisir ; tirez ses points pour le modifier.");
+                    return;
+                }
                 cx.paragraph(b, "Touchez une route ou un pont pour le choisir ; tirez ses points pour le modifier.");
                 if cx.button(b, sub_id(base, 260), "Nouvelle voie") {
                     self.trace = Some(Vec::new());
@@ -2492,8 +2570,8 @@ impl Lieux {
                 return;
             }
         };
-        let li = if pont { Liste::Ponts } else { Liste::Routes };
-        let Some(avant) = carte.donnees.read().ok().and_then(|d| if pont { d.lieu.ponts.get(k).cloned() } else { d.lieu.routes.get(k).cloned() }) else {
+        let li = liste_de(pont, souterrains);
+        let Some(avant) = carte.donnees.read().ok().and_then(|d| voies(&d.lieu, li).get(k).cloned()) else {
             self.choix = None;
             return;
         };
@@ -2529,9 +2607,11 @@ impl Lieux {
             }
         }
         let mut est_pont = pont;
-        cx.toggle(b, sub_id(base, 272), "Pont", &mut est_pont);
-        let supprimer = cx.button(b, sub_id(base, 273), if pont { "Supprimer le pont" } else { "Supprimer la route" });
-        if cx.button(b, sub_id(base, 274), "Nouvelle voie") {
+        if !souterrains {
+            cx.toggle(b, sub_id(base, 272), "Pont", &mut est_pont);
+        }
+        let supprimer = cx.button(b, sub_id(base, 273), if souterrains { "Supprimer le souterrain" } else if pont { "Supprimer le pont" } else { "Supprimer la route" });
+        if !souterrains && cx.button(b, sub_id(base, 274), "Nouvelle voie") {
             self.trace = Some(Vec::new());
             self.choix = None;
         }
@@ -2566,7 +2646,7 @@ impl Lieux {
     /// Les nœuds de la voie choisie : en choisir un (le toucher, ou précédent / suivant),
     /// en insérer, en retirer, l'accrocher à la voie voisine, y couper la voie.
     fn panneau_noeuds(&mut self, cx: &mut Cx, b: &mut crate::widgets::Body, base: Id, pont: bool, k: usize, r: &Route) {
-        let li = if pont { Liste::Ponts } else { Liste::Routes };
+        let li = liste_de(pont, self.souterrains);
         let n = r.points.len();
         cx.section(b, "Nœuds");
         let Some(i) = self.noeud.filter(|&i| i < n) else {
@@ -2607,7 +2687,7 @@ impl Lieux {
                         let liste = if p2 { &d.lieu.ponts } else { &d.lieu.routes };
                         for kk in d.routes_dans([q[0] - 8.0, q[1] - 8.0, q[0] + 8.0, q[1] + 8.0], p2) {
                             let kk = kk as usize;
-                            if p2 == pont && kk == k {
+                            if li == liste_de(p2, false) && kk == k {
                                 continue;
                             }
                             let pts = &liste[kk].points;
@@ -2644,7 +2724,7 @@ impl Lieux {
                 let mut suite = r.clone();
                 neuf.points.truncate(i + 1);
                 suite.points.drain(..i);
-                let m = self.carte.as_ref().and_then(|c| c.donnees.read().ok()).map(|d| if pont { d.lieu.ponts.len() } else { d.lieu.routes.len() });
+                let m = self.carte.as_ref().and_then(|c| c.donnees.read().ok()).map(|d| voies(&d.lieu, li).len());
                 if let Some(m) = m {
                     self.faire(Retouche::Groupe(vec![Retouche::Pose(li, k, Elem::R(neuf)), Retouche::Insere(li, m, Elem::R(suite))]));
                     self.noeud = Some(i);
@@ -3050,6 +3130,26 @@ impl Contexte for Lieux {
                 }
                 Ok(format!("rendu maquette={} materialisation={} blanc={} defonce={} suivi={}", self.maquette3d, self.materialisation3d, self.blanc3d, self.defonce3d, self.suivi3d))
             }
+            // Les classes des voies (voies rapides, bretelles) lues dans la réponse d'OSM
+            // gardée en cache : « classer <chemin de osm_routes.json> »
+            "classer" => {
+                let Some(chemin) = m.get(1) else { return Some(Err("classer <chemin de osm_routes.json>".into())) };
+                let texte = match std::fs::read_to_string(m[1..].join(" ")) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(format!("{chemin} : {e}"))),
+                };
+                let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
+                let Ok(mut d) = carte.donnees.write() else { return Some(Err("données occupées".into())) };
+                let classes = match sage_reel::generer::classes_depuis_osm(&d.lieu, &texte) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                let (r, b) = (classes.iter().filter(|c| c.classe == sage_reel::circulation::CLASSE_RAPIDE).count(), classes.iter().filter(|c| c.classe == sage_reel::circulation::CLASSE_BRETELLE).count());
+                d.lieu.classes = classes;
+                drop(d);
+                self.modifie = true;
+                Ok(format!("classes : {r} tracés de voies rapides, {b} de bretelles (lieu modifié, à enregistrer)"))
+            }
             "selection" => {
                 if m.len() > 1 {
                     self.selection = crate::selection::Selection::lire(&m[1..].join(" "), self.selection.seules);
@@ -3076,6 +3176,12 @@ impl Contexte for Lieux {
                     (Some("bords"), _) => {
                         let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
                         return Some(Ok(r.diagnostiquer_bords(&carte.donnees)));
+                    }
+                    (Some("voie"), Some(k)) => {
+                        let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
+                        let Ok(d) = carte.donnees.read() else { return Some(Err("données occupées".into())) };
+                        let Some(fin) = d.reseau_pret() else { return Some(Err("réseau pas encore nivelé".into())) };
+                        return Some(Ok(crate::reseau::decrire_voie(&fin, &d.lieu, k as usize)));
                     }
                     (Some("denivele"), _) => {
                         let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
@@ -3108,7 +3214,7 @@ impl Contexte for Lieux {
                         r.refaire_traces();
                     }
                     (None, _) => {}
-                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire | files [oui | non] | fils [oui | non]]".into())),
+                    _ => return Some(Err("traces [oui | non | distance <m> | rayon <k> | tuiles <n> | refaire | files [oui | non] | fils [oui | non] | voie <k>]".into())),
                 }
                 Ok(format!("traces distance {} rayon {} tuiles {} · remblai distance {} rayon {} · {}", self.sur.traces_distance, self.sur.traces_rayon, r.traces_tuiles, self.sur.remblai_distance, self.sur.remblai_rayon, r.traces_bilan))
             }

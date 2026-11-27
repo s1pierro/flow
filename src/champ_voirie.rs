@@ -194,6 +194,9 @@ fn enchainer(r: &Reseau) -> Vec<(Vec<(usize, bool)>, usize, usize)> {
     out
 }
 
+/// Le poids des routes (grandes routes, routes, bus) : au moins tant.
+const POIDS_ROUTE: f32 = 4.0;
+
 /// Le poids d'une voie selon son rang : la principale l'emporte nettement.
 fn poids(genre: u8) -> f32 {
     match rang(genre) {
@@ -1147,9 +1150,16 @@ impl Champ {
                 None => proches.push((k, d, h, w)),
             }
         }
+        // Dans l'emprise d'une route, les voies d'un rang inférieur (service, chemins,
+        // piétonnes) ne comptent pas : la route n'est pas affectée par elles, elles en
+        // prennent la hauteur et le roulis à son bord
+        let route_ici = proches.iter().any(|&(k, d, _, w)| d <= w && self.voies[k as usize].poids >= POIDS_ROUTE);
         let (mut s, mut m) = (0.0f32, 0.0f32);
         for (k, d, h, w) in proches {
             let v = &self.voies[k as usize];
+            if route_ici && v.poids < POIDS_ROUTE {
+                continue;
+            }
             let f = if d <= w { 1.0 } else { (1.0 - (d - w) / FRANGE).powi(2) };
             let e = (h - niveau).abs();
             let f = f * if e <= NIVEAU_PLEIN { 1.0 } else { (1.0 - (e - NIVEAU_PLEIN) / (NIVEAU_NUL - NIVEAU_PLEIN)).max(0.0).powi(2) };

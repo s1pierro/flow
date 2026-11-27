@@ -8,6 +8,9 @@
 //! branches, ni cassure à l'entrée du carrefour. Les tronçons intérieurs d'un groupe
 //! sont entièrement sur le plan. Les ponts et les tunnels ne contraignent pas les
 //! plaques (seulement les voies entre elles).
+//!
+//! Hiérarchie : à un nœud où une route arrive, seules les routes font le carrefour ;
+//! les voies de service, chemins et piétonnes s'y greffent sans la modifier (`niveau`).
 
 use crate::reseau::{entre, Reseau};
 use std::collections::HashMap;
@@ -34,6 +37,12 @@ const Y_ECART: f32 = 0.3;
 const Y_PENTE: f32 = 0.08;
 /// La plus forte pente d'une plaque.
 const PENTE_MAX: f32 = 0.08;
+/// Une plaque d'un seul nœud dont les routes ne sont que deux bouts (bout à bout, quel
+/// que soit l'angle) : la rue continue, une voie secondaire s'y greffe ; le plan
+/// reprend la pente de chacun des deux bouts, sans plafond, pour que le profil de la
+/// rue ne bouge presque pas. Deux bouts presque alignés (sinus de leur angle sous
+/// tant) : la pente de l'un à l'autre, plate en travers.
+const ALIGNES: f32 = 0.3;
 /// La portée (m), au-delà de la bouche, du profil d'une branche pris pour ajuster le
 /// plan.
 const PORTEE: f32 = 12.0;
@@ -67,11 +76,25 @@ pub struct Bilan {
     pub plaques: usize,
     pub groupes: usize,
     pub branches: usize,
+    pub greffes: usize,
 }
 
 fn carrossable(r: &Reseau, k: usize) -> bool {
     let a = &r.aretes[k];
     sage_reel::carrossable(a.genre) && a.points.len() >= 2
+}
+
+/// Une route (grande route, route, bus).
+fn principale(r: &Reseau, k: usize) -> bool {
+    carrossable(r, k) && crate::materialisation::rang(r.aretes[k].genre) <= 1
+}
+
+/// Le niveau d'une voie dans la hiérarchie : 1 les routes, 0 les autres (service,
+/// chemins, piétonnes). À un nœud, seules les voies carrossables du plus haut niveau
+/// présent comptent (`compte`) : une voie de service ne fait pas de carrefour avec une
+/// route, elle s'y greffe (`greffer`).
+fn niveau(r: &Reseau, k: usize) -> u8 {
+    u8::from(principale(r, k))
 }
 
 fn longueur(q: &[[f32; 3]]) -> f32 {
@@ -112,11 +135,22 @@ fn lisse(u: f32) -> f32 {
 
 /// Pose les plaques de carrefour sur le réseau nivelé.
 pub fn poser(r: &mut Reseau) -> Bilan {
+    poser_avec(r, &[])
+}
+
+/// `poser`, les arêtes `rapides` (les voies rapides posées) au-dessus des routes dans
+/// la hiérarchie : à leurs nœuds, elles seules comptent ; une bretelle s'y greffe.
+pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
+    let niv = |r: &Reseau, k: usize| -> u8 { if rapides.get(k).copied().unwrap_or(false) { 2 } else { niveau(r, k) } };
     let mut bilan = Bilan::default();
     let nn = r.noeuds.len();
-    // 1. Les nœuds de carrefour : au moins trois bouts carrossables
-    let bouts = |n: usize| -> usize { r.noeuds[n].aretes.iter().filter(|&&k| carrossable(r, k)).map(|&k| usize::from(r.aretes[k].a == n) + usize::from(r.aretes[k].b == n)).sum() };
-    let carrefour: Vec<bool> = (0..nn).map(|n| bouts(n) >= 3).collect();
+    // Le plus haut niveau carrossable de chaque nœud, et les voies qui y comptent
+    let haut: Vec<u8> = (0..nn).map(|n| r.noeuds[n].aretes.iter().filter(|&&k| carrossable(r, k)).map(|&k| niv(r, k)).max().unwrap_or(0)).collect();
+    let compte = |r: &Reseau, n: usize, k: usize| carrossable(r, k) && niv(r, k) == haut[n];
+    // 1. Les nœuds de carrefour : au moins trois bouts carrossables (du plus haut niveau)
+    let bouts = |n: usize| -> usize { r.noeuds[n].aretes.iter().filter(|&&k| compte(r, n, k)).map(|&k| usize::from(r.aretes[k].a == n) + usize::from(r.aretes[k].b == n)).sum() };
+    // Les voies rapides posées ne font pas de plaque : elles ne bougent plus
+    let carrefour: Vec<bool> = (0..nn).map(|n| bouts(n) >= 3 && haut[n] < 2).collect();
     // 2. Les groupes : des nœuds de carrefour reliés par des tronçons courts
     let mut parent: Vec<usize> = (0..nn).collect();
     fn racine(p: &mut [usize], mut i: usize) -> usize {
@@ -127,7 +161,7 @@ pub fn poser(r: &mut Reseau) -> Bilan {
         i
     }
     for (k, a) in r.aretes.iter().enumerate() {
-        if carrossable(r, k) && a.a != a.b && carrefour[a.a] && carrefour[a.b] && longueur(&a.points) < LIEN {
+        if compte(r, a.a, k) && compte(r, a.b, k) && a.a != a.b && carrefour[a.a] && carrefour[a.b] && longueur(&a.points) < LIEN {
             let (x, y) = (racine(&mut parent, a.a), racine(&mut parent, a.b));
             if x != y {
                 parent[x] = y;
@@ -153,7 +187,7 @@ pub fn poser(r: &mut Reseau) -> Bilan {
         // (voie, direction, demi-largeur, angle)
         let mut bras: Vec<(usize, [f32; 2], f32, f32)> = Vec::new();
         for &k in &r.noeuds[n].aretes {
-            if !carrossable(r, k) {
+            if !compte(r, n, k) {
                 continue;
             }
             let a = &r.aretes[k];
@@ -222,7 +256,7 @@ pub fn poser(r: &mut Reseau) -> Bilan {
             if !carrefour[n] {
                 return 0.0;
             }
-            let w = r.noeuds[n].aretes.iter().filter(|&&k| carrossable(r, k)).map(|&k| r.aretes[k].largeur * 0.5).fold(1.0f32, f32::max);
+            let w = r.noeuds[n].aretes.iter().filter(|&&k| compte(r, n, k)).map(|&k| r.aretes[k].largeur * 0.5).fold(1.0f32, f32::max);
             1.5 * w + 1.0
         })
         .collect();
@@ -233,11 +267,13 @@ pub fn poser(r: &mut Reseau) -> Bilan {
     for (&g, noeuds) in &groupes {
         let (mut sw, mut sx, mut sz, mut sh) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         let mut echantillons: Vec<(f32, f32, f32, f32)> = Vec::new();
+        // Les bouts de route (direction, hauteur au loin, distance) pour la continuité
+        let mut bouts_route: Vec<([f32; 2], f32, f32)> = Vec::new();
         for &n in noeuds {
             let p = r.noeuds[n].p;
             echantillons.push((p[0], p[1], p[2], 4.0 * poids(sage_reel::ROUTE, 6.0)));
             for &k in &r.noeuds[n].aretes {
-                if !carrossable(r, k) {
+                if !compte(r, n, k) {
                     continue;
                 }
                 let a = &r.aretes[k];
@@ -249,6 +285,14 @@ pub fn poser(r: &mut Reseau) -> Bilan {
                     let q: Vec<[f32; 3]> = if fin { a.points.iter().rev().copied().collect() } else { a.points.clone() };
                     let abs = abscisses(&q);
                     let jusqu = (rayon(n, k) + PORTEE).min(abs[abs.len() - 1]);
+                    if noeuds.len() == 1 && principale(r, k) && jusqu > 0.5 {
+                        let i = abs.partition_point(|&y| y < jusqu).clamp(1, q.len() - 1);
+                        let t = ((jusqu - abs[i - 1]) / (abs[i] - abs[i - 1]).max(1e-6)).clamp(0.0, 1.0);
+                        let pt = entre(q[i - 1], q[i], t);
+                        let d = [pt[0] - p[0], pt[1] - p[1]];
+                        let l = d[0].hypot(d[1]).max(1e-6);
+                        bouts_route.push(([d[0] / l, d[1] / l], hauteur(&q, &abs, jusqu), jusqu));
+                    }
                     let mut s = PAS;
                     while s <= jusqu {
                         let h = hauteur(&q, &abs, s);
@@ -284,11 +328,30 @@ pub fn poser(r: &mut Reseau) -> Bilan {
         }
         let det = a11 * a22 - a12 * a12;
         let mut gr = if det.abs() > 1e-6 { [((b1 * a22 - b2 * a12) / det) as f32, ((a11 * b2 - a12 * b1) / det) as f32] } else { [0.0, 0.0] };
-        let m = gr[0].hypot(gr[1]);
-        if m > PENTE_MAX {
-            gr = [gr[0] * PENTE_MAX / m, gr[1] * PENTE_MAX / m];
-        }
-        plans.insert(g, Plan { c: [cx, cz, ch], g: gr });
+        let c = if bouts_route.len() == 2 {
+            let ((u, h1, s1), (v, h2, s2)) = (bouts_route[0], bouts_route[1]);
+            let pn = r.noeuds[noeuds[0]].p;
+            let det = u[0] * v[1] - u[1] * v[0];
+            if det.abs() >= ALIGNES {
+                // La pente de chaque bout depuis le nœud : g·u = pu, g·v = pv
+                let (pu, pv) = ((h1 - pn[2]) / s1.max(1.0), (h2 - pn[2]) / s2.max(1.0));
+                gr = [(pu * v[1] - pv * u[1]) / det, (u[0] * pv - v[0] * pu) / det];
+            } else {
+                // Presque alignés : la pente de l'un à l'autre, plate en travers
+                let t = [v[0] - u[0], v[1] - u[1]];
+                let l = t[0].hypot(t[1]).max(1e-6);
+                let pente = (h2 - h1) / (s1 + s2).max(1.0);
+                gr = [t[0] / l * pente, t[1] / l * pente];
+            }
+            pn
+        } else {
+            let m = gr[0].hypot(gr[1]);
+            if m > PENTE_MAX {
+                gr = [gr[0] * PENTE_MAX / m, gr[1] * PENTE_MAX / m];
+            }
+            [cx, cz, ch]
+        };
+        plans.insert(g, Plan { c, g: gr });
         bilan.plaques += 1;
         if noeuds.len() > 1 {
             bilan.groupes += 1;
@@ -318,10 +381,10 @@ pub fn poser(r: &mut Reseau) -> Bilan {
             }
             cur = if endroit { a.b } else { a.a };
             vus += 1;
-            if a.a == a.b || carrefour[cur] || degre[cur] != 2 || vus > 200 {
+            if a.a == a.b || carrefour[cur] || degre[cur] != 2 || !compte(r, cur, k) || vus > 200 {
                 break;
             }
-            let Some(&k2) = r.noeuds[cur].aretes.iter().find(|&&j| j != k && carrossable(r, j)) else { break };
+            let Some(&k2) = r.noeuds[cur].aretes.iter().find(|&&j| j != k && compte(r, cur, j)) else { break };
             k = k2;
         }
         (q, cur)
@@ -360,7 +423,7 @@ pub fn poser(r: &mut Reseau) -> Bilan {
     let mut departs: Vec<(usize, usize)> = Vec::new();
     for n in (0..nn).filter(|&n| groupe_de[n].is_some_and(|g| plans.contains_key(&g))) {
         for &k in &r.noeuds[n].aretes {
-            if carrossable(r, k) {
+            if compte(r, n, k) {
                 departs.push((n, k));
             }
         }
@@ -390,10 +453,10 @@ pub fn poser(r: &mut Reseau) -> Bilan {
             membres.push((k, endroit, debut));
             let suivant = if endroit { a.b } else { a.a };
             cur = suivant;
-            if a.a == a.b || carrefour[cur] || degre[cur] != 2 {
+            if a.a == a.b || carrefour[cur] || degre[cur] != 2 || !compte(r, cur, k) {
                 break;
             }
-            let Some(&k2) = r.noeuds[cur].aretes.iter().find(|&&j| j != k && carrossable(r, j)) else { break };
+            let Some(&k2) = r.noeuds[cur].aretes.iter().find(|&&j| j != k && compte(r, cur, j)) else { break };
             if vue[k2] {
                 break;
             }
@@ -529,7 +592,8 @@ pub fn poser(r: &mut Reseau) -> Bilan {
             continue;
         }
         let (a, b) = (r.aretes[k].a, r.aretes[k].b);
-        let (da, db) = (r.noeuds[a].p[2] - anciens[a], r.noeuds[b].p[2] - anciens[b]);
+        let greffe = |n: usize| niv(r, k) < haut[n];
+        let (da, db) = (if greffe(a) { 0.0 } else { r.noeuds[a].p[2] - anciens[a] }, if greffe(b) { 0.0 } else { r.noeuds[b].p[2] - anciens[b] });
         if da.abs() < 1e-4 && db.abs() < 1e-4 {
             continue;
         }
@@ -541,6 +605,86 @@ pub fn poser(r: &mut Reseau) -> Bilan {
             let fb = 1.0 - lisse((total - abs[i]) / RACCORD_PIETON);
             p[2] += da * fa + db * fb;
         }
+    }
+    // 6. Les greffes : une voie d'un niveau inférieur (service, chemin, piétonne) qui
+    //    arrive à un nœud de route ne la modifie pas ; elle prend la hauteur de la
+    //    route jusqu'à son bord (plus une marge), puis rejoint son profil par un raccord
+    //    lissé
+    let mut greffes: Vec<(usize, Vec<[f32; 3]>)> = Vec::new();
+    for k in 0..r.aretes.len() {
+        let a = &r.aretes[k];
+        if a.points.len() < 2 || a.a == a.b {
+            continue;
+        }
+        let mut pts = a.points.clone();
+        let mut change = false;
+        for fin in [false, true] {
+            let n = if fin { a.b } else { a.a };
+            if niv(r, k) >= haut[n] {
+                continue;
+            }
+            let routes: Vec<usize> = r.noeuds[n].aretes.iter().copied().filter(|&j| j != k && compte(r, n, j)).collect();
+            if routes.is_empty() {
+                continue;
+            }
+            let w = routes.iter().map(|&j| r.aretes[j].largeur * 0.5).fold(0.0f32, f32::max) + BOUCHE_MARGE;
+            // La hauteur de la route au droit d'un point : son axe le plus proche
+            let route_h = |x: f32, z: f32| -> f32 {
+                let mut best = (f32::MAX, r.noeuds[n].p[2]);
+                for &j in &routes {
+                    for s in r.aretes[j].points.windows(2) {
+                        let (ux, uz) = (s[1][0] - s[0][0], s[1][1] - s[0][1]);
+                        let l2 = ux * ux + uz * uz;
+                        let t = if l2 > 1e-9 { (((x - s[0][0]) * ux + (z - s[0][1]) * uz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                        let p = entre(s[0], s[1], t);
+                        let d = (x - p[0]).hypot(z - p[1]);
+                        if d < best.0 {
+                            best = (d, p[2]);
+                        }
+                    }
+                }
+                best.1
+            };
+            let q: Vec<[f32; 3]> = if fin { pts.iter().rev().copied().collect() } else { pts.clone() };
+            let abs = abscisses(&q);
+            let total = abs[abs.len() - 1];
+            let sb = w.min(0.4 * total);
+            let hb = hauteur(&q, &abs, sb);
+            let pb = {
+                let i = abs.partition_point(|&y| y < sb).clamp(1, q.len() - 1);
+                let t = ((sb - abs[i - 1]) / (abs[i] - abs[i - 1]).max(1e-6)).clamp(0.0, 1.0);
+                entre(q[i - 1], q[i], t)
+            };
+            let delta = route_h(pb[0], pb[1]) - hb;
+            let l = RACCORD_MIN.max(1.5 * delta.abs() / RACCORD_PENTE).min(RACCORD_MAX).min(0.5 * total - sb).max(0.0);
+            let mut v: Vec<[f32; 3]> = densifier(&q, &abs, &[(0.0, sb + l)])
+                .into_iter()
+                .map(|x| {
+                    let c = x[3];
+                    let h = if c <= sb {
+                        route_h(x[0], x[1])
+                    } else if l > 1e-3 && c < sb + l {
+                        x[2] + delta * (1.0 - lisse((c - sb) / l))
+                    } else {
+                        x[2]
+                    };
+                    [x[0], x[1], h]
+                })
+                .collect();
+            v[0][2] = r.noeuds[n].p[2];
+            if fin {
+                v.reverse();
+            }
+            pts = v;
+            change = true;
+        }
+        if change {
+            greffes.push((k, pts));
+        }
+    }
+    bilan.greffes = greffes.len();
+    for (k, pts) in greffes {
+        r.aretes[k].points = pts;
     }
     bilan
 }

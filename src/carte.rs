@@ -306,6 +306,18 @@ impl Donnees {
                 let _t = crate::suivi::tache("graphe");
                 rs::reseau(&self.lieu)
             };
+            let so = {
+                let mut t = crate::suivi::tache("souterrains");
+                let x = rs::preparer_souterrains(&mut r, &self.lieu);
+                t.detail(format!("{} voies de niveau négatif, {} très courts remis au sol, {} enfoncés, {} voies en tranchée, {} tabliers", x.negatifs, x.courts, x.enfonces, x.tranchees, x.tabliers));
+                x
+            };
+            let rapides = {
+                let mut t = crate::suivi::tache("voies rapides");
+                let x = rs::lisser_rapides(&mut r, &self.lieu);
+                t.detail(format!("{} chaînes de voies rapides, {} planchers", x.chaines, x.planchers));
+                x
+            };
             let c = {
                 let mut t = crate::suivi::tache("contraintes");
                 let c = rs::contraintes(&r, &self.lieu);
@@ -314,23 +326,15 @@ impl Donnees {
             };
             {
                 let _t = crate::suivi::tache("nivellement");
-                rs::niveler(&mut r, &c, 50);
-            }
-            let n = au_sol_les_tunnels_affleurants(&mut r, &self.lieu);
-            // Les tunnels mis au sol gardaient la hauteur d'un tunnel (en tranchée sous le
-            // terrain) : un second nivellement les remet au niveau des rues voisines
-            if n > 0 {
-                let _t = crate::suivi::tache("nivellement (tunnels affleurants au sol)");
-                let c = rs::contraintes(&r, &self.lieu);
-                rs::niveler(&mut r, &c, 50);
+                rs::niveler_fixe(&mut r, &c, 50, &rapides.fixes);
             }
             let pl = {
                 let mut t = crate::suivi::tache("plaques de carrefour");
-                let b = crate::plaques::poser(&mut r);
-                t.detail(format!("{} plaques ({} groupes), {} branches posées", b.plaques, b.groupes, b.branches));
+                let b = crate::plaques::poser_avec(&mut r, &rapides.fixes);
+                t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes", b.plaques, b.groupes, b.branches, b.greffes));
                 b
             };
-            t.detail(format!("{} nœuds, {} arêtes, {n} tunnels affleurants mis au sol, {} plaques", r.noeuds.len(), r.aretes.len(), pl.plaques));
+            t.detail(format!("{} nœuds, {} arêtes, souterrains : {} remis au sol, {} enfoncés, {} en tranchée, {} plaques", r.noeuds.len(), r.aretes.len(), so.courts, so.enfonces, so.tranchees, pl.plaques));
             {
                 let _t = crate::suivi::tache("réseau nivelé (mise en cache)");
                 crate::cache_lieu::garder_reseau(h, &r);

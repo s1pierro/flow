@@ -12,13 +12,29 @@
 //! (deux bouts libres à moins de `SOUDURE`) sont refermées : les deux bouts sont
 //! confondus en leur milieu.
 //!
-//! Les voies de bus en site propre (`sage_reel::BUS`, le TEOR) sont une surface à part,
-//! qui passe sans être coupée : leurs bords ne s'arrêtent que dans une autre voie de
-//! bus ; les voies qui les traversent s'arrêtent à leur bord et s'y referment. Les
-//! liens aux nœuds se font entre voies de même sorte.
+//! Une hiérarchie de sortes (`sorte`) : les voies de bus en site propre
+//! (`sage_reel::BUS`, le TEOR), puis les routes (grandes routes, routes), puis les
+//! voies de service. Une voie passe sans être coupée par les voies d'une sorte
+//! inférieure : ses bords ne s'arrêtent que dans une voie de sa sorte ou au-dessus ; les
+//! voies inférieures qui la rejoignent ou la traversent s'arrêtent à son bord et s'y
+//! referment. Les liens aux nœuds se font entre voies de même sorte.
 
 use crate::reseau::{Passage, Reseau};
 use std::collections::HashMap;
+
+/// Les sortes de voies, de la plus basse à la plus haute (voir l'en-tête).
+const SORTE_SERVICE: u8 = 0;
+const SORTE_ROUTE: u8 = 1;
+const SORTE_BUS: u8 = 2;
+
+/// La sorte d'une voie : bus, route (grandes routes, routes), sinon service.
+pub fn sorte(genre: u8) -> u8 {
+    match genre {
+        sage_reel::BUS => SORTE_BUS,
+        sage_reel::GRANDE | sage_reel::ROUTE => SORTE_ROUTE,
+        _ => SORTE_SERVICE,
+    }
+}
 
 /// Les bandes sont rétrécies d'autant (m) : un bord posé sur le bord d'une autre bande
 /// (une voie qui en continue une autre) n'est pas « dedans ».
@@ -39,6 +55,12 @@ const CASE: f32 = 10.0;
 /// Une bande ne coupe un bord que s'ils sont à moins de tant de mètres en hauteur (un
 /// pont ne coupe pas la rue qu'il enjambe).
 const ECART_H: f32 = 2.0;
+/// La soudure unique : deux voies qui partent d'un même nœud à moins de
+/// `SOUDURE_ANGLE` degrés l'une de l'autre ont leurs bords intérieurs soudés d'un
+/// seul tenant jusqu'à leur dernier contact (à moins de `SOUDURE_LOIN` mètres du
+/// nœud) ; les îlots entre deux contacts deviennent de la chaussée.
+const SOUDURE_ANGLE: f32 = 45.0;
+const SOUDURE_LOIN: f32 = 40.0;
 
 /// Le point de croisement des segments `a`–`b` et `c`–`d`, s'ils se croisent.
 fn croisement(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> Option<[f32; 2]> {
@@ -85,7 +107,8 @@ struct Bande {
     /// coupe aussi les bords des voies d'autres passages qui y arrivent.
     portail: Option<usize>,
     passage: Passage,
-    bus: bool,
+    /// La sorte de la voie (`sorte`) ; un joint prend la plus basse de ses voies.
+    sorte: u8,
     q: [[f32; 2]; 4],
     /// +1 si `q` tourne dans le sens direct, −1 sinon.
     sens: f32,
@@ -159,14 +182,15 @@ pub struct Bandes {
 
 impl Bandes {
     /// Les morceaux de `p` hors des bandes (sauf celles des arêtes `sauf`) de son niveau.
-    /// Le bord d'une voie de bus (`bus`) n'est coupé que par les voies de bus.
-    fn garder(&self, p: &[[f32; 3]], passage: Passage, bus: bool, sauf: &[usize]) -> Vec<Poly> {
-        self.decouper(p, passage, bus, sauf, false)
+    /// Le bord d'une voie de sorte `sorte` n'est coupé que par les voies de sa sorte ou
+    /// au-dessus.
+    fn garder(&self, p: &[[f32; 3]], passage: Passage, sorte: u8, sauf: &[usize]) -> Vec<Poly> {
+        self.decouper(p, passage, sorte, sauf, false)
     }
 
     /// `garder`, ou à l'inverse (`dedans`) les morceaux de `p` dans les bandes des voies
-    /// qui ne sont pas de bus.
-    fn decouper(&self, p: &[[f32; 3]], passage: Passage, bus: bool, sauf: &[usize], dedans_: bool) -> Vec<Poly> {
+    /// d'une sorte inférieure (là où elles se referment sur la voie de `p`).
+    fn decouper(&self, p: &[[f32; 3]], passage: Passage, sorte: u8, sauf: &[usize], dedans_: bool) -> Vec<Poly> {
         let mut sortie = Vec::new();
         let mut cur: Poly = Vec::new();
         let mut ouvert = false;
@@ -196,7 +220,7 @@ impl Bandes {
                 if sauf.contains(&b.arete) || b.exclues.iter().any(|e| sauf.contains(e)) || (b.passage != passage && !au_portail()) || (b.h - hm).abs() > ECART_H {
                     continue;
                 }
-                if if dedans_ { b.bus || b.arete == usize::MAX } else { bus && !b.bus } {
+                if if dedans_ { b.sorte >= sorte || b.arete == usize::MAX } else { sorte > b.sorte } {
                     continue;
                 }
                 if let Some((t0, t1)) = dedans(p0, p1, b) {
@@ -283,7 +307,7 @@ impl Bandes {
         let q = [p[0], p[1]];
         self.index.get(&case(p[0], p[1])).map(|x| x.as_slice()).unwrap_or(&[]).iter().any(|i| {
             let b = &self.bandes[*i as usize];
-            b.bus && (b.h - p[2]).abs() <= ECART_H && dedans(q, q, b).is_some()
+            b.sorte == SORTE_BUS && (b.h - p[2]).abs() <= ECART_H && dedans(q, q, b).is_some()
         })
     }
 
@@ -316,7 +340,7 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
         let a = &r.aretes[k];
         sage_reel::carrossable(a.genre) && a.files.total > 0 && a.points.len() >= 2 && !crate::fils::est_amorce(r, k)
     };
-    let est_bus = |k: usize| r.aretes[k].genre == sage_reel::BUS;
+    let sorte_de = |k: usize| sorte(r.aretes[k].genre);
     let utiles: Vec<usize> = aretes.iter().copied().filter(|&k| carrossable(k)).collect();
     // Les deux bords (gauche, droite du tracé) : le bord extérieur des files extrêmes,
     // posé aux raccords sur celui des files du tronc qu'elles continuent ; et les bandes
@@ -581,7 +605,7 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
                     bandes.index.entry((ci, cj)).or_default().push(id);
                 }
             }
-            bandes.bandes.push(Bande { arete: k, exclues: Vec::new(), portail: portail_de(p[i], p[j]), passage: r.aretes[k].passage, bus: est_bus(k), q, sens, h: (p[i][2] + p[j][2]) / 2.0 });
+            bandes.bandes.push(Bande { arete: k, exclues: Vec::new(), portail: portail_de(p[i], p[j]), passage: r.aretes[k].passage, sorte: sorte_de(k), q, sens, h: (p[i][2] + p[j][2]) / 2.0 });
         }
         // Les girations (deux voies bout à bout en angle fort) : coin ou arc, après
         // les bandes
@@ -606,7 +630,7 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
     // même niveau). Elle comble les coins vides entre deux bandes coupées d'équerre qui
     // font un angle ; un bord qui les traverserait y est coupé.
     {
-        let mut aux: HashMap<(usize, Passage), (Vec<[f32; 2]>, f32, Vec<usize>, bool, Passage)> = HashMap::new();
+        let mut aux: HashMap<(usize, Passage), (Vec<[f32; 2]>, f32, Vec<usize>, u8, Passage)> = HashMap::new();
         for &k in &utiles {
             let Some([g, d]) = cotes.get(&k) else { continue };
             // Un bord effacé par une giration (un petit tronçon traversé)
@@ -617,15 +641,15 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
             // Les deux bords n'ont pas toujours autant de points (girations)
             for (n, fin) in [(a.a, false), (a.b, true)] {
                 let (gi, di) = if fin { (g[g.len() - 1], d[d.len() - 1]) } else { (g[0], d[0]) };
-                let e = aux.entry((n, a.passage)).or_insert((Vec::new(), 0.0, Vec::new(), true, a.passage));
+                let e = aux.entry((n, a.passage)).or_insert((Vec::new(), 0.0, Vec::new(), u8::MAX, a.passage));
                 e.0.push([gi[0], gi[1]]);
                 e.0.push([di[0], di[1]]);
                 e.1 += (gi[2] + di[2]) / 2.0;
                 e.2.push(k);
-                e.3 &= est_bus(k);
+                e.3 = e.3.min(sorte_de(k));
             }
         }
-        for (_, (pts, hs, voies, bus, passage)) in aux {
+        for (_, (pts, hs, voies, sorte, passage)) in aux {
             let nb = voies.len();
             if nb < 2 {
                 continue;
@@ -685,7 +709,132 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
                         bandes.index.entry((ci, cj)).or_default().push(id);
                     }
                 }
-                bandes.bandes.push(Bande { arete: usize::MAX, exclues: voies.clone(), portail: None, passage, bus, q, sens, h });
+                bandes.bandes.push(Bande { arete: usize::MAX, exclues: voies.clone(), portail: None, passage, sorte, q, sens, h });
+            }
+        }
+    }
+    // La soudure unique (voir SOUDURE_ANGLE)
+    {
+        let mut depart: HashMap<usize, Vec<(usize, bool)>> = HashMap::new();
+        for &k in &utiles {
+            let a = &r.aretes[k];
+            if a.a == a.b || !cotes.contains_key(&k) {
+                continue;
+            }
+            depart.entry(a.a).or_default().push((k, false));
+            depart.entry(a.b).or_default().push((k, true));
+        }
+        let abscisses = |p: &[[f32; 3]]| -> Vec<f32> {
+            let mut v = vec![0.0f32];
+            for w in p.windows(2) {
+                let l = v[v.len() - 1];
+                v.push(l + (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]));
+            }
+            v
+        };
+        let au = |p: &[[f32; 3]], ab: &[f32], x: f32| -> [f32; 3] {
+            let i = ab.partition_point(|&y| y < x).clamp(1, p.len() - 1);
+            let t = ((x - ab[i - 1]) / (ab[i] - ab[i - 1]).max(1e-6)).clamp(0.0, 1.0);
+            [p[i - 1][0] + (p[i][0] - p[i - 1][0]) * t, p[i - 1][1] + (p[i][1] - p[i - 1][1]) * t, p[i - 1][2] + (p[i][2] - p[i - 1][2]) * t]
+        };
+        let cos_max = SOUDURE_ANGLE.to_radians().cos();
+        for (_, v) in depart {
+            for x in 0..v.len() {
+                for y in x + 1..v.len() {
+                    let ((k1, f1), (k2, f2)) = (v[x], v[y]);
+                    if k1 == k2 || r.aretes[k1].passage != r.aretes[k2].passage || sorte_de(k1) != sorte_de(k2) {
+                        continue;
+                    }
+                    let (Some(d1), Some(d2)) = (direction(k1, f1), direction(k2, f2)) else { continue };
+                    if d1[0] * d2[0] + d1[1] * d2[1] < cos_max {
+                        continue;
+                    }
+                    // Les bords depuis le nœud (gauche, droite du parcours), le long de la
+                    // voie et de celles qui la prolongent seules, jusqu'à SOUDURE_LOIN
+                    let chaine = |k0: usize, f0: bool| -> Vec<Poly> {
+                        let mut cotes_ch: [Poly; 2] = [Vec::new(), Vec::new()];
+                        let (mut k, mut f) = (k0, f0);
+                        let mut vus = vec![k0];
+                        let mut long = 0.0f32;
+                        loop {
+                            let Some([g, d]) = cotes.get(&k) else { break };
+                            if g.len() < 2 || d.len() < 2 {
+                                break;
+                            }
+                            // f : la voie arrive au nœud de départ par sa fin, donc parcourue à l'envers
+                            let (gp, dp): (Poly, Poly) = if f { (d.iter().rev().copied().collect(), g.iter().rev().copied().collect()) } else { (g.clone(), d.clone()) };
+                            for (c, p) in cotes_ch.iter_mut().zip([gp, dp]) {
+                                if c.is_empty() { c.extend(p) } else { c.extend(p.into_iter().skip(1)) }
+                            }
+                            let a = &r.aretes[k];
+                            long += a.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum::<f32>();
+                            let j = if f { a.a } else { a.b };
+                            if long > SOUDURE_LOIN {
+                                break;
+                            }
+                            let suite: Vec<usize> = r.noeuds[j].aretes.iter().copied().filter(|&x| x != k && utiles.contains(&x)).collect();
+                            if suite.len() != 1 || vus.contains(&suite[0]) {
+                                break;
+                            }
+                            k = suite[0];
+                            f = r.aretes[k].b == j;
+                            vus.push(k);
+                        }
+                        cotes_ch.into_iter().filter(|c| c.len() >= 2).collect()
+                    };
+                    let (b1s, b2s) = (chaine(k1, f1), chaine(k2, f2));
+                    // Le dernier contact : le croisement des bords le plus loin du nœud
+                    let mut loin: Option<(f32, usize, f32, usize)> = None;
+                    for (i1, b1) in b1s.iter().enumerate() {
+                        let a1 = abscisses(b1);
+                        for (i2, b2) in b2s.iter().enumerate() {
+                            let a2 = abscisses(b2);
+                            for s1 in 0..b1.len() - 1 {
+                                if a1[s1] > SOUDURE_LOIN {
+                                    break;
+                                }
+                                for s2 in 0..b2.len() - 1 {
+                                    if a2[s2] > SOUDURE_LOIN {
+                                        break;
+                                    }
+                                    let Some(c) = croisement([b1[s1][0], b1[s1][1]], [b1[s1 + 1][0], b1[s1 + 1][1]], [b2[s2][0], b2[s2][1]], [b2[s2 + 1][0], b2[s2 + 1][1]]) else { continue };
+                                    let x1 = a1[s1] + (c[0] - b1[s1][0]).hypot(c[1] - b1[s1][1]);
+                                    let x2 = a2[s2] + (c[0] - b2[s2][0]).hypot(c[1] - b2[s2][1]);
+                                    if x1 > 0.5 && loin.is_none_or(|l| x1 > l.0) {
+                                        loin = Some((x1, i1, x2, i2));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let Some((x1, i1, x2, i2)) = loin else { continue };
+                    let (b1, b2) = (&b1s[i1], &b2s[i2]);
+                    let (a1, a2) = (abscisses(b1), abscisses(b2));
+                    let n = (x1.max(x2) / 1.0).ceil().max(1.0) as usize;
+                    let pts: Vec<([f32; 3], [f32; 3])> = (0..=n).map(|i| (au(b1, &a1, x1 * i as f32 / n as f32), au(b2, &a2, x2 * i as f32 / n as f32))).collect();
+                    // Élargies de 0,1 m au-delà des deux bords intérieurs (vers les voies)
+                    let ecarte = |p: [f32; 3], q: [f32; 3]| -> [f32; 2] {
+                        let (dx, dz) = (p[0] - q[0], p[1] - q[1]);
+                        let l = dx.hypot(dz);
+                        if l > 1e-3 { [p[0] + dx / l * 0.1, p[1] + dz / l * 0.1] } else { [p[0], p[1]] }
+                    };
+                    for i in 0..n {
+                        let ((p0, q0), (p1, q1)) = (pts[i], pts[i + 1]);
+                        let q = [ecarte(p0, q0), ecarte(p1, q1), ecarte(q1, p1), ecarte(q0, p0)];
+                        let Some(sens) = convexe(&q) else { continue };
+                        let id = bandes.bandes.len() as u32;
+                        let (x0, z0) = q.iter().fold((f32::MAX, f32::MAX), |m, a| (m.0.min(a[0]), m.1.min(a[1])));
+                        let (xx, zz) = q.iter().fold((f32::MIN, f32::MIN), |m, a| (m.0.max(a[0]), m.1.max(a[1])));
+                        let (a, z) = (case(x0, z0), case(xx, zz));
+                        for ci in a.0..=z.0 {
+                            for cj in a.1..=z.1 {
+                                bandes.index.entry((ci, cj)).or_default().push(id);
+                            }
+                        }
+                        let h = (p0[2] + q0[2] + p1[2] + q1[2]) / 4.0;
+                        bandes.bandes.push(Bande { arete: usize::MAX, exclues: Vec::new(), portail: None, passage: r.aretes[k1].passage, sorte: sorte_de(k1), q, sens, h });
+                    }
+                }
             }
         }
     }
@@ -704,14 +853,14 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
             if p.len() < 2 {
                 continue;
             }
-            let v = bandes.garder(p, r.aretes[k].passage, est_bus(k), &[k]);
+            let v = bandes.garder(p, r.aretes[k].passage, sorte_de(k), &[k]);
             origines.extend(v.iter().map(|_| origine(k, &format!("bord {nom}"))));
             sortie.extend(v);
-            // Une chaussée qui rencontre une voie de bus se ferme sur elle-même, le long
-            // du bord de la voie de bus (en travers de ses files)
-            if est_bus(k) {
-                let v = bandes.decouper(p, r.aretes[k].passage, true, &[k], true);
-                origines.extend(v.iter().map(|_| origine(k, &format!("fermeture bus {nom}"))));
+            // Une chaussée qui rencontre une voie d'une sorte supérieure se ferme sur
+            // elle-même, le long du bord de cette voie (en travers de ses files)
+            if sorte_de(k) > 0 {
+                let v = bandes.decouper(p, r.aretes[k].passage, sorte_de(k), &[k], true);
+                origines.extend(v.iter().map(|_| origine(k, &format!("fermeture {nom}"))));
                 sortie.extend(v);
             }
         }
@@ -831,7 +980,7 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
                 }
             }
         }
-        // Une voie de bus qui finit sur une rue n'est pas une impasse, ni l'inverse
+        // Une voie qui finit sur une voie d'une autre sorte n'est pas une impasse
         if bouts.len() != 1 || r.noeuds[n].aretes.iter().any(|&k| !cotes.contains_key(&k) && carrossable(k)) {
             continue;
         }
@@ -841,7 +990,7 @@ pub fn bords_et_bandes(r: &Reseau, aretes: &[usize], axe: &dyn Fn(usize) -> (Pol
             continue;
         }
         let bout = |p: &Poly| if debut { p[0] } else { p[p.len() - 1] };
-        let v = bandes.garder(&[bout(&c[0]), bout(&c[1])], r.aretes[k].passage, est_bus(k), &[k]);
+        let v = bandes.garder(&[bout(&c[0]), bout(&c[1])], r.aretes[k].passage, sorte_de(k), &[k]);
         origines.extend(v.iter().map(|_| origine(k, "impasse")));
         sortie.extend(v);
     }

@@ -431,6 +431,18 @@ pub fn reseau(l: &Lieu) -> Reseau {
                         continue;
                     }
                     let (u, d) = projeter(p, t[kk].points[s], t[kk].points[s + 1]);
+                    // D'un autre passage (une voie au sol au-dessus d'un tunnel, sous un
+                    // pont) : seulement près d'un bout de ce tracé (l'entrée d'un pont ou
+                    // d'un tunnel qu'OSM n'a pas tout à fait rejointe)
+                    if t[kk].passage != x.passage {
+                        let q = &t[kk].points;
+                        let lg = |i: usize| (q[i + 1][0] - q[i][0]).hypot(q[i + 1][1] - q[i][1]);
+                        let avant: f32 = (0..s).map(lg).sum::<f32>() + u * lg(s);
+                        let apres: f32 = (1.0 - u) * lg(s) + (s + 1..q.len() - 1).map(lg).sum::<f32>();
+                        if avant.min(apres) > RACCORD {
+                            continue;
+                        }
+                    }
                     if d < RACCORD && best.is_none_or(|b| d < b.3) {
                         best = Some((kk, s, u, d));
                     }
@@ -602,6 +614,16 @@ impl Reseau {
 /// Le gabarit sous un ouvrage (m), et l'épaisseur d'un tablier ou d'une dalle de
 /// tunnel : l'écart de hauteur minimal entre deux voies qui se croisent dénivelées.
 pub const GABARIT: f32 = 4.5;
+/// Quand la hauteur limitée de la voie du dessous est connue (`maxheight` d'OSM, les
+/// gabarits du lieu) : l'écart est cette hauteur plus la dalle et sa marge, plus
+/// épaisse sous une voie au sol ou un pont (chaussée, remblai) qu'entre deux
+/// souterrains (une dalle armée mince).
+pub const DALLE_SOUS_SOL: f32 = 2.0;
+pub const DALLE_ENTRE_SOUTERRAINS: f32 = 1.0;
+/// Un gabarit s'applique à une voie s'il la longe à moins de tant (m), à moins de
+/// `GABARIT_ANGLE` degrés de sa direction.
+const GABARIT_PORTEE: f32 = 3.0;
+const GABARIT_ANGLE: f32 = 30.0;
 pub const EPAISSEUR: f32 = 1.0;
 /// Sous une voie, un passage piéton (un souterrain) : sa hauteur libre et sa dalle
 /// (0.18 ; avant, 5,5 m comme une route : un souterrain piéton coincé entre la surface
@@ -636,6 +658,1204 @@ pub struct Contrainte {
     pub ecart: f32,
     /// Le haut est une voie au sol : il lui faudra un pont implicite.
     pub implicite: bool,
+    /// La hauteur limitée de la voie du dessous, si un gabarit du lieu la donne.
+    pub gabarit: Option<f32>,
+}
+
+/// Les gabarits du lieu (hauteurs limitées), leurs segments par case.
+pub struct Gabarits<'a> {
+    l: &'a Lieu,
+    cases: HashMap<(i32, i32), Vec<(usize, usize)>>,
+}
+
+impl<'a> Gabarits<'a> {
+    pub fn new(l: &'a Lieu) -> Self {
+        let mut cases: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+        for (g, gb) in l.gabarits.iter().enumerate() {
+            for i in 0..gb.points.len().saturating_sub(1) {
+                let (p, q) = (gb.points[i], gb.points[i + 1]);
+                let (c0, c1) = (case(p[0].min(q[0]) - GABARIT_PORTEE, p[1].min(q[1]) - GABARIT_PORTEE), case(p[0].max(q[0]) + GABARIT_PORTEE, p[1].max(q[1]) + GABARIT_PORTEE));
+                for ci in c0.0..=c1.0 {
+                    for cj in c0.1..=c1.1 {
+                        cases.entry((ci, cj)).or_default().push((g, i));
+                    }
+                }
+            }
+        }
+        Gabarits { l, cases }
+    }
+
+    /// La hauteur limitée au point `u` du segment pq d'une voie : le plus bas des
+    /// gabarits qui le longent.
+    pub fn hauteur(&self, p: [f32; 3], q: [f32; 3], u: f32) -> Option<f32> {
+        let c = [p[0] + (q[0] - p[0]) * u, p[1] + (q[1] - p[1]) * u];
+        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+        let ld = dx.hypot(dz).max(1e-6);
+        let mut h: Option<f32> = None;
+        for &(g, i) in self.cases.get(&case(c[0], c[1]))? {
+            let gb = &self.l.gabarits[g];
+            let (e0, e1) = (gb.points[i], gb.points[i + 1]);
+            let (ex, ez) = (e1[0] - e0[0], e1[1] - e0[1]);
+            let le = ex.hypot(ez).max(1e-6);
+            let cos = ((dx * ex + dz * ez) / (ld * le)).abs();
+            if cos < GABARIT_ANGLE.to_radians().cos() {
+                continue;
+            }
+            let t = (((c[0] - e0[0]) * ex + (c[1] - e0[1]) * ez) / (le * le)).clamp(0.0, 1.0);
+            let dist = (c[0] - e0[0] - ex * t).hypot(c[1] - e0[1] - ez * t);
+            if dist <= GABARIT_PORTEE {
+                h = Some(h.map_or(gb.hauteur, |x: f32| x.min(gb.hauteur)));
+            }
+        }
+        h
+    }
+}
+
+/// Les classes du lieu (voies rapides, bretelles : `sage_reel::circulation::Classe`),
+/// leurs segments par case.
+pub struct Classes<'a> {
+    l: &'a Lieu,
+    cases: HashMap<(i32, i32), Vec<(usize, usize)>>,
+}
+
+/// Une voie prend la classe d'un tracé qui longe (à moins de `CLASSE_PORTEE` m, à moins
+/// de `GABARIT_ANGLE` près) au moins `CLASSE_PART` de ses points.
+const CLASSE_PORTEE: f32 = 4.0;
+const CLASSE_PART: f32 = 0.6;
+
+impl<'a> Classes<'a> {
+    pub fn new(l: &'a Lieu) -> Self {
+        let mut cases: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+        for (g, gb) in l.classes.iter().enumerate() {
+            for i in 0..gb.points.len().saturating_sub(1) {
+                let (p, q) = (gb.points[i], gb.points[i + 1]);
+                let (c0, c1) = (case(p[0].min(q[0]) - CLASSE_PORTEE, p[1].min(q[1]) - CLASSE_PORTEE), case(p[0].max(q[0]) + CLASSE_PORTEE, p[1].max(q[1]) + CLASSE_PORTEE));
+                for ci in c0.0..=c1.0 {
+                    for cj in c0.1..=c1.1 {
+                        cases.entry((ci, cj)).or_default().push((g, i));
+                    }
+                }
+            }
+        }
+        Classes { l, cases }
+    }
+
+    /// La classe au milieu du segment pq (0 : aucune).
+    fn au_segment(&self, p: [f32; 3], q: [f32; 3]) -> u8 {
+        let c = [(p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5];
+        let (dx, dz) = (q[0] - p[0], q[1] - p[1]);
+        let ld = dx.hypot(dz).max(1e-6);
+        let mut best = (f32::MAX, 0u8);
+        for &(g, i) in self.cases.get(&case(c[0], c[1])).map(|v| v.as_slice()).unwrap_or(&[]) {
+            let gb = &self.l.classes[g];
+            let (e0, e1) = (gb.points[i], gb.points[i + 1]);
+            let (ex, ez) = (e1[0] - e0[0], e1[1] - e0[1]);
+            let le = ex.hypot(ez).max(1e-6);
+            if ((dx * ex + dz * ez) / (ld * le)).abs() < GABARIT_ANGLE.to_radians().cos() {
+                continue;
+            }
+            let t = (((c[0] - e0[0]) * ex + (c[1] - e0[1]) * ez) / (le * le)).clamp(0.0, 1.0);
+            let dist = (c[0] - e0[0] - ex * t).hypot(c[1] - e0[1] - ez * t);
+            if dist <= CLASSE_PORTEE && dist < best.0 {
+                best = (dist, gb.classe);
+            }
+        }
+        best.1
+    }
+
+    /// La classe d'une voie : celle qui longe au moins `CLASSE_PART` de sa longueur.
+    pub fn classe(&self, a: &Arete) -> u8 {
+        let mut long = [0.0f32; 3];
+        let mut tot = 0.0f32;
+        for w in a.points.windows(2) {
+            let l = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            tot += l;
+            let c = self.au_segment(w[0], w[1]) as usize;
+            if c < 3 {
+                long[c] += l;
+            }
+        }
+        (1..3).find(|&c| long[c] >= CLASSE_PART * tot.max(1e-3)).unwrap_or(0) as u8
+    }
+}
+
+/// Le lissage des voies rapides : la demi-fenêtre (m) du relief lissé, la pente des
+/// rampes vers un plancher, le dépassement (m) d'un plancher de part et d'autre de la
+/// voie enjambée, la demi-fenêtre de l'arrondi final et son nombre de passes.
+const RAPIDE_FENETRE: f32 = 60.0;
+const RAPIDE_PENTE: f32 = 0.04;
+const RAPIDE_MARGE: f32 = 2.0;
+const RAPIDE_ARRONDI: f32 = 25.0;
+const RAPIDE_PASSES: usize = 3;
+
+/// Le bilan du lissage des voies rapides.
+#[derive(Default, Debug)]
+pub struct Rapides {
+    /// Par arête : une voie rapide posée (fixe ensuite).
+    pub fixes: Vec<bool>,
+    pub chaines: usize,
+    pub planchers: usize,
+}
+
+/// Les voies rapides (classe `CLASSE_RAPIDE`, au sol ou en pont) posées avant toutes les
+/// autres, chaîne par chaîne (à travers les nœuds où deux bouts de voie rapide se
+/// suivent) : le relief (de leurs points au sol) lissé sur ±`RAPIDE_FENETRE`, relevé
+/// au-dessus de chaque plancher (ce qu'elles enjambent : son relief, ou sa hauteur si
+/// c'est un pont, ou l'eau ; plus l'écart) par des rampes à `RAPIDE_PENTE`, puis
+/// arrondi sans repasser sous un plancher. Elles ne bougent plus ensuite : les autres
+/// voies s'adaptent à elles (`niveler_fixe`, `plaques::poser_avec`).
+pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
+    let na = r.aretes.len();
+    let mut rapide = vec![false; na];
+    {
+        let classes = Classes::new(l);
+        for (k, a) in r.aretes.iter().enumerate() {
+            rapide[k] = sage_reel::carrossable(a.genre) && a.points.len() >= 2 && classes.classe(a) == sage_reel::circulation::CLASSE_RAPIDE;
+        }
+    }
+    let mut bilan = Rapides { fixes: rapide.clone(), ..Default::default() };
+    if !rapide.iter().any(|&x| x) {
+        return bilan;
+    }
+    // Des points tous les RELIEF_PAS mètres au moins
+    for k in 0..na {
+        if rapide[k] {
+            let d = densifier_xz(&r.aretes[k].points);
+            r.aretes[k].points = d;
+        }
+    }
+    let nn = r.noeuds.len();
+    let mut bouts: Vec<Vec<usize>> = vec![Vec::new(); nn];
+    for k in (0..na).filter(|&k| rapide[k]) {
+        let a = &r.aretes[k];
+        if a.a != a.b {
+            bouts[a.a].push(k);
+            bouts[a.b].push(k);
+        }
+    }
+    // Les planchers : les contraintes dont le haut est une voie rapide et le bas une
+    // autre voie rapide (lissée avant elle) ou l'eau. Une route ordinaire ou une
+    // bretelle dessous ne relève pas la voie rapide : c'est elle qui s'adapte ensuite
+    // (arête, segment, u) → (bas : voie rapide (arête, segment, u) ou niveau de l'eau,
+    // écart, dépassement)
+    let cs = contraintes(r, l);
+    let mut planchers: HashMap<usize, Vec<(usize, f32, Result<Ou, f32>, f32, f32)>> = HashMap::new();
+    for c in &cs {
+        let (k, sg, u) = c.haut;
+        if !rapide[k] {
+            continue;
+        }
+        let (bas, demi) = match c.bas {
+            Some(o) if rapide[o.0] => (Ok(o), r.aretes[o.0].largeur * 0.5 + RAPIDE_MARGE),
+            Some(_) => continue,
+            None => (Err(c.plancher), RAPIDE_MARGE * 2.0),
+        };
+        planchers.entry(k).or_default().push((sg, u, bas, c.ecart, demi));
+    }
+    // Les chaînes
+    let mut chaines: Vec<Vec<(usize, bool)>> = Vec::new();
+    let mut chaine_de = vec![usize::MAX; na];
+    let mut vue = vec![false; na];
+    for k0 in 0..na {
+        if !rapide[k0] || vue[k0] {
+            continue;
+        }
+        vue[k0] = true;
+        // Vers l'arrière depuis k0.a, puis vers l'avant depuis k0.b
+        let suivre = |depart: usize, k: usize, vue: &mut Vec<bool>| -> Vec<(usize, bool)> {
+            let mut v = Vec::new();
+            let (mut n, mut k) = (depart, k);
+            for _ in 0..10_000 {
+                if bouts[n].len() != 2 {
+                    break;
+                }
+                let k2 = if bouts[n][0] == k { bouts[n][1] } else { bouts[n][0] };
+                if vue[k2] || k2 == k {
+                    break;
+                }
+                vue[k2] = true;
+                let a = &r.aretes[k2];
+                let endroit = a.a == n;
+                v.push((k2, endroit));
+                n = if endroit { a.b } else { a.a };
+                k = k2;
+            }
+            v
+        };
+        let arriere = suivre(r.aretes[k0].a, k0, &mut vue);
+        let avant = suivre(r.aretes[k0].b, k0, &mut vue);
+        let mut chaine: Vec<(usize, bool)> = arriere.into_iter().rev().map(|(k, e)| (k, !e)).collect();
+        chaine.push((k0, true));
+        chaine.extend(avant);
+        for &(k, _) in &chaine {
+            chaine_de[k] = chaines.len();
+        }
+        chaines.push(chaine);
+    }
+    // L'ordre : du plus bas au plus haut ; une chaîne passe après toutes celles qu'elle
+    // enjambe (un cycle, s'il y en a, est rompu dans l'ordre des chaînes)
+    let nc = chaines.len();
+    let mut dessous: Vec<std::collections::HashSet<usize>> = vec![Default::default(); nc];
+    for (&k, v) in &planchers {
+        for (_, _, bas, _, _) in v {
+            if let Ok(o) = bas {
+                let (ch, cb) = (chaine_de[k], chaine_de[o.0]);
+                if ch != cb && ch != usize::MAX && cb != usize::MAX {
+                    dessous[ch].insert(cb);
+                }
+            }
+        }
+    }
+    let mut ordre: Vec<usize> = Vec::with_capacity(nc);
+    let mut faite = vec![false; nc];
+    while ordre.len() < nc {
+        let avant = ordre.len();
+        for c in 0..nc {
+            if !faite[c] && dessous[c].iter().all(|&d| faite[d]) {
+                faite[c] = true;
+                ordre.push(c);
+            }
+        }
+        if ordre.len() == avant {
+            // Un cycle : la première chaîne qui reste
+            let c = (0..nc).find(|&c| !faite[c]).unwrap();
+            faite[c] = true;
+            ordre.push(c);
+        }
+    }
+    for ci in ordre {
+        let chaine = chaines[ci].clone();
+        bilan.chaines += 1;
+        // Les points de la chaîne : (arête, indice), position, abscisse, au sol
+        let mut pts: Vec<(usize, usize, [f32; 3], f32, bool)> = Vec::new();
+        let mut s_ = 0.0f32;
+        let mut debut: HashMap<usize, (bool, Vec<f32>)> = HashMap::new();
+        // Le premier point de chaque voie après la première : le même que le dernier de
+        // la précédente (il en reçoit la hauteur)
+        let mut joints: Vec<(usize, usize, usize)> = Vec::new();
+        for &(k, endroit) in &chaine {
+            let a = &r.aretes[k];
+            let m = a.points.len();
+            let mut abs = vec![0.0f32; m];
+            for x in 0..m {
+                let i = if endroit { x } else { m - 1 - x };
+                if x > 0 {
+                    let j = if endroit { i - 1 } else { i + 1 };
+                    s_ += (a.points[i][0] - a.points[j][0]).hypot(a.points[i][1] - a.points[j][1]);
+                }
+                abs[i] = s_;
+                if x > 0 || pts.is_empty() {
+                    pts.push((k, i, a.points[i], s_, a.passage == Passage::Sol));
+                } else {
+                    joints.push((k, i, pts.len() - 1));
+                }
+            }
+            debut.insert(k, (endroit, abs));
+        }
+        let n = pts.len();
+        // 1. Le relief lissé (triangle sur ±RAPIDE_FENETRE) des points au sol
+        let rel: Vec<f32> = pts.iter().map(|p| l.relief(p.2[0] as f64, p.2[1] as f64) as f32).collect();
+        let lisser = |h: &[f32], sol: &dyn Fn(usize) -> bool, demi: f32| -> Vec<f32> {
+            let mut out = h.to_vec();
+            let mut j0 = 0usize;
+            for i in 0..n {
+                while j0 < n && pts[j0].3 < pts[i].3 - demi {
+                    j0 += 1;
+                }
+                let (mut sw, mut sh) = (0.0f32, 0.0f32);
+                let mut j = j0;
+                while j < n && pts[j].3 <= pts[i].3 + demi {
+                    if sol(j) {
+                        let w = 1.0 - (pts[j].3 - pts[i].3).abs() / demi;
+                        sw += w;
+                        sh += w * h[j];
+                    }
+                    j += 1;
+                }
+                if sw > 1e-6 {
+                    out[i] = sh / sw;
+                }
+            }
+            out
+        };
+        let mut h: Vec<f32> = pts.iter().map(|p| p.2[2]).collect();
+        let mut base = lisser(&rel, &|j| pts[j].4, RAPIDE_FENETRE);
+        // Loin de tout point au sol (un long tunnel, un long pont) : interpolée entre
+        // les plus proches qui en ont
+        let connu: Vec<bool> = (0..n)
+            .map(|i| {
+                let (a, b) = (pts[i].3 - RAPIDE_FENETRE, pts[i].3 + RAPIDE_FENETRE);
+                pts.iter().any(|p| p.4 && p.3 >= a && p.3 <= b)
+            })
+            .collect();
+        if connu.iter().any(|&c| c) && connu.iter().any(|&c| !c) {
+            let mut i = 0;
+            while i < n {
+                if connu[i] {
+                    i += 1;
+                    continue;
+                }
+                let j0 = i;
+                while i < n && !connu[i] {
+                    i += 1;
+                }
+                let (ga, gb) = (j0.checked_sub(1), (i < n).then_some(i));
+                for j in j0..i {
+                    base[j] = match (ga, gb) {
+                        (Some(a), Some(b)) => {
+                            let t = (pts[j].3 - pts[a].3) / (pts[b].3 - pts[a].3).max(1e-3);
+                            base[a] + (base[b] - base[a]) * t
+                        }
+                        (Some(a), None) => base[a],
+                        (None, Some(b)) => base[b],
+                        (None, None) => h[j],
+                    };
+                }
+            }
+        }
+        for i in 0..n {
+            h[i] = base[i];
+        }
+        // Les plafonds : sous le relief, un tunnel garde sa hauteur nécessaire (la hauteur
+        // limitée et la dalle, sinon le gabarit et l'épaisseur) ; on y descend par des
+        // rampes à RAPIDE_PENTE (balayage dans les deux sens)
+        let gab = Gabarits::new(l);
+        let mut plafond: Vec<f32> = vec![f32::MAX; n];
+        for i in 0..n {
+            let (k, idx) = (pts[i].0, pts[i].1);
+            let a = &r.aretes[k];
+            if a.passage != Passage::Tunnel {
+                continue;
+            }
+            let j = idx.min(a.points.len() - 2);
+            let requis = gab.hauteur(a.points[j], a.points[j + 1], if idx == j { 0.0 } else { 1.0 }).map_or(GABARIT + EPAISSEUR, |g| g + DALLE_SOUS_SOL);
+            plafond[i] = rel[i] - requis;
+        }
+        let strict = plafond.clone();
+        for i in 1..n {
+            plafond[i] = plafond[i].min(plafond[i - 1] + RAPIDE_PENTE * (pts[i].3 - pts[i - 1].3));
+        }
+        for i in (0..n.saturating_sub(1)).rev() {
+            plafond[i] = plafond[i].min(plafond[i + 1] + RAPIDE_PENTE * (pts[i + 1].3 - pts[i].3));
+        }
+        for i in 0..n {
+            h[i] = h[i].min(plafond[i]);
+        }
+        // 2. Les planchers, à leur abscisse
+        let mut pl: Vec<(f32, f32, f32)> = Vec::new();
+        for &(k, _) in &chaine {
+            let Some(v) = planchers.get(&k) else { continue };
+            let (_, abs) = &debut[&k];
+            for &(sg, u, bas, ecart, demi) in v {
+                // Le dessous : la voie rapide déjà posée, ou l'eau
+                let hb = match bas {
+                    Ok((kb, sb, ub)) => entre(r.aretes[kb].points[sb], r.aretes[kb].points[sb + 1], ub)[2],
+                    Err(eau) => eau,
+                };
+                pl.push((abs[sg] + (abs[sg + 1] - abs[sg]) * u, hb + ecart, demi));
+            }
+        }
+        bilan.planchers += pl.len();
+        let plateau = |i: usize| -> f32 { pl.iter().filter(|p| (pts[i].3 - p.0).abs() <= p.2).map(|p| p.1).fold(f32::MIN, f32::max) };
+        let cone = |i: usize| -> f32 { pl.iter().map(|p| p.1 - RAPIDE_PENTE * ((pts[i].3 - p.0).abs() - p.2).max(0.0)).fold(f32::MIN, f32::max) };
+        for i in 0..n {
+            h[i] = h[i].max(cone(i));
+        }
+        // 3. L'arrondi, sans repasser sous un plancher
+        for _ in 0..RAPIDE_PASSES {
+            h = lisser(&h, &|_| true, RAPIDE_ARRONDI);
+            for i in 0..n {
+                h[i] = h[i].min(strict[i]).max(plateau(i));
+            }
+        }
+        // Rendues aux arêtes et aux nœuds
+        for (x, p) in pts.iter().enumerate() {
+            r.aretes[p.0].points[p.1][2] = h[x];
+        }
+        for &(k, i, x) in &joints {
+            r.aretes[k].points[i][2] = h[x];
+        }
+        for &(k, _) in &chaine {
+            let a = &r.aretes[k];
+            let (na_, nb_) = (a.a, a.b);
+            let (ha, hb) = (a.points[0][2], a.points[a.points.len() - 1][2]);
+            r.noeuds[na_].p[2] = ha;
+            r.noeuds[nb_].p[2] = hb;
+        }
+        // Les bouts des arêtes voisines (bretelles…) au nœud : à sa hauteur
+    }
+    // Les autres arêtes qui touchent un nœud de voie rapide y prennent sa hauteur
+    for k in 0..na {
+        if rapide[k] {
+            continue;
+        }
+        let (a, b) = (r.aretes[k].a, r.aretes[k].b);
+        let m = r.aretes[k].points.len();
+        if !bouts[a].is_empty() {
+            r.aretes[k].points[0][2] = r.noeuds[a].p[2];
+        }
+        if !bouts[b].is_empty() {
+            r.aretes[k].points[m - 1][2] = r.noeuds[b].p[2];
+        }
+    }
+    bilan
+}
+
+/// Le nom d'une classe.
+pub fn nom_classe(c: u8) -> &'static str {
+    match c {
+        sage_reel::circulation::CLASSE_RAPIDE => "voie rapide",
+        sage_reel::circulation::CLASSE_BRETELLE => "bretelle",
+        _ => "",
+    }
+}
+
+/// La pente la plus forte (degrés) d'une rampe d'entrée de souterrain.
+pub const RAMPE_SOUTERRAIN: f32 = 15.0;
+/// Un souterrain (avec ceux qui le prolongent) plus court que tant (m) est un passage
+/// sous un bâtiment ou un auvent : il reste au sol.
+pub const SOUTERRAIN_COURT: f32 = 20.0;
+
+/// Les souterrains avant le nivellement : on se fie au relief de surface. Les très
+/// courts sont remis au sol ; les autres sont enfoncés sous le relief adouci de la
+/// hauteur limitée connue plus la dalle sous le sol (sinon `GABARIT + EPAISSEUR`) sur
+/// toute leur longueur ; les voies au sol qui y mènent descendent en tranchée, à la
+/// pente de la rampe au plus, jusqu'au premier carrefour (s'il manque de la place, la
+/// rampe finit dans le souterrain). Une voie au sol de niveau négatif devient un
+/// souterrain ; un souterrain très court sans voie au-dessus est remis au sol ; les
+/// voies qui traversent des souterrains forment des tabliers.
+pub fn preparer_souterrains(r: &mut Reseau, l: &Lieu) -> Souterrains {
+    if l.h.is_empty() {
+        return Souterrains::default();
+    }
+    let n = r.aretes.len();
+    // Une voie au sol d'un niveau négatif (`layer` d'OSM sans `tunnel`) est un souterrain
+    let mut negatifs = 0;
+    for a in r.aretes.iter_mut().filter(|a| a.passage == Passage::Sol && a.niveau < 0) {
+        a.passage = Passage::Tunnel;
+        negatifs += 1;
+    }
+    let tunnel = |r: &Reseau, k: usize| r.aretes[k].passage == Passage::Tunnel;
+    // Les groupes de souterrains qui se prolongent
+    let mut chef: Vec<usize> = (0..n).collect();
+    fn racine(c: &mut [usize], mut i: usize) -> usize {
+        while c[i] != i {
+            c[i] = c[c[i]];
+            i = c[i];
+        }
+        i
+    }
+    for no in &r.noeuds {
+        let t: Vec<usize> = no.aretes.iter().copied().filter(|&k| tunnel(r, k)).collect();
+        for w in t.windows(2) {
+            let (a, b) = (racine(&mut chef, w[0]), racine(&mut chef, w[1]));
+            chef[a] = b;
+        }
+    }
+    let longueur = |a: &Arete| a.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum::<f32>();
+    let mut total: HashMap<usize, f32> = HashMap::new();
+    for k in (0..n).filter(|&k| tunnel(r, k)) {
+        *total.entry(racine(&mut chef, k)).or_default() += longueur(&r.aretes[k]);
+    }
+    // Les groupes que traverse une voie au-dessus (une voie qui n'est pas un souterrain,
+    // ou un souterrain d'un niveau plus haut)
+    let mut couverts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for x in croisements(r) {
+        let (a, b) = (&r.aretes[x.0], &r.aretes[x.3]);
+        for (t, o) in [(x.0, b), (x.3, a)] {
+            let at = &r.aretes[t];
+            if at.passage == Passage::Tunnel && (o.passage != Passage::Tunnel || o.niveau > at.niveau) {
+                couverts.insert(racine(&mut chef, t));
+            }
+        }
+    }
+    // 1. Les très courts sans voie au-dessus (passages sous un bâtiment, un auvent) : au
+    //    sol, relus sur le relief
+    let mut courts = 0;
+    for k in 0..n {
+        let g = racine(&mut chef, k);
+        if tunnel(r, k) && total.get(&g).is_some_and(|&t| t < SOUTERRAIN_COURT) && !couverts.contains(&g) {
+            r.aretes[k].passage = Passage::Sol;
+            r.aretes[k].points = relire(l, &r.aretes[k].points);
+            courts += 1;
+        }
+    }
+    // 2. Le fond : à pleine profondeur sous le relief adouci (la hauteur limitée plus la
+    //    dalle, sinon le gabarit d'une route ou d'un piéton)
+    let gabarits = Gabarits::new(l);
+    let mut enfonces = 0;
+    let souterrains: Vec<usize> = (0..n).filter(|&k| tunnel(r, k)).collect();
+    for &k in &souterrains {
+        let pts = densifier_xz(&r.aretes[k].points);
+        let route = sage_reel::carrossable(r.aretes[k].genre);
+        let v: Vec<[f32; 3]> = (0..pts.len())
+            .map(|i| {
+                let p = pts[i];
+                let (p0, p1, u) = if i + 1 < pts.len() { (pts[i], pts[i + 1], 0.0) } else { (pts[i - 1], pts[i], 1.0) };
+                let requis = gabarits.hauteur(p0, p1, u).map_or(if route { GABARIT + EPAISSEUR } else { GABARIT_PIETON + EPAISSEUR_PIETON }, |g| g + DALLE_SOUS_SOL);
+                [p[0], p[1], relief_adouci(l, p[0] as f64, p[1] as f64) - requis]
+            })
+            .collect();
+        r.aretes[k].points = v;
+        enfonces += 1;
+    }
+    let nn = r.noeuds.len();
+    let bout = |a: &Arete, i: usize| if a.a == i { a.points[0][2] } else { a.points[a.points.len() - 1][2] };
+    let sol = |r: &Reseau, k: usize| r.aretes[k].passage == Passage::Sol;
+    // Le degré d'un nœud pour une sorte de voies (carrossables ou non)
+    let degre = |r: &Reseau, i: usize, route: bool| r.noeuds[i].aretes.iter().filter(|&&k| sage_reel::carrossable(r.aretes[k].genre) == route).count();
+    // 3. Les entrées : la hauteur du souterrain à l'entrée, relevée s'il n'y a pas la
+    //    place de descendre en tranchée avant le premier carrefour (la fin de la rampe se
+    //    fait alors dans le souterrain)
+    let pente = RAMPE_SOUTERRAIN.to_radians().tan();
+    // (hauteur, carrossable, tranchée adoucie au pied : le souterrain est au fond dès
+    // l'entrée)
+    let mut entree: Vec<Option<(f32, bool, bool)>> = vec![None; nn];
+    for i in 0..nn {
+        let no = &r.noeuds[i];
+        let t: Vec<usize> = no.aretes.iter().copied().filter(|&k| tunnel(r, k)).collect();
+        if t.is_empty() || no.aretes.iter().all(|&k| tunnel(r, k)) {
+            continue;
+        }
+        let route = t.iter().any(|&k| sage_reel::carrossable(r.aretes[k].genre));
+        let fond = t.iter().map(|&k| bout(&r.aretes[k], i)).fold(f32::MAX, f32::min);
+        let mut h = fond;
+        // Ce que demande chaque tranchée : adoucie au pied, ou droite
+        let (mut h_doux, mut h_droit) = (fond, fond);
+        if degre(r, i, route) > 2 {
+            // L'entrée est un carrefour : elle reste au sol
+            let s: Vec<f32> = no.aretes.iter().filter(|&&k| sol(r, k)).map(|&k| bout(&r.aretes[k], i)).collect();
+            if !s.is_empty() {
+                h = h.max(s.iter().sum::<f32>() / s.len() as f32);
+            }
+        } else {
+            for &k0 in no.aretes.iter().filter(|&&k| sol(r, k) && sage_reel::carrossable(r.aretes[k].genre) == route) {
+                // La tranchée suit la voie à travers les nœuds de deux voies jusqu'au
+                // premier carrefour, où elle doit avoir rejoint le sol
+                let (mut cur, mut k, mut long) = (i, k0, 0.0f32);
+                for _ in 0..200 {
+                    let a = &r.aretes[k];
+                    long += longueur(a);
+                    let j = if a.a == cur { a.b } else { a.a };
+                    let suite: Vec<usize> = r.noeuds[j].aretes.iter().copied().filter(|&x| x != k && sage_reel::carrossable(r.aretes[x].genre) == route).collect();
+                    if suite.len() == 1 && sol(r, suite[0]) && degre(r, j, route) == 2 {
+                        cur = j;
+                        k = suite[0];
+                        continue;
+                    }
+                    // Une autre entrée au bout : une tranchée ouverte entre deux parties
+                    // couvertes, qui ne remonte pas
+                    let autre_entree = suite.iter().any(|&x| tunnel(r, x)) && long <= TRANCHEE_OUVERTE;
+                    if !suite.is_empty() && !autre_entree {
+                        h_doux = h_doux.max(bout(a, j) - pente * adoucie(long));
+                        h_droit = h_droit.max(bout(a, j) - pente * long);
+                    }
+                    break;
+                }
+            }
+        }
+        // Assez de place pour une tranchée adoucie : le souterrain reste au fond ; sinon
+        // la rampe, droite, finit dans le souterrain
+        let doux = h <= fond + 1e-3 && h_doux <= fond + 1e-3;
+        if !doux {
+            h = h.max(h_droit);
+        }
+        entree[i] = Some((h, route, doux));
+    }
+    // La rampe dans les souterrains : depuis les entrées, au plus raide de la rampe
+    let mut borne = vec![f32::MIN; nn];
+    let mut file = std::collections::BinaryHeap::new();
+    for i in 0..nn {
+        if let Some((h, _, _)) = entree[i] {
+            borne[i] = h;
+            file.push((ordre(h), i));
+        }
+    }
+    while let Some((b, i)) = file.pop() {
+        if b != ordre(borne[i]) {
+            continue;
+        }
+        for &k in &r.noeuds[i].aretes {
+            if !tunnel(r, k) {
+                continue;
+            }
+            let a = &r.aretes[k];
+            let j = if a.a == i { a.b } else { a.a };
+            let v = borne[i] - pente * longueur(a);
+            if v > borne[j] {
+                borne[j] = v;
+                file.push((ordre(v), j));
+            }
+        }
+    }
+    for &k in &souterrains {
+        let (na, nb) = (r.aretes[k].a, r.aretes[k].b);
+        let tot = longueur(&r.aretes[k]);
+        let a = &mut r.aretes[k];
+        let mut s = 0.0f32;
+        for i in 0..a.points.len() {
+            if i > 0 {
+                s += (a.points[i][0] - a.points[i - 1][0]).hypot(a.points[i][1] - a.points[i - 1][1]);
+            }
+            let rampe = (borne[na] - pente * s).max(borne[nb] - pente * (tot - s));
+            // Le pied de la rampe arrondi
+            if rampe > a.points[i][2] - 2.0 * RAMPE_ARRONDI {
+                a.points[i][2] = smax(a.points[i][2], rampe, RAMPE_ARRONDI);
+            }
+        }
+    }
+    // Les nœuds tout en souterrain : la moyenne de leurs bouts
+    for i in 0..nn {
+        let no = &r.noeuds[i];
+        if no.aretes.is_empty() || !no.aretes.iter().all(|&k| tunnel(r, k)) {
+            continue;
+        }
+        let hs: Vec<f32> = no.aretes.iter().map(|&k| bout(&r.aretes[k], i)).collect();
+        r.noeuds[i].p[2] = hs.iter().sum::<f32>() / hs.len() as f32;
+    }
+    // 4. Les tranchées : depuis chaque entrée, les voies au sol de la même sorte
+    //    descendent au plus à la pente de la rampe, à travers les nœuds de deux voies
+    //    seulement (pas au-delà d'un carrefour)
+    // L'état de chaque nœud d'une tranchée : (plafond, carrossable, hauteur de
+    // l'entrée, adoucie, distance à l'entrée)
+    let mut plafond: Vec<(f32, bool, f32, bool, f32)> = vec![(f32::MAX, false, 0.0, false, 0.0); nn];
+    let haut = |h: f32, doux: bool, d: f32| h + pente * if doux { adoucie(d) } else { d };
+    let mut file = std::collections::BinaryHeap::new();
+    for i in 0..nn {
+        if let Some((h, route, doux)) = entree[i] {
+            plafond[i] = (h, route, h, doux, 0.0);
+            file.push((std::cmp::Reverse(ordre(h)), i));
+        }
+    }
+    while let Some((std::cmp::Reverse(b), i)) = file.pop() {
+        if b != ordre(plafond[i].0) {
+            continue;
+        }
+        let (_, route, he, doux, d0) = plafond[i];
+        if entree[i].is_none() && degre(r, i, route) != 2 {
+            continue;
+        }
+        for &k in &r.noeuds[i].aretes {
+            let a = &r.aretes[k];
+            if !sol(r, k) || sage_reel::carrossable(a.genre) != route {
+                continue;
+            }
+            let j = if a.a == i { a.b } else { a.a };
+            if degre(r, j, route) != 2 || entree[j].is_some() {
+                continue;
+            }
+            let d = d0 + longueur(a);
+            let v = haut(he, doux, d);
+            if v < plafond[j].0 && v < bout(a, j) + 0.01 {
+                plafond[j] = (v, route, he, doux, d);
+                file.push((std::cmp::Reverse(ordre(v)), j));
+            }
+        }
+    }
+    let mut tranchees = 0;
+    for k in 0..n {
+        if !sol(r, k) {
+            continue;
+        }
+        let (na, nb) = (r.aretes[k].a, r.aretes[k].b);
+        let route = sage_reel::carrossable(r.aretes[k].genre);
+        let etat = |x: usize| Some(plafond[x]).filter(|p| p.0 < f32::MAX && p.1 == route);
+        let (ea, eb) = (etat(na), etat(nb));
+        if ea.is_none() && eb.is_none() {
+            continue;
+        }
+        let tot = longueur(&r.aretes[k]);
+        let a = &mut r.aretes[k];
+        let mut s = 0.0f32;
+        let mut touche = false;
+        for i in 0..a.points.len() {
+            if i > 0 {
+                s += (a.points[i][0] - a.points[i - 1][0]).hypot(a.points[i][1] - a.points[i - 1][1]);
+            }
+            let ca = ea.map_or(f32::MAX, |e| haut(e.2, e.3, e.4 + s));
+            let cb = eb.map_or(f32::MAX, |e| haut(e.2, e.3, e.4 + tot - s));
+            let c = ca.min(cb);
+            let h0 = a.points[i][2];
+            if c > h0 + 2.0 * RAMPE_ARRONDI {
+                continue;
+            }
+            // La tête de la tranchée arrondie (pas près d'un bout sans tranchée : un
+            // carrefour, qui reste au sol)
+            let libre = if ea.is_none() { tot - s } else if eb.is_none() { s } else { f32::MAX };
+            let k_ = RAMPE_ARRONDI * (libre / 4.0).clamp(0.0, 1.0);
+            let h = if k_ > 1e-3 { smin(h0, c, k_) } else { h0.min(c) };
+            if h < h0 - 1e-3 {
+                a.points[i][2] = h;
+                touche = true;
+            }
+        }
+        if touche {
+            tranchees += 1;
+        }
+    }
+    for i in 0..nn {
+        if plafond[i].0 < r.noeuds[i].p[2] {
+            r.noeuds[i].p[2] = plafond[i].0;
+        }
+    }
+    // 4 bis. Les tranchées ouvertes : une suite de voies au sol (par des nœuds de deux
+    //    voies) qui relie deux entrées à moins de TRANCHEE_OUVERTE mètres reste au fond,
+    //    en ligne droite d'une entrée à l'autre (jamais au-dessus du sol)
+    let mut vues = std::collections::HashSet::new();
+    for i in 0..nn {
+        let Some((hi, route, _)) = entree[i] else { continue };
+        let departs: Vec<usize> = r.noeuds[i].aretes.iter().copied().filter(|&k| sol(r, k) && sage_reel::carrossable(r.aretes[k].genre) == route).collect();
+        for k0 in departs {
+            if vues.contains(&k0) {
+                continue;
+            }
+            let (mut cur, mut k, mut long) = (i, k0, 0.0f32);
+            let mut chaine: Vec<(usize, bool, f32)> = Vec::new();
+            let mut fin: Option<usize> = None;
+            for _ in 0..200 {
+                let a = &r.aretes[k];
+                let endroit = a.a == cur;
+                chaine.push((k, endroit, long));
+                long += longueur(a);
+                let j = if endroit { a.b } else { a.a };
+                if entree[j].is_some_and(|e| e.1 == route) {
+                    fin = Some(j);
+                    break;
+                }
+                let suite: Vec<usize> = r.noeuds[j].aretes.iter().copied().filter(|&x| x != k && sage_reel::carrossable(r.aretes[x].genre) == route).collect();
+                if suite.len() == 1 && sol(r, suite[0]) && degre(r, j, route) == 2 && long <= TRANCHEE_OUVERTE {
+                    cur = j;
+                    k = suite[0];
+                    continue;
+                }
+                break;
+            }
+            let Some(j) = fin else { continue };
+            if j == i || long > TRANCHEE_OUVERTE || long < 1e-3 {
+                continue;
+            }
+            let hj = entree[j].unwrap().0;
+            for &(k, endroit, debut) in &chaine {
+                vues.insert(k);
+                let a = &mut r.aretes[k];
+                let tot: f32 = a.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+                let mut s_ = 0.0f32;
+                let m = a.points.len();
+                for x in 0..m {
+                    let idx = if endroit { x } else { m - 1 - x };
+                    if x > 0 {
+                        let jdx = if endroit { idx - 1 } else { idx + 1 };
+                        s_ += (a.points[idx][0] - a.points[jdx][0]).hypot(a.points[idx][1] - a.points[jdx][1]);
+                    }
+                    let t = ((debut + s_.min(tot)) / long).clamp(0.0, 1.0);
+                    let ligne = hi + (hj - hi) * t;
+                    if ligne < a.points[idx][2] {
+                        a.points[idx][2] = ligne;
+                    }
+                }
+                let (na, nb) = (a.a, a.b);
+                let (ha, hb) = (a.points[0][2], a.points[m - 1][2]);
+                r.noeuds[na].p[2] = r.noeuds[na].p[2].min(ha);
+                r.noeuds[nb].p[2] = r.noeuds[nb].p[2].min(hb);
+            }
+        }
+    }
+    // 5. Les tabliers au-dessus des souterrains
+    let tabliers = poser_tabliers(r);
+    Souterrains { negatifs, courts, enfonces, tranchees, tabliers }
+}
+
+/// Les croisements propres (en xz) entre arêtes qui ne se touchent pas :
+/// (arête, segment, avancée, autre arête, segment, avancée).
+fn croisements(r: &Reseau) -> Vec<(usize, usize, f32, usize, usize, f32)> {
+    let mut cases: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
+    for (k, a) in r.aretes.iter().enumerate() {
+        for i in 0..a.points.len().saturating_sub(1) {
+            let (p, q) = (a.points[i], a.points[i + 1]);
+            let (c0, c1) = (case(p[0].min(q[0]), p[1].min(q[1])), case(p[0].max(q[0]), p[1].max(q[1])));
+            for ci in c0.0..=c1.0 {
+                for cj in c0.1..=c1.1 {
+                    cases.entry((ci, cj)).or_default().push((k, i));
+                }
+            }
+        }
+    }
+    let mut vus = std::collections::HashSet::new();
+    let mut v = Vec::new();
+    for liste in cases.values() {
+        for (x, &(k1, s1)) in liste.iter().enumerate() {
+            for &(k2, s2) in &liste[x + 1..] {
+                if k1 == k2 {
+                    continue;
+                }
+                let (a1, a2) = (&r.aretes[k1], &r.aretes[k2]);
+                let Some((u1, u2)) = croise(a1.points[s1], a1.points[s1 + 1], a2.points[s2], a2.points[s2 + 1]) else { continue };
+                if vus.insert(((k1, s1).min((k2, s2)), (k1, s1).max((k2, s2)))) {
+                    v.push((k1, s1, u1, k2, s2, u2));
+                }
+            }
+        }
+    }
+    v
+}
+
+/// Les voies au sol qui traversent des souterrains à moins de `TABLIER_LIEN` mètres
+/// les unes des autres forment un tablier (un ouvrage, à peu près plan) : un plan
+/// ajusté sur leurs hauteurs de part et d'autre (pente plafonnée à `TABLIER_PENTE`),
+/// chacune posée dessus au-dessus des souterrains et raccordée au-delà. Rend le
+/// nombre de tabliers.
+fn poser_tabliers(r: &mut Reseau) -> usize {
+    // Les traversées : (voie au sol, abscisse sur elle, x, z, demi-largeur du souterrain)
+    let abscisses = |a: &Arete| -> Vec<f32> {
+        let mut v = vec![0.0f32];
+        for w in a.points.windows(2) {
+            let l = v[v.len() - 1];
+            v.push(l + (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]));
+        }
+        v
+    };
+    let mut tr: Vec<(usize, f32, f32, f32, f32)> = Vec::new();
+    for x in croisements(r) {
+        for (s, ss, su, t) in [(x.0, x.1, x.2, x.3), (x.3, x.4, x.5, x.0)] {
+            let (a, b) = (&r.aretes[s], &r.aretes[t]);
+            if a.passage != Passage::Sol || b.passage != Passage::Tunnel {
+                continue;
+            }
+            let ab = abscisses(a);
+            let c = ab[ss] + (ab[ss + 1] - ab[ss]) * su;
+            let p = entre(a.points[ss], a.points[ss + 1], su);
+            tr.push((s, c, p[0], p[1], b.largeur * 0.5));
+        }
+    }
+    if tr.is_empty() {
+        return 0;
+    }
+    // Les tabliers : les traversées proches réunies
+    let m = tr.len();
+    let mut chef: Vec<usize> = (0..m).collect();
+    fn racine(c: &mut [usize], mut i: usize) -> usize {
+        while c[i] != i {
+            c[i] = c[c[i]];
+            i = c[i];
+        }
+        i
+    }
+    let mut grille: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, t) in tr.iter().enumerate() {
+        grille.entry(((t.2 / TABLIER_LIEN).floor() as i32, (t.3 / TABLIER_LIEN).floor() as i32)).or_default().push(i);
+    }
+    for i in 0..m {
+        let c = ((tr[i].2 / TABLIER_LIEN).floor() as i32, (tr[i].3 / TABLIER_LIEN).floor() as i32);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for &j in grille.get(&(c.0 + dx, c.1 + dz)).map_or(&[][..], |v| &v[..]) {
+                    if j > i && (tr[i].2 - tr[j].2).hypot(tr[i].3 - tr[j].3) < TABLIER_LIEN {
+                        let (a, b) = (racine(&mut chef, i), racine(&mut chef, j));
+                        chef[a] = b;
+                    }
+                }
+            }
+        }
+    }
+    let mut groupes: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..m {
+        groupes.entry(racine(&mut chef, i)).or_default().push(i);
+    }
+    let mut n = 0;
+    for (_, g) in groupes {
+        // La zone de chaque voie : de la première à la dernière traversée, plus la
+        // demi-largeur du souterrain et une marge
+        let mut zones: HashMap<usize, (f32, f32)> = HashMap::new();
+        for &i in &g {
+            let (k, c, _, _, w) = tr[i];
+            let e = zones.entry(k).or_insert((f32::MAX, f32::MIN));
+            e.0 = e.0.min(c - w - TABLIER_MARGE);
+            e.1 = e.1.max(c + w + TABLIER_MARGE);
+        }
+        // Le plan : sur les hauteurs des voies aux bords de leur zone
+        let mut ech: Vec<(f32, f32, f32)> = Vec::new();
+        for (&k, &(s0, s1)) in &zones {
+            let a = &r.aretes[k];
+            let ab = abscisses(a);
+            let tot = ab[ab.len() - 1];
+            for x in [s0.max(0.0), s1.min(tot)] {
+                let i = ab.partition_point(|&y| y < x).clamp(1, a.points.len() - 1);
+                let t = ((x - ab[i - 1]) / (ab[i] - ab[i - 1]).max(1e-6)).clamp(0.0, 1.0);
+                let p = entre(a.points[i - 1], a.points[i], t);
+                ech.push((p[0], p[1], p[2]));
+            }
+        }
+        let w = ech.len() as f32;
+        let (cx, cz, ch) = (ech.iter().map(|e| e.0).sum::<f32>() / w, ech.iter().map(|e| e.1).sum::<f32>() / w, ech.iter().map(|e| e.2).sum::<f32>() / w);
+        let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for &(x, z, h) in &ech {
+            let (dx, dz, dh) = ((x - cx) as f64, (z - cz) as f64, (h - ch) as f64);
+            a11 += dx * dx;
+            a12 += dx * dz;
+            a22 += dz * dz;
+            b1 += dx * dh;
+            b2 += dz * dh;
+        }
+        let det = a11 * a22 - a12 * a12;
+        let mut gr = if det.abs() > 1e-3 { [((b1 * a22 - b2 * a12) / det) as f32, ((a11 * b2 - a12 * b1) / det) as f32] } else { [0.0, 0.0] };
+        let mg = gr[0].hypot(gr[1]);
+        if mg > TABLIER_PENTE {
+            gr = [gr[0] * TABLIER_PENTE / mg, gr[1] * TABLIER_PENTE / mg];
+        }
+        let plan = |x: f32, z: f32| ch + gr[0] * (x - cx) + gr[1] * (z - cz);
+        // Chaque voie sur le plan dans sa zone, raccordée au-delà
+        for (&k, &(s0, s1)) in &zones {
+            let a = &mut r.aretes[k];
+            let ab = abscisses(a);
+            for i in 0..a.points.len() {
+                let c = ab[i];
+                let d = if c < s0 { s0 - c } else if c > s1 { c - s1 } else { 0.0 };
+                if d >= TABLIER_RACCORD {
+                    continue;
+                }
+                let t = d / TABLIER_RACCORD;
+                let poids = 1.0 - t * t * (3.0 - 2.0 * t);
+                let p = a.points[i];
+                a.points[i][2] = p[2] + poids * (plan(p[0], p[1]) - p[2]);
+            }
+            let (na, nb) = (a.a, a.b);
+            let (ha, hb) = (a.points[0][2], a.points[a.points.len() - 1][2]);
+            if ab[0] + TABLIER_RACCORD > s0 {
+                r.noeuds[na].p[2] = ha;
+            }
+            if ab[ab.len() - 1] - TABLIER_RACCORD < s1 {
+                r.noeuds[nb].p[2] = hb;
+            }
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Les tabliers au-dessus des souterrains : traversées réunies à moins de tant (m), la
+/// marge de chaque côté du souterrain (m), la pente plafonnée, la longueur du raccord.
+const TABLIER_LIEN: f32 = 12.0;
+const TABLIER_MARGE: f32 = 2.0;
+const TABLIER_PENTE: f32 = 0.08;
+const TABLIER_RACCORD: f32 = 10.0;
+
+/// Ce que `preparer_souterrains` a fait.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Souterrains {
+    /// Voies au sol de niveau négatif devenues souterrains.
+    pub negatifs: usize,
+    /// Souterrains très courts remis au sol.
+    pub courts: usize,
+    pub enfonces: usize,
+    /// Voies au sol descendues en tranchée vers une entrée.
+    pub tranchees: usize,
+    /// Tabliers posés au-dessus des souterrains.
+    pub tabliers: usize,
+}
+
+/// La transition au pied d'une rampe (m) : la pente passe de 0 à celle de la rampe
+/// (une parabole) ; et l'arrondi (m) de la tête d'une tranchée et du pied d'une rampe
+/// dans un souterrain.
+const RAMPE_TRANSITION: f32 = 10.0;
+/// Une suite de voies au sol entre deux entrées de souterrain plus courte que tant (m)
+/// est une tranchée ouverte entre deux parties couvertes : elle reste au fond.
+const TRANCHEE_OUVERTE: f32 = 150.0;
+const RAMPE_ARRONDI: f32 = 1.2;
+
+/// La distance « adoucie » d'une rampe qui part à plat : une parabole sur
+/// `RAMPE_TRANSITION`, puis droite.
+fn adoucie(d: f32) -> f32 {
+    if d < RAMPE_TRANSITION { d * d / (2.0 * RAMPE_TRANSITION) } else { d - RAMPE_TRANSITION / 2.0 }
+}
+
+/// Minimum et maximum arrondis (de `k` mètres au plus).
+/// (polynôme : exacts dès que les deux valeurs s'écartent de plus de `k`).
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = (k - (a - b).abs()).max(0.0);
+    a.min(b) - h * h / (4.0 * k)
+}
+
+fn smax(a: f32, b: f32, k: f32) -> f32 {
+    let h = (k - (a - b).abs()).max(0.0);
+    a.max(b) + h * h / (4.0 * k)
+}
+
+/// Un f32 rangeable (pour le tas).
+fn ordre(x: f32) -> i64 {
+    (x as f64 * 1000.0).round() as i64
+}
+
+/// Les points d'un tracé, un au moins tous les `RELIEF_PAS` mètres (hauteurs
+/// interpolées).
+fn densifier_xz(p: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    let mut v: Vec<[f32; 3]> = Vec::with_capacity(p.len() * 2);
+    v.push(p[0]);
+    for w in p.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let d = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let n = (d / RELIEF_PAS).ceil().max(1.0) as usize;
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            v.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
+        }
+    }
+    v
+}
+
+/// La contrainte du croisement de deux voies (o1, o2) : qui passe dessus (le pont,
+/// puis le sol, puis le tunnel ; à passage égal le niveau d'OSM, puis le plus haut
+/// aujourd'hui) et l'écart (la hauteur limitée du dessous plus la dalle, sinon le
+/// gabarit).
+fn contrainte_croisement(r: &Reseau, gabarits: &Gabarits, o1: Ou, o2: Ou) -> Contrainte {
+    use Passage::*;
+    let (a1, a2) = (&r.aretes[o1.0], &r.aretes[o2.0]);
+    let (h1, h2) = (r.hauteur(o1), r.hauteur(o2));
+    let rang = |p: Passage| match p {
+        Pont => 2,
+        Sol => 1,
+        Tunnel => 0,
+    };
+    let premier_dessus = match rang(a1.passage).cmp(&rang(a2.passage)) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal if a1.niveau != a2.niveau => a1.niveau > a2.niveau,
+        std::cmp::Ordering::Equal => h1 >= h2,
+    };
+    let ((haut, ph), (bas, pb)) = if premier_dessus { ((o1, a1.passage), (o2, a2.passage)) } else { ((o2, a2.passage), (o1, a1.passage)) };
+    let genre = if pb == Tunnel && ph != Pont { Genre::TunnelSousVoie } else { Genre::PontSurVoie };
+    let ab = &r.aretes[bas.0];
+    let gabarit = gabarits.hauteur(ab.points[bas.1], ab.points[bas.1 + 1], bas.2);
+    let ecart = match gabarit {
+        Some(g) => g + if ph == Tunnel { DALLE_ENTRE_SOUTERRAINS } else if ph == Pont { EPAISSEUR } else { DALLE_SOUS_SOL },
+        None if ab.genre == sage_reel::PIETONNE => GABARIT_PIETON + EPAISSEUR_PIETON,
+        None => GABARIT + EPAISSEUR,
+    };
+    Contrainte { genre, haut, bas: Some(bas), plancher: 0.0, ecart, implicite: ph == Sol && genre == Genre::PontSurVoie, gabarit }
+}
+
+/// La part du haut dans la correction d'une contrainte (1 : seul le haut bouge, 0 :
+/// seul le bas).
+pub fn part_du_haut(r: &Reseau, c: &Contrainte) -> f32 {
+    let ph = r.aretes[c.haut.0].passage;
+    let pb = c.bas.map(|b| r.aretes[b.0].passage);
+    // Entre une route et une piétonne, seule la piétonne bouge
+    let pieton = |k: usize| !sage_reel::carrossable(r.aretes[k].genre);
+    // Sauf un souterrain piéton au-dessus d'un tunnel routier (niveaux d'OSM) : le
+    // tunnel routier, plus profond, s'enfonce ; le souterrain reste tenu sous la surface
+    let sous_terre = |k: usize| r.aretes[k].passage == Passage::Tunnel;
+    // On se fie au relief de surface : sur un souterrain, seul le souterrain bouge
+    if pb == Some(Passage::Tunnel) && ph != Passage::Tunnel {
+        return 0.0;
+    }
+    match c.bas.map(|b| (pieton(c.haut.0), pieton(b.0))) {
+        Some((true, false)) if sous_terre(c.haut.0) && c.bas.is_some_and(|b| sous_terre(b.0) && r.aretes[b.0].niveau < r.aretes[c.haut.0].niveau) => 0.0,
+        Some((true, false)) => 1.0,
+        Some((false, true)) => 0.0,
+        _ => match (ph, pb) {
+            (_, None) => 1.0,
+            (Passage::Pont, Some(Passage::Sol)) => 0.85,
+            (Passage::Sol, Some(Passage::Tunnel)) => 0.15,
+            _ => 0.5,
+        },
+    }
+}
+
+/// La hauteur d'une arête au plus près de (x, z) (projection sur son tracé), et la
+/// distance.
+fn hauteur_pres(a: &Arete, x: f32, z: f32) -> (f32, f32) {
+    let mut m = (f32::MAX, 0.0f32);
+    for w in a.points.windows(2) {
+        let (dx, dz) = (w[1][0] - w[0][0], w[1][1] - w[0][1]);
+        let l2 = dx * dx + dz * dz;
+        let t = if l2 > 1e-9 { (((x - w[0][0]) * dx + (z - w[0][1]) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 };
+        let d = (x - w[0][0] - dx * t).hypot(z - w[0][1] - dz * t);
+        if d < m.0 {
+            m = (d, w[0][2] + (w[1][2] - w[0][2]) * t);
+        }
+    }
+    (m.1, m.0)
+}
+
+/// La fiche d'une voie (commande « traces voie k ») : son passage, son profil (hauteur
+/// d'origine, nivelée, relief), ses croisements (l'autre voie, l'écart demandé, la
+/// hauteur limitée, qui bouge, l'écart obtenu).
+pub fn decrire_voie(fin: &Reseau, l: &Lieu, k: usize) -> String {
+    let Some(a1) = fin.aretes.get(k) else { return format!("pas de voie a{k}") };
+    let a0 = a1;
+    // Ses croisements, cherchés sur le réseau nivelé seul (sans le refaire) : les
+    // arêtes dont la boîte touche la sienne
+    let boite = |a: &Arete| a.points.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, p| [m[0].min(p[0]), m[1].min(p[1]), m[2].max(p[0]), m[3].max(p[1])]);
+    let bk = boite(a1);
+    let gabarits = Gabarits::new(l);
+    let mut cs: Vec<Contrainte> = Vec::new();
+    for (j, b) in fin.aretes.iter().enumerate() {
+        if j == k {
+            continue;
+        }
+        let bj = boite(b);
+        if bj[0] > bk[2] || bj[2] < bk[0] || bj[1] > bk[3] || bj[3] < bk[1] {
+            continue;
+        }
+        for s1 in 0..a1.points.len() - 1 {
+            for s2 in 0..b.points.len() - 1 {
+                if let Some((u1, u2)) = croise(a1.points[s1], a1.points[s1 + 1], b.points[s2], b.points[s2 + 1]) {
+                    cs.push(contrainte_croisement(fin, &gabarits, (k, s1, u1), (j, s2, u2)));
+                }
+            }
+        }
+    }
+    let brut = fin;
+    let classes = Classes::new(l);
+    let nom = |a: &Arete| {
+        let c = nom_classe(classes.classe(a));
+        format!("{} genre {} niveau {} largeur {:.1}{}", a.passage.nom(), a.genre, a.niveau, a.largeur, if c.is_empty() { String::new() } else { format!(" · {c}") })
+    };
+    let mut o = format!("a{k} · {} · nœuds {} → {}", nom(a0), a0.a, a0.b);
+    let couv = a1.points.iter().map(|p| l.relief(p[0] as f64, p[1] as f64) as f32 - p[2]).fold(f32::MIN, f32::max);
+    o += &format!(" · couverture max {couv:.2} m\nprofil (abscisse : nivelée · relief)\n");
+    let mut s = 0.0f32;
+    for (i, p) in a0.points.iter().enumerate() {
+        if i > 0 {
+            s += (p[0] - a0.points[i - 1][0]).hypot(p[1] - a0.points[i - 1][1]);
+        }
+        o += &format!("  {s:5.1} m ({:.1};{:.1}) : {:.2} · relief {:.2}\n", p[0], p[1], p[2], l.relief(p[0] as f64, p[1] as f64));
+    }
+    let mut n = 0;
+    for c in &cs {
+        let dessus = c.haut.0 == k;
+        if !dessus && c.bas.is_none_or(|b| b.0 != k) {
+            continue;
+        }
+        n += 1;
+        let p = brut.point(c.haut);
+        let part = part_du_haut(brut, c);
+        let bouge = if part >= 0.99 { "le dessus bouge" } else if part <= 0.01 { "le dessous bouge" } else { "les deux bougent" };
+        let hh = hauteur_pres(&fin.aretes[c.haut.0], p[0], p[1]).0;
+        let (autre, hb) = match c.bas {
+            Some(b) => (format!("a{} {}", if dessus { b.0 } else { c.haut.0 }, nom(&fin.aretes[if dessus { b.0 } else { c.haut.0 }])), hauteur_pres(&fin.aretes[b.0], p[0], p[1]).0),
+            None => ("l'eau".into(), c.plancher),
+        };
+        let obtenu = hh - hb;
+        o += &format!(
+            "{} {} · ({:.1};{:.1}) · écart demandé {:.2}{} · {} (part du dessus {:.2}) · dessus {:.2}, dessous {:.2} : écart obtenu {:.2}{}\n",
+            if dessus { "sous elle :" } else { "au-dessus :" },
+            autre,
+            p[0],
+            p[1],
+            c.ecart,
+            c.gabarit.map_or(" (hauteur limitée inconnue)".into(), |g| format!(" (hauteur limitée {g:.2})")),
+            bouge,
+            part,
+            hh,
+            hb,
+            obtenu,
+            if obtenu + 0.05 < c.ecart { format!(" · manque {:.2}", c.ecart - obtenu) } else { String::new() }
+        );
+    }
+    if n == 0 {
+        o += "aucun croisement\n";
+    }
+    o
 }
 
 impl Reseau {
@@ -661,7 +1881,7 @@ impl Reseau {
 /// de l'eau.
 pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
     let mut v = Vec::new();
-    let ecart = GABARIT + EPAISSEUR;
+    let gabarits = Gabarits::new(l);
     // Les segments des arêtes, par case
     let mut cases: HashMap<(i32, i32), Vec<(usize, usize)>> = HashMap::new();
     for (k, a) in r.aretes.iter().enumerate() {
@@ -689,28 +1909,7 @@ pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
                 if !vus.insert(((k1, s1).min((k2, s2)), (k1, s1).max((k2, s2)))) {
                     continue;
                 }
-                let (o1, o2) = ((k1, s1, u1), (k2, s2, u2));
-                let (h1, h2) = (r.hauteur(o1), r.hauteur(o2));
-                use Passage::*;
-                // Qui passe dessus : le pont, puis le sol, puis le tunnel ; à passage égal,
-                // le plus haut aujourd'hui
-                let rang = |p: Passage| match p {
-                    Pont => 2,
-                    Sol => 1,
-                    Tunnel => 0,
-                };
-                // Deux ponts ou deux tunnels : le niveau d'OSM, s'il les distingue (des
-                // passages piétons à −1 au-dessus de tunnels routiers à −2)
-                let premier_dessus = match rang(a1.passage).cmp(&rang(a2.passage)) {
-                    std::cmp::Ordering::Greater => true,
-                    std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Equal if a1.passage != Sol && a1.niveau != a2.niveau => a1.niveau > a2.niveau,
-                    std::cmp::Ordering::Equal => h1 >= h2,
-                };
-                let ((haut, ph), (bas, pb)) = if premier_dessus { ((o1, a1.passage), (o2, a2.passage)) } else { ((o2, a2.passage), (o1, a1.passage)) };
-                let genre = if pb == Tunnel && ph != Pont { Genre::TunnelSousVoie } else { Genre::PontSurVoie };
-                let ecart = if r.aretes[bas.0].genre == sage_reel::PIETONNE { GABARIT_PIETON + EPAISSEUR_PIETON } else { ecart };
-                v.push(Contrainte { genre, haut, bas: Some(bas), plancher: 0.0, ecart, implicite: ph == Sol && genre == Genre::PontSurVoie });
+                v.push(contrainte_croisement(r, &gabarits, (k1, s1, u1), (k2, s2, u2)));
             }
         }
     }
@@ -743,7 +1942,7 @@ pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
                         }
                         let Some((u, _)) = croise(a.points[s], a.points[s + 1], c3, d3) else { continue };
                         let p = entre(a.points[s], a.points[s + 1], u);
-                        v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, s, u), bas: None, plancher: niveau_eau(p[0], p[1]), ecart: TIRANT_D_AIR + EPAISSEUR, implicite: a.passage == Passage::Sol });
+                        v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, s, u), bas: None, plancher: niveau_eau(p[0], p[1]), ecart: TIRANT_D_AIR + EPAISSEUR, implicite: a.passage == Passage::Sol, gabarit: None });
                     }
                 }
             }
@@ -755,7 +1954,7 @@ pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
         for i in 0..a.points.len() - 1 {
             let p = a.points[i];
             if l.eau(p[0] as f64, p[1] as f64) > 0.5 {
-                v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, i, 0.0), bas: None, plancher: l.niveau, ecart: TIRANT_D_AIR + EPAISSEUR, implicite: false });
+                v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, i, 0.0), bas: None, plancher: l.niveau, ecart: TIRANT_D_AIR + EPAISSEUR, implicite: false, gabarit: None });
             }
         }
     }
@@ -789,6 +1988,9 @@ pub const PENTE_CHEMIN: f32 = 0.15;
 /// Au-delà de celle-ci, plus raide que les rues les plus raides, la pente est une
 /// anomalie du relief ou des données, et elle est rabotée.
 pub const PENTE_ANOMALIE: f32 = 0.25;
+/// Une voie au sol à moins de tant de mètres d'un bout de pont est tenue par lui : sous
+/// un autre pont, elle ne descend pas, et la rampe du pont la relève.
+const TENUE: f32 = 30.0;
 /// Le poids qui retient un point au sol à sa hauteur d'origine (le relief lissé), et
 /// celui, faible, d'un point de pont ou de tunnel (ses rampes suivent le reste).
 const RETENUE_SOL: f32 = 0.3;
@@ -827,6 +2029,12 @@ pub struct Bilan {
 /// tour, chaque point se rapproche de la moyenne de ses voisins et de sa hauteur
 /// d'origine, puis les contraintes et les pentes sont imposées (projections).
 pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
+    niveler_fixe(r, v, iterations, &[])
+}
+
+/// `niveler`, les arêtes `fixes` (les voies rapides posées) ne bougeant pas : les
+/// autres s'adaptent à elles.
+pub fn niveler_fixe(r: &mut Reseau, v: &[Contrainte], iterations: usize, fixes: &[bool]) -> Bilan {
     let t0 = std::time::Instant::now();
     avancer(0.0);
     let nn = r.noeuds.len();
@@ -881,6 +2089,15 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
         ids.push(v);
     }
     let nv = y.len();
+    // Les points fixes : ceux des arêtes fixes (et leurs nœuds)
+    let mut fixe = vec![false; nv];
+    for (k, f) in fixes.iter().enumerate() {
+        if *f {
+            for &v in &ids[k] {
+                fixe[v] = true;
+            }
+        }
+    }
     // Les liens entre points voisins : (autre, longueur, pente max)
     let mut liens: Vec<(usize, usize, f32, f32)> = Vec::new();
     let mut voisins: Vec<Vec<usize>> = vec![Vec::new(); nv];
@@ -903,6 +2120,67 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             }
         }
     }
+    // Les voies tenues : les points au sol d'une voie carrossable à moins de TENUE
+    // mètres (par le réseau au sol) d'un bout de pont. Sous un croisement, elles ne
+    // descendent pas (seul le dessus monte), et la rampe du pont peut les relever
+    let mut tenu = vec![false; nv];
+    {
+        let mut sol_var = vec![false; nv];
+        let mut pont_noeud = vec![false; nn];
+        let mut sol_noeud = vec![false; nn];
+        for (k, a) in r.aretes.iter().enumerate() {
+            if !sage_reel::carrossable(a.genre) {
+                continue;
+            }
+            match a.passage {
+                Passage::Sol => {
+                    for &v in &ids[k] {
+                        sol_var[v] = true;
+                    }
+                    sol_noeud[a.a] = true;
+                    sol_noeud[a.b] = true;
+                }
+                Passage::Pont => {
+                    pont_noeud[a.a] = true;
+                    pont_noeud[a.b] = true;
+                }
+                _ => {}
+            }
+        }
+        let mut long_sol: Vec<Vec<(usize, f32)>> = vec![Vec::new(); nv];
+        for (k, a) in r.aretes.iter().enumerate() {
+            if a.passage != Passage::Sol || !sage_reel::carrossable(a.genre) {
+                continue;
+            }
+            for i in 0..a.points.len() - 1 {
+                let (p, q) = (a.points[i], a.points[i + 1]);
+                let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+                let (x, z) = (ids[k][i], ids[k][i + 1]);
+                long_sol[x].push((z, d));
+                long_sol[z].push((x, d));
+            }
+        }
+        let mut dist = vec![f32::MAX; nv];
+        let mut file: Vec<usize> = Vec::new();
+        for n in 0..nn {
+            if pont_noeud[n] && sol_noeud[n] {
+                dist[n] = 0.0;
+                file.push(n);
+            }
+        }
+        while let Some(i) = file.pop() {
+            for &(j, d) in &long_sol[i] {
+                let dj = dist[i] + d;
+                if dj < dist[j] && dj <= TENUE {
+                    dist[j] = dj;
+                    file.push(j);
+                }
+            }
+        }
+        for i in 0..nv {
+            tenu[i] = sol_var[i] && dist[i] <= TENUE;
+        }
+    }
     // Les contraintes en variables : (haut : v0, v1, u ; bas ; plancher ; écart ; part
     // du haut dans la correction)
     struct C {
@@ -919,25 +2197,22 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
     let cs: Vec<C> = v
         .iter()
         .map(|c| {
-            let ph = r.aretes[c.haut.0].passage;
-            let pb = c.bas.map(|b| r.aretes[b.0].passage);
-            // Entre une route et une piétonne, seule la piétonne bouge
             let pieton = |k: usize| !sage_reel::carrossable(r.aretes[k].genre);
-            // Sauf un souterrain piéton au-dessus d'un tunnel routier (niveaux d'OSM) :
-            // le tunnel routier, plus profond, s'enfonce ; le souterrain reste tenu sous
-            // la surface
-            let sous_terre = |k: usize| r.aretes[k].passage == Passage::Tunnel;
-            let part = match c.bas.map(|b| (pieton(c.haut.0), pieton(b.0))) {
-                Some((true, false)) if sous_terre(c.haut.0) && c.bas.is_some_and(|b| sous_terre(b.0) && r.aretes[b.0].niveau < r.aretes[c.haut.0].niveau) => 0.0,
-                Some((true, false)) => 1.0,
-                Some((false, true)) => 0.0,
-                _ => match (ph, pb) {
-                (_, None) => 1.0,
-                (Passage::Pont, Some(Passage::Sol)) => 0.85,
-                (Passage::Sol, Some(Passage::Tunnel)) => 0.15,
-                _ => 0.5,
-                },
-            };
+            let mut part = part_du_haut(r, c);
+            // Un pont au-dessus d'une voie tenue : seul le pont monte
+            if r.aretes[c.haut.0].passage == Passage::Pont && c.bas.is_some_and(|b| {
+                let (v0, v1, _) = var(b);
+                tenu[v0] || tenu[v1]
+            }) {
+                part = 1.0;
+            }
+            // Une voie fixe ne bouge pas : l'autre prend toute la correction
+            let (vh, vb) = (var(c.haut), c.bas.map(var));
+            if fixe[vh.0] || fixe[vh.1] {
+                part = 0.0;
+            } else if vb.is_some_and(|b| fixe[b.0] || fixe[b.1]) {
+                part = 1.0;
+            }
             C { h: var(c.haut), b: c.bas.map(var), plancher: c.plancher, ecart: c.ecart, part, pieton_h: pieton(c.haut.0), pieton_b: c.bas.is_some_and(|b| pieton(b.0)) }
         })
         .collect();
@@ -968,7 +2243,7 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
         avancer(0.1 + 0.6 * it as f32 / iterations.max(1) as f32);
         for i in 0..nv {
             let vs = &voisins[i];
-            if vs.is_empty() {
+            if vs.is_empty() || fixe[i] {
                 suivant[i] = y[i];
                 continue;
             }
@@ -986,9 +2261,12 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
             if e > 1e-3 {
                 reste = true;
                 // Entre une route et une piétonne, seule la piétonne bouge
-                let (ka, kb) = match (route[a], route[b]) {
-                    (true, false) => (0.0, 1.0),
-                    (false, true) => (1.0, 0.0),
+                let (ka, kb) = match (fixe[a], fixe[b], route[a], route[b]) {
+                    (true, true, _, _) => continue,
+                    (true, false, _, _) => (0.0, 1.0),
+                    (false, true, _, _) => (1.0, 0.0),
+                    (_, _, true, false) => (0.0, 1.0),
+                    (_, _, false, true) => (1.0, 0.0),
                     _ => (0.5, 0.5),
                 };
                 let s = if y[a] > y[b] { e } else { -e };
@@ -1049,9 +2327,16 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
     for c in cs.iter() {
         fixe_haut[c.h.0] = true;
         fixe_haut[c.h.1] = true;
+        // Une voie tenue reste libre de monter avec la rampe de son pont
         if let Some(b) = c.b {
-            fixe_bas[b.0] = true;
-            fixe_bas[b.1] = true;
+            fixe_bas[b.0] = !tenu[b.0];
+            fixe_bas[b.1] = !tenu[b.1];
+        }
+    }
+    for i in 0..nv {
+        if fixe[i] {
+            fixe_bas[i] = true;
+            fixe_haut[i] = true;
         }
     }
     let propager = |d: &mut [f32], sources: &[usize], fixes: &[bool]| {
@@ -1109,13 +2394,13 @@ pub fn niveler(r: &mut Reseau, v: &[Contrainte], iterations: usize) -> Bilan {
                 continue;
             }
             let dh = (m * c.part + 0.01).min(MONTEE_MAX);
-            for v in [c.h.0, c.h.1].into_iter().filter(|&v| c.part > 0.0 && !(c.pieton_h && route[v])) {
+            for v in [c.h.0, c.h.1].into_iter().filter(|&v| c.part > 0.0 && !fixe[v] && !(c.pieton_h && route[v])) {
                 a_monter[v] = a_monter[v].max(dh);
                 hauts.push(v);
             }
             if let Some(b) = c.b.filter(|_| c.part < 1.0) {
                 let db = (m * (1.0 - c.part) + 0.01).min(MONTEE_MAX);
-                for v in [b.0, b.1].into_iter().filter(|&v| !(c.pieton_b && route[v])) {
+                for v in [b.0, b.1].into_iter().filter(|&v| !fixe[v] && !(c.pieton_b && route[v])) {
                     a_descendre[v] = a_descendre[v].max(db);
                     bas_.push(v);
                 }
@@ -1229,7 +2514,9 @@ pub fn pires_pentes(r: &Reseau, v: &[Contrainte], n: usize) -> String {
 /// Le réseau d'un lieu, nivelé : construit, contraint, son profil lissé (50 tours).
 pub fn nivele(l: &Lieu) -> Reseau {
     let mut r = reseau(l);
+    preparer_souterrains(&mut r, l);
+    let rapides = lisser_rapides(&mut r, l);
     let c = contraintes(&r, l);
-    niveler(&mut r, &c, 50);
+    niveler_fixe(&mut r, &c, 50, &rapides.fixes);
     r
 }

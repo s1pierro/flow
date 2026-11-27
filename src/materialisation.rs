@@ -307,7 +307,10 @@ pub(crate) fn plan(r: &Reseau, n: usize) -> Option<Plan> {
             }
             None => (da, (ha - hn) / la.max(1.0)),
         };
-        let pente = pente.clamp(-PENTE_PLAN_MAX, PENTE_PLAN_MAX);
+        // Une route qui se prolonge sans autre route (seulement une voie de service, un
+        // chemin) garde sa pente : la voie secondaire en prend le roulis
+        let principales = routes.iter().filter(|(a, _)| rang(a.genre) <= 1).count();
+        let pente = if meilleur.is_some() && principales <= 2 { pente } else { pente.clamp(-PENTE_PLAN_MAX, PENTE_PLAN_MAX) };
         g = [t[0] * pente, t[1] * pente];
     }
     Some(Plan { c: noeud.p, g, rayon })
