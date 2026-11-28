@@ -351,6 +351,11 @@ impl Donnees {
                 t.detail(format!("{n} voies de moins de 12 m en ligne droite"));
             }
             {
+                let mut t = crate::suivi::tache("culées");
+                let n = rs::relever_culees(&mut r, &c, &fixes);
+                t.detail(format!("{n} culées en creux relevées"));
+            }
+            {
                 let mut t = crate::suivi::tache("voies ferrées retirées");
                 let n = rs::retirer_rails(&mut r, &mut fixes);
                 t.detail(format!("{n} arêtes de voies ferrées"));

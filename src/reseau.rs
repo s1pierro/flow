@@ -2941,6 +2941,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     let mut fixes = rapides.fixes;
     niveler_fixe(&mut r, &c, 50, &fixes);
     redresser_courtes(&mut r, &c, &fixes);
+    relever_culees(&mut r, &c, &fixes);
     retirer_rails(&mut r, &mut fixes);
     redresser_impasses(&mut r, &c, &fixes);
     r
@@ -3221,6 +3222,95 @@ pub fn redresser_courtes(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> us
         n += 1;
     }
     n
+}
+
+/// Autour d'une culée, la distance (m, le long de chaque voie) où l'on cherche le haut
+/// de la route au sol et celui du tablier.
+pub const CULEE_PORTEE: f32 = 30.0;
+/// Le creux (m) sous lequel une culée n'est pas reprise.
+pub const CULEE_TOLERANCE: f32 = 0.5;
+
+/// Les culées en V : à un nœud qui joint une voie au sol (une seule) à un pont (un seul),
+/// le relief du terrain nu plonge souvent vers ce que le pont franchit (une tranchée, une
+/// rive), alors que la route arrive sur un remblai. Si le point le plus haut de chaque
+/// côté (à moins de `CULEE_PORTEE`, dans la voie même) dépasse le nœud de plus de
+/// `CULEE_TOLERANCE`, le profil entre ces deux points est relevé (jamais abaissé) sur la
+/// droite qui les joint, si elle n'est pas plus raide que la voie au sol ne le permet. Sauf les voies fixes, les voies ferrées et celles qu'une autre
+/// voie enjambe (les relever réduirait son gabarit). Rend le nombre de culées reprises.
+pub fn relever_culees(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize {
+    let mut dessous = std::collections::HashSet::new();
+    for c in v {
+        if let Some(b) = c.bas {
+            dessous.insert(b.0);
+        }
+    }
+    let mut bouts: Vec<Vec<usize>> = vec![Vec::new(); r.noeuds.len()];
+    for (k, a) in r.aretes.iter().enumerate() {
+        if a.a != a.b {
+            bouts[a.a].push(k);
+            bouts[a.b].push(k);
+        }
+    }
+    let libre = |r: &Reseau, k: usize| {
+        let a = &r.aretes[k];
+        a.genre != RAIL && a.points.len() >= 2 && !fixes.get(k).copied().unwrap_or(false) && !dessous.contains(&k)
+    };
+    // Les indices d'une voie depuis le nœud n, avec leur distance à n
+    let depuis = |r: &Reseau, k: usize, n: usize| -> Vec<(usize, f32)> {
+        let a = &r.aretes[k];
+        let m = a.points.len();
+        let idx: Vec<usize> = if a.a == n { (0..m).collect() } else { (0..m).rev().collect() };
+        let mut d = 0.0f32;
+        let mut v = vec![(idx[0], 0.0)];
+        for w in idx.windows(2) {
+            let (p, q) = (a.points[w[0]], a.points[w[1]]);
+            d += (q[0] - p[0]).hypot(q[1] - p[1]);
+            v.push((w[1], d));
+        }
+        v
+    };
+    let mut n_ = 0;
+    for n in 0..r.noeuds.len() {
+        if bouts[n].len() != 2 {
+            continue;
+        }
+        let (k0, k1) = (bouts[n][0], bouts[n][1]);
+        let (ks, kp) = match (r.aretes[k0].passage, r.aretes[k1].passage) {
+            (Passage::Sol, Passage::Pont) => (k0, k1),
+            (Passage::Pont, Passage::Sol) => (k1, k0),
+            _ => continue,
+        };
+        if !libre(r, ks) || !libre(r, kp) {
+            continue;
+        }
+        let (vs, vp) = (depuis(r, ks, n), depuis(r, kp, n));
+        let haut = |k: usize, v: &[(usize, f32)]| -> Option<(usize, f32, f32)> {
+            v.iter().skip(1).filter(|x| x.1 <= CULEE_PORTEE).map(|&(i, d)| (i, d, r.aretes[k].points[i][2])).max_by(|a, b| a.2.total_cmp(&b.2))
+        };
+        let (Some((_, ds, hs)), Some((_, dp, hp))) = (haut(ks, &vs), haut(kp, &vp)) else { continue };
+        let hn = r.noeuds[n].p[2];
+        if hs < hn + CULEE_TOLERANCE || hp < hn + CULEE_TOLERANCE || ds + dp < 1e-3 {
+            continue;
+        }
+        // Une droite plus raide que la voie au sol ne le permet (une passerelle à
+        // escaliers, un haut de rampe lointain) n'est pas un remblai : on la laisse
+        if (hp - hs).abs() / (ds + dp) > pente_max(r.aretes[ks].genre) {
+            continue;
+        }
+        // La droite, en abscisse depuis l'ancre au sol
+        let droite = |x: f32| hs + (hp - hs) * x / (ds + dp);
+        for &(i, d) in vs.iter().filter(|x| x.1 < ds) {
+            let p = &mut r.aretes[ks].points[i][2];
+            *p = p.max(droite(ds - d));
+        }
+        for &(i, d) in vp.iter().filter(|x| x.1 < dp) {
+            let p = &mut r.aretes[kp].points[i][2];
+            *p = p.max(droite(ds + d));
+        }
+        r.noeuds[n].p[2] = hn.max(droite(ds));
+        n_ += 1;
+    }
+    n_
 }
 
 /// Aux bouts d'impasse, la longueur (en partant du cul-de-sac) où une pente excessive est
