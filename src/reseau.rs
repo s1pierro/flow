@@ -306,6 +306,9 @@ pub struct Reseau {
     /// Ce que la construction a fait : raccords, nœuds ajoutés aux croisements à niveau.
     pub raccords: usize,
     pub a_niveau: usize,
+    /// Les passages couverts (voies piétonnes « en tunnel » sous un bâtiment, de
+    /// plain-pied) remis au sol (`passages_couverts`) ; pas gardé dans le cache.
+    pub couverts: usize,
     /// Les arêtes posées sur un tablier au-dessus d'un souterrain (`poser_tabliers`).
     pub tabliers: Vec<u32>,
     /// Les arêtes fixes : les voies rapides posées (`lisser_rapides`).
@@ -399,6 +402,102 @@ impl Index {
     }
 }
 
+/// Un passage couvert : au moins cette part de sa longueur sous un bâtiment.
+pub const COUVERT_PART: f32 = 0.5;
+
+fn dans_polygone(poly: &[[f32; 2]], q: [f32; 2]) -> bool {
+    let mut c = false;
+    let n = poly.len();
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + n - 1) % n]);
+        if (a[1] > q[1]) != (b[1] > q[1]) && q[0] < (b[0] - a[0]) * (q[1] - a[1]) / (b[1] - a[1]) + a[0] {
+            c = !c;
+        }
+    }
+    c
+}
+
+/// Les passages couverts : une voie piétonne (rue piétonne, trottoir, chemin, sentier)
+/// qu'OSM dit en tunnel mais qui passe de plain-pied sous un bâtiment (un immeuble sur
+/// pilotis, un porche). Reconnue si elle est au moins à `COUVERT_PART` sous un bâtiment,
+/// ne croise en plan aucune voie au sol (un vrai souterrain passe sous une route ou une
+/// voie ferrée) et si ses deux bouts arrivent sur des voies au sol. Elle passe au sol ;
+/// ses sommets intérieurs ne se joindront à aucun autre tracé (`isoles`), seulement ses
+/// bouts. Rend, par tracé, s'il est un passage couvert.
+fn passages_couverts(l: &Lieu, t: &mut [Brut]) -> Vec<bool> {
+    let pieton = |g: u8| matches!(g, sage_reel::RUE_PIETONNE | sage_reel::PIETONNE | sage_reel::CHEMIN | sage_reel::SENTIER);
+    let mut v = vec![false; t.len()];
+    let candidats: Vec<usize> = (0..t.len()).filter(|&k| t[k].passage == Passage::Tunnel && pieton(t[k].genre) && t[k].points.len() >= 2).collect();
+    if candidats.is_empty() {
+        return v;
+    }
+    // Les sommets des voies au sol (hors ce tracé), et leurs segments
+    let mut au_sol: HashMap<(i64, i64), usize> = HashMap::new();
+    for x in t.iter().filter(|x| x.passage == Passage::Sol) {
+        for p in &x.points {
+            *au_sol.entry(cle(*p)).or_default() += 1;
+        }
+    }
+    let index = Index::new(t);
+    // Les boîtes des bâtiments
+    let boites: Vec<[f32; 4]> = l
+        .batiments
+        .iter()
+        .map(|b| b.contour.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, p| [m[0].min(p[0]), m[1].min(p[1]), m[2].max(p[0]), m[3].max(p[1])]))
+        .collect();
+    for k in candidats {
+        let q = &t[k].points;
+        let n = q.len();
+        // Ses deux bouts sur des voies au sol
+        if !au_sol.contains_key(&cle(q[0])) || !au_sol.contains_key(&cle(q[n - 1])) {
+            continue;
+        }
+        // Aucun croisement en plan avec une voie au sol
+        let mut croise_sol = false;
+        'seg: for i in 0..n - 1 {
+            let (a, b) = (q[i], q[i + 1]);
+            let mil = entre(a, b, 0.5);
+            for &(kk, s) in index.autour(mil) {
+                if kk == k || t[kk].passage != Passage::Sol {
+                    continue;
+                }
+                if croise(a, b, t[kk].points[s], t[kk].points[s + 1]).is_some() {
+                    croise_sol = true;
+                    break 'seg;
+                }
+            }
+        }
+        if croise_sol {
+            continue;
+        }
+        // La part sous un bâtiment, un point par mètre
+        let bx = q.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |m, p| [m[0].min(p[0]), m[1].min(p[1]), m[2].max(p[0]), m[3].max(p[1])]);
+        let proches: Vec<usize> = (0..boites.len()).filter(|&j| boites[j][0] <= bx[2] && boites[j][2] >= bx[0] && boites[j][1] <= bx[3] && boites[j][3] >= bx[1]).collect();
+        if proches.is_empty() {
+            continue;
+        }
+        let (mut dessous, mut total) = (0usize, 0usize);
+        for i in 0..n - 1 {
+            let (a, b) = (q[i], q[i + 1]);
+            let m = ((b[0] - a[0]).hypot(b[1] - a[1]).ceil() as usize).max(1);
+            for j in 0..m {
+                let p = entre(a, b, (j as f32 + 0.5) / m as f32);
+                total += 1;
+                if proches.iter().any(|&x| dans_polygone(&l.batiments[x].contour, [p[0], p[1]])) {
+                    dessous += 1;
+                }
+            }
+        }
+        if (dessous as f32) < COUVERT_PART * total as f32 {
+            continue;
+        }
+        v[k] = true;
+        t[k].passage = Passage::Sol;
+        t[k].niveau = 0;
+    }
+    v
+}
+
 /// Le réseau des voies d'un lieu : tous les tracés (sol, ponts, tunnels) en un graphe.
 pub fn reseau(l: &Lieu) -> Reseau {
     let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, niveau: x.route.niveau, files: x.route.files, genre: x.route.genre, revetement: x.route.revetement, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
@@ -411,6 +510,28 @@ pub fn reseau(l: &Lieu) -> Reseau {
             t.push(Brut { passage, niveau: x.niveau, files: Default::default(), genre: RAIL, revetement: 0, largeur: tr::largeur(x.mode), points: x.points.clone() });
         }
     }
+    // Les passages couverts remis au sol ; leurs sommets intérieurs restent à part
+    // (classe 2 des clés) : un passage sous un immeuble ne rejoint pas le parking
+    // souterrain qu'il enjambe
+    let couverts = passages_couverts(l, &mut t);
+    let isoles: std::collections::HashSet<(i64, i64)> = t
+        .iter()
+        .zip(&couverts)
+        .filter(|(_, &c)| c)
+        .flat_map(|(x, _)| x.points[1..x.points.len() - 1].iter().map(|p| cle(*p)))
+        .collect();
+    let nb_couverts = couverts.iter().filter(|&&c| c).count();
+    // La classe d'un sommet dans les clés : 1 voie ferrée, 2 intérieur d'un passage
+    // couvert, 0 sinon
+    let classe = |x: &Brut, c: bool, p: [f32; 3]| -> u8 {
+        if x.genre == RAIL {
+            1
+        } else if c && isoles.contains(&cle(p)) {
+            2
+        } else {
+            0
+        }
+    };
     // Les voies au sol relues sur le relief adouci (au lieu du profil du lieu, lissé
     // voie par voie le long de son axe) : toutes lisent la même surface, et se
     // rejoignent sans écart
@@ -419,14 +540,14 @@ pub fn reseau(l: &Lieu) -> Reseau {
             b.points = relire(l, &b.points);
         }
     }
-    let mut r = Reseau::default();
+    let mut r = Reseau { couverts: nb_couverts, ..Default::default() };
     // Les sommets de tous les tracés, au centimètre
     // (au centimètre, voie ferrée) : un rail et une route ne partagent pas de nœud
     let compter = |t: &[Brut]| {
-        let mut s: HashMap<((i64, i64), bool), usize> = HashMap::new();
-        for x in t {
+        let mut s: HashMap<((i64, i64), u8), usize> = HashMap::new();
+        for (k, x) in t.iter().enumerate() {
             for p in &x.points {
-                *s.entry((cle(*p), x.genre == RAIL)).or_default() += 1;
+                *s.entry((cle(*p), classe(x, couverts[k], *p))).or_default() += 1;
             }
         }
         s
@@ -443,7 +564,7 @@ pub fn reseau(l: &Lieu) -> Reseau {
         for (k, x) in t.iter().enumerate() {
             let n = x.points.len();
             for (debut, p) in [(true, x.points[0]), (false, x.points[n - 1])] {
-                if sommets[&(cle(p), x.genre == RAIL)] > 1 {
+                if sommets[&(cle(p), classe(x, couverts[k], p))] > 1 {
                     continue;
                 }
                 let mut best: Option<(usize, usize, f32, f32)> = None;
@@ -534,23 +655,23 @@ pub fn reseau(l: &Lieu) -> Reseau {
     // 3. Les nœuds : les bouts, et les sommets que partagent plusieurs tracés (ou un
     //    tracé qui repasse par lui-même) ; les tracés coupés en arêtes à leurs nœuds
     let sommets = compter(&t);
-    let mut numero: HashMap<((i64, i64), bool), usize> = HashMap::new();
+    let mut numero: HashMap<((i64, i64), u8), usize> = HashMap::new();
     let [x0, z0, x1, z1] = l.etendue();
     let au_bord = |p: [f32; 3]| (p[0] as f64 - x0).min(x1 - p[0] as f64).min(p[1] as f64 - z0).min(z1 - p[1] as f64) < 1.0;
-    let mut noeud = |p: [f32; 3], rail: bool, r: &mut Reseau| -> usize {
+    let mut noeud = |p: [f32; 3], rail: u8, r: &mut Reseau| -> usize {
         *numero.entry((cle(p), rail)).or_insert_with(|| {
             let origine = marques.get(&cle(p)).copied().unwrap_or(if au_bord(p) { Origine::Bord } else { Origine::Donnees });
             r.noeuds.push(Noeud { p, aretes: Vec::new(), origine });
             r.noeuds.len() - 1
         })
     };
-    for x in &t {
+    for (kx, x) in t.iter().enumerate() {
         let n = x.points.len();
         let mut debut = 0;
         for i in 1..n {
-            let rail = x.genre == RAIL;
+            let rail = classe(x, couverts[kx], x.points[i]);
             if i == n - 1 || sommets[&(cle(x.points[i]), rail)] > 1 {
-                let (a, b) = (noeud(x.points[debut], rail, &mut r), noeud(x.points[i], rail, &mut r));
+                let (a, b) = (noeud(x.points[debut], classe(x, couverts[kx], x.points[debut]), &mut r), noeud(x.points[i], rail, &mut r));
                 let k = r.aretes.len();
                 r.aretes.push(Arete { a, b, points: x.points[debut..=i].to_vec(), passage: x.passage, genre: x.genre, largeur: x.largeur, revetement: x.revetement, files: x.files, niveau: x.niveau });
                 r.noeuds[a].aretes.push(k);

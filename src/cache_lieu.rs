@@ -266,7 +266,7 @@ fn lire_reseau(o: &[u8]) -> Option<Reseau> {
         }
     }
     let [tabliers, fixes] = listes;
-    (l.1 == o.len()).then_some(Reseau { noeuds, aretes, raccords, a_niveau, tabliers, fixes })
+    (l.1 == o.len()).then_some(Reseau { noeuds, aretes, raccords, a_niveau, couverts: 0, tabliers, fixes })
 }
 
 /// Un fichier du cache (`nom`, empreinte `h`), s'il y est.

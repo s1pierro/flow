@@ -303,8 +303,10 @@ impl Donnees {
             // `crate::reseau::nivele`, étape par étape (pour le suivi)
             use crate::reseau as rs;
             let mut r = {
-                let _t = crate::suivi::tache("graphe");
-                rs::reseau(&self.lieu)
+                let mut t = crate::suivi::tache("graphe");
+                let r = rs::reseau(&self.lieu);
+                t.detail(format!("{} bouts raccordés, {} croisements à niveau, {} passages couverts remis au sol", r.raccords, r.a_niveau, r.couverts));
+                r
             };
             let so = {
                 let mut t = crate::suivi::tache("souterrains");
