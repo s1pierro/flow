@@ -3064,6 +3064,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     redresser_courtes(&mut r, &c, &fixes);
     relever_culees(&mut r, &c, &fixes);
     retirer_rails(&mut r, &mut fixes);
+    lisser_giratoires(&mut r, &c, &fixes);
     normaliser_rampes(&mut r, &c, &fixes);
     redresser_impasses(&mut r, &c, &fixes);
     r
@@ -3521,6 +3522,326 @@ pub fn normaliser_rampes(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> us
         n += 1;
     }
     n
+}
+
+/// Un giratoire : au plus ce tour (m).
+pub const GIRATOIRE_TOUR: f32 = 300.0;
+/// … au moins ce rayon moyen (m) (plus petit : un anneau de plaque).
+pub const GIRATOIRE_RAYON_MIN: f32 = 5.0;
+/// … de forme à peu près circulaire : l'écart type des rayons au plus cette part du rayon
+/// moyen.
+pub const GIRATOIRE_ROND: f32 = 0.3;
+/// La pente au plus du plan d'un giratoire.
+pub const GIRATOIRE_PENTE: f32 = 0.20;
+/// La compacité (4πA/P²) d'un giratoire au moins : un carré (0,79) n'en est pas un.
+pub const GIRATOIRE_COMPACITE: f32 = 0.85;
+/// Les voies qui arrivent à l'anneau rejoignent sa nouvelle hauteur sur tant (m).
+pub const GIRATOIRE_RACCORD: f32 = 15.0;
+
+/// Le sens d'une voie à sens unique : vrai dans le sens du tracé (de a vers b).
+fn sens_unique(a: &Arete) -> Option<bool> {
+    let f = a.files;
+    if f.total == 0 {
+        return None;
+    }
+    if f.avant > 0 && f.arriere == 0 && f.avant >= f.total {
+        Some(true)
+    } else if f.arriere > 0 && f.avant == 0 && f.arriere >= f.total {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// La direction (x, z unitaire) d'une voie en partant de son bout au nœud n, sur
+/// quelques mètres.
+fn direction_depuis(a: &Arete, depuis_a: bool) -> [f32; 2] {
+    let m = a.points.len();
+    let q0 = if depuis_a { a.points[0] } else { a.points[m - 1] };
+    let mut d = 0.0f32;
+    let mut q = q0;
+    for x in 1..m {
+        let p = if depuis_a { a.points[x] } else { a.points[m - 1 - x] };
+        d += (p[0] - q[0]).hypot(p[1] - q[1]);
+        q = p;
+        if d >= 4.0 {
+            break;
+        }
+    }
+    let (dx, dz) = (q[0] - q0[0], q[1] - q0[1]);
+    let l = dx.hypot(dz).max(1e-6);
+    [dx / l, dz / l]
+}
+
+/// Les giratoires, reconnus par leur géométrie : une boucle de voies carrossables à sens
+/// unique, toutes dans le même sens de rotation, de moins de `GIRATOIRE_TOUR`, à peu près
+/// circulaire. L'anneau est posé sur un plan (ajusté sur ses points, de pente au plus
+/// `GIRATOIRE_PENTE`), relevé au-dessus de la hauteur que requiert chacun de ses ponts
+/// (ce qu'il franchit plus l'écart), abaissé sous ce qui l'enjambe ; un nœud tenu par une
+/// voie fixe ne bouge pas (s'ils se contredisent, l'anneau reste tel quel). Les voies qui y arrivent rejoignent la nouvelle hauteur sur
+/// `GIRATOIRE_RACCORD`. Après les plaques. Rend le nombre de giratoires lissés.
+pub fn lisser_giratoires(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize {
+    let fixe = |k: usize| fixes.get(k).copied().unwrap_or(false);
+    let mut dessus = std::collections::HashSet::new();
+    let mut dessous = std::collections::HashSet::new();
+    for c in v {
+        dessus.insert(c.haut.0);
+        if let Some(b) = c.bas {
+            dessous.insert(b.0);
+        }
+    }
+    let na = r.aretes.len();
+    // Les arcs à sens unique : depuis chaque nœud, (arête, en avant)
+    let mut sortants: Vec<Vec<(usize, bool)>> = vec![Vec::new(); r.noeuds.len()];
+    for k in 0..na {
+        let a = &r.aretes[k];
+        if a.genre == RAIL || a.a == a.b || a.points.len() < 2 || a.passage == Passage::Tunnel || !sage_reel::carrossable(a.genre) {
+            continue;
+        }
+        if let Some(av) = sens_unique(a) {
+            sortants[if av { a.a } else { a.b }].push((k, av));
+        }
+    }
+    let longueur = |a: &Arete| longueur_xz(&a.points);
+    let mut vus: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    let mut dans_anneau = vec![false; na];
+    let mut anneaux: Vec<Vec<(usize, bool)>> = Vec::new();
+    for depart in 0..r.noeuds.len() {
+        for &(k0, av0) in &sortants[depart] {
+            if dans_anneau[k0] {
+                continue;
+            }
+            // Deux marches : toujours le plus à gauche, puis toujours le plus à droite
+            for gauche in [true, false] {
+                let mut chemin = vec![(k0, av0)];
+                let mut tour = longueur(&r.aretes[k0]);
+                let mut ok = false;
+                let mut signe_ok = true;
+                for _ in 0..60 {
+                    let (k, av) = *chemin.last().unwrap();
+                    let a = &r.aretes[k];
+                    let n = if av { a.b } else { a.a };
+                    if n == depart {
+                        ok = true;
+                        break;
+                    }
+                    if tour > GIRATOIRE_TOUR {
+                        break;
+                    }
+                    let d_in = {
+                        let d = direction_depuis(a, !av);
+                        [-d[0], -d[1]]
+                    };
+                    let mut best: Option<(f32, usize, bool)> = None;
+                    for &(k2, av2) in &sortants[n] {
+                        if k2 == k {
+                            continue;
+                        }
+                        let d = direction_depuis(&r.aretes[k2], av2);
+                        let ang = (d_in[0] * d[1] - d_in[1] * d[0]).atan2(d_in[0] * d[0] + d_in[1] * d[1]);
+                        if ang.abs() > 170f32.to_radians() {
+                            continue;
+                        }
+                        let cle_ = if gauche { ang } else { -ang };
+                        if best.is_none_or(|b| cle_ > b.0) {
+                            best = Some((cle_, k2, av2));
+                        }
+                    }
+                    let Some((cle_, k2, av2)) = best else { break };
+                    // Un anneau tourne toujours du même côté (ou va tout droit)
+                    if cle_ < -5f32.to_radians() {
+                        signe_ok = false;
+                        break;
+                    }
+                    if chemin.iter().any(|c| c.0 == k2) {
+                        break;
+                    }
+                    tour += longueur(&r.aretes[k2]);
+                    chemin.push((k2, av2));
+                }
+                if !ok || !signe_ok || tour > GIRATOIRE_TOUR || chemin.len() < 2 {
+                    continue;
+                }
+                let mut cle_v: Vec<usize> = chemin.iter().map(|c| c.0).collect();
+                cle_v.sort_unstable();
+                if !vus.insert(cle_v) {
+                    continue;
+                }
+                // La forme : à peu près ronde
+                let pts: Vec<[f32; 3]> = chemin.iter().flat_map(|&(k, _)| r.aretes[k].points.iter().copied()).collect();
+                let n = pts.len() as f32;
+                let (cx, cz) = (pts.iter().map(|p| p[0]).sum::<f32>() / n, pts.iter().map(|p| p[1]).sum::<f32>() / n);
+                let rayons: Vec<f32> = pts.iter().map(|p| (p[0] - cx).hypot(p[1] - cz)).collect();
+                let moy = rayons.iter().sum::<f32>() / n;
+                let et = (rayons.iter().map(|x| (x - moy) * (x - moy)).sum::<f32>() / n).sqrt();
+                // … et compacte : 4πA/P² (1 pour un cercle, 0,79 pour un carré), pour ne
+                // pas prendre un pâté de maisons à sens unique pour un giratoire
+                let m_ = pts.len();
+                let aire = (0..m_).map(|x| { let (a, b) = (pts[x], pts[(x + 1) % m_]); a[0] * b[1] - b[0] * a[1] }).sum::<f32>().abs() * 0.5;
+                let perimetre: f32 = (0..m_).map(|x| { let (a, b) = (pts[x], pts[(x + 1) % m_]); (b[0] - a[0]).hypot(b[1] - a[1]) }).sum();
+                let compacite = 4.0 * std::f32::consts::PI * aire / (perimetre * perimetre).max(1e-6);
+                if moy < GIRATOIRE_RAYON_MIN || et > GIRATOIRE_ROND * moy || compacite < GIRATOIRE_COMPACITE {
+                    continue;
+                }
+                if chemin.iter().any(|c| fixe(c.0)) {
+                    continue;
+                }
+                for c in &chemin {
+                    dans_anneau[c.0] = true;
+                }
+                anneaux.push(chemin);
+                break;
+            }
+        }
+    }
+    let mut lisses = 0;
+    for chemin in &anneaux {
+        // Les points de l'anneau, sans les doublons des joints : (arête, indice)
+        let mut ou: Vec<(usize, usize)> = Vec::new();
+        for &(k, av) in chemin {
+            let m = r.aretes[k].points.len();
+            let idx: Vec<usize> = if av { (0..m).collect() } else { (0..m).rev().collect() };
+            for &i in &idx[..m - 1] {
+                ou.push((k, i));
+            }
+        }
+        let n = ou.len();
+        if n < 4 {
+            continue;
+        }
+        let p: Vec<[f32; 3]> = ou.iter().map(|&(k, i)| r.aretes[k].points[i]).collect();
+        // Les abscisses le long de la boucle, et le poids de chaque point
+        let seg: Vec<f32> = (0..n).map(|i| (p[(i + 1) % n][0] - p[i][0]).hypot(p[(i + 1) % n][1] - p[i][1])).collect();
+        let tour: f32 = seg.iter().sum();
+        let mut s = vec![0.0f32; n];
+        for i in 1..n {
+            s[i] = s[i - 1] + seg[i - 1];
+        }
+        let poids: Vec<f32> = (0..n).map(|i| 0.5 * (seg[i] + seg[(i + n - 1) % n]).max(1e-3)).collect();
+        // Le plan de l'anneau : ajusté sur ses points (pondérés par leur longueur), de
+        // pente au plus GIRATOIRE_PENTE
+        let (mut sw, mut sx, mut sz, mut sh) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for i in 0..n {
+            let w = poids[i] as f64;
+            sw += w;
+            sx += w * p[i][0] as f64;
+            sz += w * p[i][1] as f64;
+            sh += w * p[i][2] as f64;
+        }
+        let (cx, cz, ch) = ((sx / sw) as f32, (sz / sw) as f32, (sh / sw) as f32);
+        let (mut a11, mut a12, mut a22, mut b1, mut b2) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for i in 0..n {
+            let (dx, dz, dh, w) = ((p[i][0] - cx) as f64, (p[i][1] - cz) as f64, (p[i][2] - ch) as f64, poids[i] as f64);
+            a11 += w * dx * dx;
+            a12 += w * dx * dz;
+            a22 += w * dz * dz;
+            b1 += w * dx * dh;
+            b2 += w * dz * dh;
+        }
+        let det = a11 * a22 - a12 * a12;
+        let mut g = if det.abs() > 1e-6 { [((b1 * a22 - b2 * a12) / det) as f32, ((a11 * b2 - a12 * b1) / det) as f32] } else { [0.0, 0.0] };
+        let mg = g[0].hypot(g[1]);
+        if mg > GIRATOIRE_PENTE {
+            g = [g[0] * GIRATOIRE_PENTE / mg, g[1] * GIRATOIRE_PENTE / mg];
+        }
+        let mut h_ = ch;
+        let plan = |h_: f32, x: f32, z: f32| h_ + g[0] * (x - cx) + g[1] * (z - cz);
+        // Les planchers (un pont de l'anneau au-dessus de ce qu'il franchit : la hauteur
+        // requise par sa contrainte) et les plafonds (sous ce qui enjambe l'anneau), au
+        // point de croisement ; un nœud tenu par une voie fixe garde sa hauteur
+        let anneau_k: std::collections::HashSet<usize> = chemin.iter().map(|c| c.0).collect();
+        let mut planchers: Vec<([f32; 2], f32)> = Vec::new();
+        let mut plafonds: Vec<([f32; 2], f32)> = Vec::new();
+        for c in v {
+            let (k, sg, u) = c.haut;
+            if anneau_k.contains(&k) {
+                let q = entre(r.aretes[k].points[sg], r.aretes[k].points[sg + 1], u);
+                let hb = match c.bas {
+                    Some((kb, sb, ub)) => entre(r.aretes[kb].points[sb], r.aretes[kb].points[sb + 1], ub)[2],
+                    None => c.plancher,
+                };
+                planchers.push(([q[0], q[1]], hb + c.ecart));
+            }
+            if let Some((kb, sb, ub)) = c.bas {
+                if anneau_k.contains(&kb) {
+                    let q = entre(r.aretes[kb].points[sb], r.aretes[kb].points[sb + 1], ub);
+                    let hh = entre(r.aretes[k].points[sg], r.aretes[k].points[sg + 1], u)[2];
+                    plafonds.push(([q[0], q[1]], hh - c.ecart));
+                }
+            }
+        }
+        for (x, &(k, i)) in ou.iter().enumerate() {
+            let a = &r.aretes[k];
+            let m = a.points.len();
+            if i == 0 || i == m - 1 {
+                let nd = if i == 0 { a.a } else { a.b };
+                if r.noeuds[nd].aretes.iter().any(|&j| fixe(j)) {
+                    planchers.push(([p[x][0], p[x][1]], p[x][2]));
+                    plafonds.push(([p[x][0], p[x][1]], p[x][2]));
+                }
+            }
+        }
+        // Relevé au-dessus des planchers, puis abaissé sous les plafonds ; s'ils se
+        // contredisent, l'anneau garde son profil
+        let monte = planchers.iter().map(|(q, f)| f - plan(h_, q[0], q[1])).fold(f32::MIN, f32::max);
+        if monte > 0.0 {
+            h_ += monte;
+        }
+        let descend = plafonds.iter().map(|(q, f)| plan(h_, q[0], q[1]) - f).fold(f32::MIN, f32::max);
+        if descend > 0.0 {
+            h_ -= descend;
+        }
+        if planchers.iter().any(|(q, f)| plan(h_, q[0], q[1]) < f - 0.01) {
+            continue;
+        }
+        let h: Vec<f32> = p.iter().map(|q| plan(h_, q[0], q[1])).collect();
+        // Rendu à l'anneau, aux joints et aux nœuds ; les écarts aux nœuds, pour les
+        // voies qui arrivent
+        let mut ecarts: HashMap<usize, f32> = HashMap::new();
+        for (x, &(k, i)) in ou.iter().enumerate() {
+            r.aretes[k].points[i][2] = h[x];
+            let m = r.aretes[k].points.len();
+            if i == 0 || i == m - 1 {
+                let nd = if i == 0 { r.aretes[k].a } else { r.aretes[k].b };
+                ecarts.insert(nd, h[x] - r.noeuds[nd].p[2]);
+                r.noeuds[nd].p[2] = h[x];
+            }
+        }
+        // Les joints : le bout d'arrivée de chaque arête prend la hauteur de son nœud
+        for &(k, _) in chemin {
+            let (a, b) = (r.aretes[k].a, r.aretes[k].b);
+            let m = r.aretes[k].points.len();
+            r.aretes[k].points[0][2] = r.noeuds[a].p[2];
+            r.aretes[k].points[m - 1][2] = r.noeuds[b].p[2];
+        }
+        // Les voies qui arrivent : l'écart s'éteint sur GIRATOIRE_RACCORD
+        let anneau: std::collections::HashSet<usize> = chemin.iter().map(|c| c.0).collect();
+        let mut touchees: Vec<usize> = ecarts.keys().flat_map(|&nd| r.noeuds[nd].aretes.clone()).filter(|k| !anneau.contains(k)).collect();
+        touchees.sort_unstable();
+        touchees.dedup();
+        for k in touchees {
+            if fixe(k) {
+                continue;
+            }
+            let (a, b) = (r.aretes[k].a, r.aretes[k].b);
+            let (da, db) = (ecarts.get(&a).copied().unwrap_or(0.0), ecarts.get(&b).copied().unwrap_or(0.0));
+            let q = r.aretes[k].points.clone();
+            let m = q.len();
+            let mut abs = vec![0.0f32; m];
+            for x in 1..m {
+                abs[x] = abs[x - 1] + (q[x][0] - q[x - 1][0]).hypot(q[x][1] - q[x - 1][1]);
+            }
+            let l = abs[m - 1];
+            let portee = GIRATOIRE_RACCORD.min(l).max(1e-3);
+            for x in 0..m {
+                let fa = (1.0 - abs[x] / portee).max(0.0);
+                let fb = (1.0 - (l - abs[x]) / portee).max(0.0);
+                r.aretes[k].points[x][2] += da * fa + db * fb;
+            }
+        }
+        lisses += 1;
+    }
+    lisses
 }
 
 /// Aux bouts d'impasse, la longueur (en partant du cul-de-sac) où une pente excessive est
