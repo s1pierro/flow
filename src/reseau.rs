@@ -773,8 +773,88 @@ pub const EPAISSEUR: f32 = 1.0;
 /// et un tunnel routier ne tenait nulle part).
 pub const GABARIT_PIETON: f32 = 2.5;
 pub const EPAISSEUR_PIETON: f32 = 0.5;
-/// Le tirant d'air d'un pont sur l'eau (m), sous son tablier.
+/// Le tirant d'air d'un pont sur l'eau (m), sous son tablier : celui d'une rivière
+/// large ; les cours d'eau étroits en ont moins (`degagement_eau`).
 pub const TIRANT_D_AIR: f32 = 4.0;
+/// Au-delà de cette largeur (m), un cours d'eau est large : `TIRANT_D_AIR`.
+pub const EAU_LARGE: f32 = 20.0;
+/// En deçà de cette largeur (m), un cours d'eau est étroit (le Robec, un ruisseau) :
+/// on le franchit presque à niveau.
+pub const EAU_ETROITE: f32 = 8.0;
+/// Le long du cours d'eau, la distance (m) jusqu'où chercher sa surface autour du
+/// croisement pour en mesurer la largeur (la surface s'arrête souvent sous le pont).
+const EAU_RECHERCHE: f32 = 25.0;
+
+/// La largeur d'un cours d'eau au croisement `p`, `d` sa direction (unitaire) : la
+/// corde de sa surface d'eau (rivière ou canal) perpendiculaire à lui, mesurée là où
+/// elle le couvre à moins de `EAU_RECHERCHE` du croisement (la médiane) ; rien s'il
+/// n'a pas de surface dessinée.
+fn largeur_surface(l: &Lieu, p: [f32; 2], d: [f32; 2]) -> Option<f32> {
+    use sage_reel::cours_eau::SURFACE_PLAN;
+    let n = [-d[1], d[0]];
+    let mut v = Vec::new();
+    for t in [0.0f32, -5.0, 5.0, -10.0, 10.0, -15.0, 15.0, -20.0, 20.0, -EAU_RECHERCHE, EAU_RECHERCHE] {
+        let q = [p[0] + d[0] * t, p[1] + d[1] * t];
+        for s in l.surfaces_eau.iter().filter(|s| s.nature != SURFACE_PLAN) {
+            if s.anneaux.iter().filter(|r| dans_polygone(r, q)).count() % 2 == 0 {
+                continue;
+            }
+            // Les berges de part et d'autre, sur la perpendiculaire
+            let (mut plus, mut moins) = (f32::MAX, f32::MAX);
+            for r in &s.anneaux {
+                for i in 0..r.len() {
+                    let (a, b) = (r[i], r[(i + 1) % r.len()]);
+                    let e = [b[0] - a[0], b[1] - a[1]];
+                    let den = n[0] * e[1] - n[1] * e[0];
+                    if den.abs() < 1e-6 {
+                        continue;
+                    }
+                    let w = [a[0] - q[0], a[1] - q[1]];
+                    let k = (w[0] * e[1] - w[1] * e[0]) / den;
+                    let u = (w[0] * n[1] - w[1] * n[0]) / den;
+                    if !(0.0..=1.0).contains(&u) {
+                        continue;
+                    }
+                    if k >= 0.0 { plus = plus.min(k) } else { moins = moins.min(-k) }
+                }
+            }
+            if plus < f32::MAX && moins < f32::MAX {
+                v.push(plus + moins);
+            }
+            break;
+        }
+    }
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    Some(v[v.len() / 2])
+}
+
+/// Le tirant d'air et l'épaisseur du tablier (m) d'un pont sur un cours d'eau, selon
+/// sa largeur : celle d'OSM, sinon celle de sa surface d'eau, sinon d'après son genre
+/// (une rivière perchée, hors de la surface d'eau du lieu, compte pour étroite).
+fn degagement_eau(l: &Lieu, ce: &sage_reel::cours_eau::CoursEau, p: [f32; 2], d: [f32; 2]) -> (f32, f32) {
+    use sage_reel::cours_eau::{CANAL, RIVIERE};
+    let largeur = if ce.largeur > 0.0 { Some(ce.largeur) } else { largeur_surface(l, p, d) };
+    // Perché : hors de la surface d'eau du lieu (la Seine et ce qui est à son niveau,
+    // seule gardée par sage-reel). Une rivière perchée sans largeur connue est une
+    // petite rivière urbaine (le Robec, l'Aubette), franchie presque à niveau
+    let perche = l.eau(p[0] as f64, p[1] as f64) < 0.5;
+    let large = match largeur {
+        Some(w) if w > EAU_LARGE => 2,
+        Some(w) if w >= EAU_ETROITE => 1,
+        Some(_) => 0,
+        None if ce.genre == RIVIERE && !perche => 2,
+        None if ce.genre == CANAL => 1,
+        None => 0,
+    };
+    match large {
+        2 => (TIRANT_D_AIR, EPAISSEUR),
+        1 => (2.5, EPAISSEUR),
+        _ => (1.0, 0.5),
+    }
+}
 
 /// Un point d'une arête : (arête, segment, avancée sur le segment de 0 à 1).
 pub type Ou = (usize, usize, f32);
@@ -2459,7 +2539,10 @@ pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
                         }
                         let Some((u, _)) = croise(a.points[s], a.points[s + 1], c3, d3) else { continue };
                         let p = entre(a.points[s], a.points[s + 1], u);
-                        v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, s, u), bas: None, plancher: niveau_eau(p[0], p[1]), ecart: TIRANT_D_AIR + EPAISSEUR, implicite: a.passage == Passage::Sol, gabarit: None });
+                        let (dx, dz) = (d3[0] - c3[0], d3[1] - c3[1]);
+                        let n = (dx * dx + dz * dz).sqrt().max(1e-6);
+                        let (tirant, tablier) = degagement_eau(l, ce, [p[0], p[1]], [dx / n, dz / n]);
+                        v.push(Contrainte { genre: Genre::PontSurEau, haut: (k, s, u), bas: None, plancher: niveau_eau(p[0], p[1]), ecart: tirant + tablier, implicite: a.passage == Passage::Sol, gabarit: None });
                     }
                 }
             }
