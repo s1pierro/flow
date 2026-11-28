@@ -380,6 +380,11 @@ impl Donnees {
                 t.detail(format!("{n} rampes normalisées (doucines)"));
             }
             {
+                let mut t = crate::suivi::tache("sorties de souterrain");
+                let n = rs::raccorder_portails(&mut r, &c, &fixes);
+                t.detail(format!("{n} portails raccordés"));
+            }
+            {
                 let mut t = crate::suivi::tache("bouts d'impasse");
                 let n = rs::redresser_impasses(&mut r, &c, &fixes);
                 t.detail(format!("{n} bouts d'impasse repris en pente"));

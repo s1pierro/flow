@@ -3151,6 +3151,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     retirer_rails(&mut r, &mut fixes);
     lisser_giratoires(&mut r, &c, &fixes);
     normaliser_rampes(&mut r, &c, &fixes);
+    raccorder_portails(&mut r, &c, &fixes);
     redresser_impasses(&mut r, &c, &fixes);
     r
 }
@@ -3607,6 +3608,178 @@ pub fn normaliser_rampes(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> us
         n += 1;
     }
     n
+}
+
+/// Le raccord en sortie de souterrain : au portail (un nœud entre un souterrain et une
+/// voie au sol), la fenêtre remonte dans le souterrain jusqu'à tant (m)…
+pub const PORTAIL_SOUTERRAIN: f32 = 30.0;
+/// … et avance sur la voie au sol jusqu'à tant (m).
+pub const PORTAIL_SOL: f32 = 20.0;
+/// Le changement de pente au portail au-delà duquel on le reprend (celui du diagnostic).
+pub const PORTAIL_SEUIL: f32 = 0.08;
+/// Au plus cet écart (m) entre le nouveau profil et l'actuel.
+pub const PORTAIL_ECART: f32 = 1.5;
+
+/// Les points d'une voie en partant du nœud `n` : (arête, indice du point), dans l'ordre.
+fn depuis_noeud(r: &Reseau, k: usize, n: usize) -> Vec<(usize, usize)> {
+    let m = r.aretes[k].points.len();
+    if r.aretes[k].a == n { (0..m).map(|i| (k, i)).collect() } else { (0..m).rev().map(|i| (k, i)).collect() }
+}
+
+/// La ficelle tendue de `a` à `b` (abscisse, hauteur) sous les plafonds (abscisse,
+/// hauteur au plus) : ses points d'appui, dans l'ordre.
+fn ficelle(a: (f32, f32), b: (f32, f32), plafonds: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut pire: Option<(f32, f32)> = None;
+    let mut ecart = 1e-3;
+    for &(d, h) in plafonds {
+        if d <= a.0 + 0.01 || d >= b.0 - 0.01 {
+            continue;
+        }
+        let y = a.1 + (b.1 - a.1) * (d - a.0) / (b.0 - a.0);
+        if y - h > ecart {
+            ecart = y - h;
+            pire = Some((d, h));
+        }
+    }
+    match pire {
+        None => vec![a, b],
+        Some(p) => {
+            let mut g = ficelle(a, p, plafonds);
+            g.pop();
+            g.extend(ficelle(p, b, plafonds));
+            g
+        }
+    }
+}
+
+/// Le raccord en sortie de souterrain : à un portail (nœud de deux voies, un souterrain
+/// et une voie au sol, ni rail ni fixes) où la pente change de plus de `PORTAIL_SEUIL`,
+/// le profil devient une ficelle tendue entre un point du souterrain à `PORTAIL_SOUTERRAIN`
+/// et un point de la voie à `PORTAIL_SOL` (moins à un carrefour), appuyée sous les
+/// plafonds des voies qui passent au-dessus. Rien si un plancher n'est plus tenu ou si
+/// le profil s'écarte de plus de `PORTAIL_ECART` de l'actuel. Rend le nombre de portails.
+pub fn raccorder_portails(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize {
+    let na = r.aretes.len();
+    let libre = |r: &Reseau, k: usize| k < na && r.aretes[k].genre != RAIL && !fixes.get(k).copied().unwrap_or(false);
+    let mut n_portails = 0;
+    for n in 0..r.noeuds.len() {
+        let ar = r.noeuds[n].aretes.clone();
+        if ar.len() != 2 || ar[0] == ar[1] || !ar.iter().all(|&k| libre(r, k)) {
+            continue;
+        }
+        let (kt, ks) = match (r.aretes[ar[0]].passage, r.aretes[ar[1]].passage) {
+            (Passage::Tunnel, Passage::Sol) => (ar[0], ar[1]),
+            (Passage::Sol, Passage::Tunnel) => (ar[1], ar[0]),
+            _ => continue,
+        };
+        // Les deux côtés, du portail vers le loin : (arête, point, abscisse > 0)
+        let cote = |r: &Reseau, k0: usize, limite: f32| -> Vec<(usize, usize, f32)> {
+            let passage = r.aretes[k0].passage;
+            let (mut k, mut depart) = (k0, n);
+            let mut d = 0.0f32;
+            let mut v: Vec<(usize, usize, f32)> = Vec::new();
+            let mut vues = vec![k0];
+            loop {
+                let pts = depuis_noeud(r, k, depart);
+                let mut prec = r.aretes[k].points[pts[0].1];
+                for (j, &(kk, i)) in pts.iter().enumerate() {
+                    let p = r.aretes[kk].points[i];
+                    d += (p[0] - prec[0]).hypot(p[1] - prec[1]);
+                    prec = p;
+                    v.push((kk, i, d));
+                    if j > 0 && d >= limite {
+                        return v;
+                    }
+                }
+                let a = &r.aretes[k];
+                let fin = if a.a == depart { a.b } else { a.a };
+                let suite = &r.noeuds[fin].aretes;
+                if suite.len() != 2 {
+                    return v;
+                }
+                let Some(&k2) = suite.iter().find(|&&x| x != k) else { return v };
+                if vues.contains(&k2) || !libre(r, k2) || r.aretes[k2].passage != passage {
+                    return v;
+                }
+                vues.push(k2);
+                k = k2;
+                depart = fin;
+            }
+        };
+        let tun = cote(r, kt, PORTAIL_SOUTERRAIN);
+        let sol = cote(r, ks, PORTAIL_SOL);
+        // Le chemin, du loin dans le souterrain au loin sur la voie : abscisse de -T à +S
+        let mut ch: Vec<(usize, usize, f32)> = tun.iter().rev().map(|&(k, i, d)| (k, i, -d)).collect();
+        ch.extend(sol.iter().copied());
+        let h = |r: &Reseau, &(k, i, _): &(usize, usize, f32)| r.aretes[k].points[i][2];
+        // Le changement de pente au portail (premiers segments de plus de 0,5 m)
+        let pente = |r: &Reseau, c: &[(usize, usize, f32)]| -> Option<f32> {
+            let x = c.iter().skip(1).find(|x| x.2 > 0.5)?;
+            Some((h(r, x) - h(r, &c[0])) / x.2)
+        };
+        let (Some(pt), Some(ps)) = (pente(r, &tun), pente(r, &sol)) else { continue };
+        // Pentes dans le sens du chemin : -pt en entrant au portail, ps en sortant
+        if (ps + pt).abs() <= PORTAIL_SEUIL {
+            continue;
+        }
+        // Les bornes : plafonds (le chemin passe dessous), planchers (dessus)
+        let abscisse = |k: usize, s: usize, u: f32| -> Option<f32> {
+            let d0 = ch.iter().find(|x| x.0 == k && x.1 == s)?.2;
+            let d1 = ch.iter().find(|x| x.0 == k && x.1 == s + 1)?.2;
+            Some(d0 + (d1 - d0) * u)
+        };
+        let (mut plafonds, mut planchers) = (Vec::new(), Vec::new());
+        for c in v {
+            if c.haut.0 >= na || c.bas.is_some_and(|b| b.0 >= na) {
+                continue;
+            }
+            if let Some(b) = c.bas {
+                if let Some(d) = abscisse(b.0, b.1, b.2) {
+                    plafonds.push((d, r.hauteur(c.haut) - c.ecart));
+                }
+            }
+            if let Some(d) = abscisse(c.haut.0, c.haut.1, c.haut.2) {
+                let dessous = match c.bas {
+                    Some(b) => r.hauteur(b),
+                    None => c.plancher,
+                };
+                planchers.push((d, dessous + c.ecart));
+            }
+        }
+        let (a, b) = (ch[0], ch[ch.len() - 1]);
+        let (ya, yb) = (h(r, &a), h(r, &b));
+        if plafonds.iter().any(|&(d, m)| (d - a.2).abs() < 0.01 && ya > m + 0.01 || (d - b.2).abs() < 0.01 && yb > m + 0.01) {
+            continue;
+        }
+        let appuis = ficelle((a.2, ya), (b.2, yb), &plafonds);
+        let profil = |d: f32| -> f32 {
+            for w in appuis.windows(2) {
+                if d <= w[1].0 {
+                    let t = if w[1].0 - w[0].0 > 1e-4 { (d - w[0].0) / (w[1].0 - w[0].0) } else { 0.0 };
+                    return w[0].1 + (w[1].1 - w[0].1) * t;
+                }
+            }
+            appuis[appuis.len() - 1].1
+        };
+        if planchers.iter().any(|&(d, m)| profil(d) < m - 0.01) {
+            continue;
+        }
+        if ch.iter().any(|x| (profil(x.2) - h(r, x)).abs() > PORTAIL_ECART) {
+            continue;
+        }
+        for &(k, i, d) in &ch {
+            let y = profil(d);
+            r.aretes[k].points[i][2] = y;
+            let a = &r.aretes[k];
+            let m = a.points.len();
+            let nd = if i == 0 { Some(a.a) } else if i == m - 1 { Some(a.b) } else { None };
+            if let Some(nd) = nd {
+                r.noeuds[nd].p[2] = y;
+            }
+        }
+        n_portails += 1;
+    }
+    n_portails
 }
 
 /// Un giratoire : au plus ce tour (m).
