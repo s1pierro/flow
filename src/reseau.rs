@@ -826,6 +826,9 @@ const ENTREE_SANS_PLAFOND: f32 = 10.0;
 /// La hauteur commune de deux jumelles s'impose entièrement à tant (m) du bord de leur
 /// zone jumelée, progressivement avant.
 const JUMELLE_RACCORD: f32 = 25.0;
+/// Aux fourches de voies rapides (sorties, insertions), la longueur sur laquelle chaque
+/// chaîne rejoint la hauteur commune du nœud.
+pub const FOURCHE_RACCORD: f32 = 80.0;
 
 /// Le bilan du lissage des voies rapides.
 #[derive(Default, Debug)]
@@ -836,6 +839,8 @@ pub struct Rapides {
     pub planchers: usize,
     /// Les paires de chaînes jumelles (deux chaussées d'une même voie), lissées ensemble.
     pub jumelles: usize,
+    /// Les fourches (nœuds où se rencontrent trois bouts de chaîne ou plus) raccordées.
+    pub fourches: usize,
 }
 
 /// Les voies rapides (classe `CLASSE_RAPIDE`, au sol ou en pont) posées avant toutes les
@@ -1356,6 +1361,92 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
                 let (ha, hb) = (a.points[0][2], a.points[a.points.len() - 1][2]);
                 r.noeuds[na_].p[2] = ha;
                 r.noeuds[nb_].p[2] = hb;
+            }
+        }
+    }
+    // Les fourches : chaque chaîne y est lissée de son côté ; la hauteur commune du nœud
+    // (moyenne des bouts, pondérée par la largeur) est rejointe par chacune sur
+    // FOURCHE_RACCORD, l'écart s'éteignant linéairement, sans repasser sous un plancher
+    // ni au-dessus d'un plafond
+    let mut corr: HashMap<usize, Vec<f32>> = HashMap::new();
+    let mut communes: Vec<(usize, f32)> = Vec::new();
+    for n in 0..nn {
+        if bouts[n].len() < 3 {
+            continue;
+        }
+        let mut fins: Vec<(usize, bool, f32)> = Vec::new();
+        for &k in &bouts[n] {
+            let c = chaine_de[k];
+            if c == usize::MAX || etats[c].h.is_empty() {
+                continue;
+            }
+            let ch = &chaines[c];
+            let (k0, e0) = ch[0];
+            let (k1, e1) = ch[ch.len() - 1];
+            let n0 = if e0 { r.aretes[k0].a } else { r.aretes[k0].b };
+            let n1 = if e1 { r.aretes[k1].b } else { r.aretes[k1].a };
+            let l = r.aretes[k].largeur.max(1.0);
+            if k0 == k && n0 == n && !fins.iter().any(|f| f.0 == c && f.1) {
+                fins.push((c, true, l));
+            }
+            if k1 == k && n1 == n && !fins.iter().any(|f| f.0 == c && !f.1) {
+                fins.push((c, false, l));
+            }
+        }
+        if fins.len() < 2 {
+            continue;
+        }
+        let bout = |c: usize, debut: bool| if debut { etats[c].h[0] } else { etats[c].h[etats[c].h.len() - 1] };
+        let poids: f32 = fins.iter().map(|f| f.2).sum();
+        let h = fins.iter().map(|f| bout(f.0, f.1) * f.2).sum::<f32>() / poids;
+        for &(c, debut, _) in &fins {
+            let e = &etats[c];
+            let m = e.pts.len();
+            let delta = h - bout(c, debut);
+            let long = e.pts[m - 1].3 - e.pts[0].3;
+            let d_max = FOURCHE_RACCORD.min(long).max(1e-3);
+            let v = corr.entry(c).or_insert_with(|| vec![0.0; m]);
+            for i in 0..m {
+                let d = if debut { e.pts[i].3 - e.pts[0].3 } else { e.pts[m - 1].3 - e.pts[i].3 };
+                if d < d_max {
+                    v[i] += delta * (1.0 - d / d_max);
+                }
+            }
+        }
+        communes.push((n, h));
+        bilan.fourches += 1;
+    }
+    for (&c, v) in &corr {
+        let e = &mut etats[c];
+        for i in 0..e.pts.len() {
+            let si = e.pts[i].3;
+            let plateau = e.pl.iter().filter(|p| (si - p.0).abs() <= p.2).map(|p| p.1).fold(f32::MIN, f32::max);
+            let plafond = e.strict.get(i).copied().unwrap_or(f32::MAX);
+            e.h[i] = (e.h[i] + v[i]).min(plafond).max(plateau);
+        }
+        for (x, p) in e.pts.iter().enumerate() {
+            r.aretes[p.0].points[p.1][2] = e.h[x];
+        }
+        for &(k, i, x) in &e.joints {
+            r.aretes[k].points[i][2] = e.h[x];
+        }
+        for &(k, _) in &chaines[c] {
+            let a = &r.aretes[k];
+            let (na_, nb_) = (a.a, a.b);
+            let (ha, hb) = (a.points[0][2], a.points[a.points.len() - 1][2]);
+            r.noeuds[na_].p[2] = ha;
+            r.noeuds[nb_].p[2] = hb;
+        }
+    }
+    for &(n, h) in &communes {
+        r.noeuds[n].p[2] = h;
+        for &k in &bouts[n] {
+            let m = r.aretes[k].points.len();
+            if r.aretes[k].a == n {
+                r.aretes[k].points[0][2] = h;
+            }
+            if r.aretes[k].b == n {
+                r.aretes[k].points[m - 1][2] = h;
             }
         }
     }

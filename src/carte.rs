@@ -315,7 +315,7 @@ impl Donnees {
             let rapides = {
                 let mut t = crate::suivi::tache("voies rapides");
                 let x = rs::lisser_rapides(&mut r, &self.lieu);
-                t.detail(format!("{} chaînes de voies rapides, {} paires jumelles, {} planchers", x.chaines, x.jumelles, x.planchers));
+                t.detail(format!("{} chaînes de voies rapides, {} paires jumelles, {} planchers, {} fourches raccordées", x.chaines, x.jumelles, x.planchers, x.fourches));
                 x
             };
             r.fixes = (0..r.aretes.len() as u32).filter(|&k| rapides.fixes[k as usize]).collect();
