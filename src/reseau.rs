@@ -2942,6 +2942,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     niveler_fixe(&mut r, &c, 50, &fixes);
     redresser_courtes(&mut r, &c, &fixes);
     retirer_rails(&mut r, &mut fixes);
+    redresser_impasses(&mut r, &c, &fixes);
     r
 }
 
@@ -3218,6 +3219,91 @@ pub fn redresser_courtes(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> us
             a.points[i][2] = h0 + (h1 - h0) * abs[i] / l;
         }
         n += 1;
+    }
+    n
+}
+
+/// Aux bouts d'impasse, la longueur (en partant du cul-de-sac) où une pente excessive est
+/// reprise.
+pub const IMPASSE_BOUT: f32 = 10.0;
+/// La rupture de pente (en fraction, 0,08 = 8 points) au-delà de laquelle un bout
+/// d'impasse est repris : le seuil du diagnostic des dénivelés.
+pub const IMPASSE_RUPTURE: f32 = 0.08;
+
+/// Les bouts d'impasse (nœud de degré 1) : leur relief est souvent pris au-delà d'un
+/// mur de quai, d'un talus ou d'une falaise. Sur les `IMPASSE_BOUT` derniers mètres d'une
+/// voie au sol (ni fixe, ni tenue par une contrainte), un segment plus raide que la pente
+/// maximale de la voie et en rupture de plus de `IMPASSE_RUPTURE` avec le précédent est
+/// ramené dans son prolongement. Rend le nombre de bouts repris.
+pub fn redresser_impasses(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize {
+    let mut tenues = std::collections::HashSet::new();
+    for c in v {
+        tenues.insert(c.haut.0);
+        if let Some(b) = c.bas {
+            tenues.insert(b.0);
+        }
+    }
+    let mut degre = vec![0usize; r.noeuds.len()];
+    for a in &r.aretes {
+        if a.a != a.b {
+            degre[a.a] += 1;
+            degre[a.b] += 1;
+        }
+    }
+    let mut n = 0;
+    for k in 0..r.aretes.len() {
+        let a = &r.aretes[k];
+        if a.passage != Passage::Sol || a.genre == RAIL || a.a == a.b || a.points.len() < 2 || fixes.get(k).copied().unwrap_or(false) || tenues.contains(&k) {
+            continue;
+        }
+        let pmax = pente_max(a.genre);
+        for (bout, inverse) in [(a.b, false), (a.a, true)] {
+            if degre[bout] != 1 {
+                continue;
+            }
+            let a = &mut r.aretes[k];
+            let m = a.points.len();
+            // Les indices du point intérieur vers le cul-de-sac
+            let idx: Vec<usize> = if inverse { (0..m).rev().collect() } else { (0..m).collect() };
+            let d = |p: [f32; 3], q: [f32; 3]| (q[0] - p[0]).hypot(q[1] - p[1]);
+            // Le début de la zone reprise : à IMPASSE_BOUT du cul-de-sac
+            let mut reste = 0.0f32;
+            let mut debut = m - 1;
+            while debut > 0 && reste < IMPASSE_BOUT {
+                reste += d(a.points[idx[debut - 1]], a.points[idx[debut]]);
+                debut -= 1;
+            }
+            let mut change = false;
+            for x in debut.max(1)..m {
+                let (p, q) = (a.points[idx[x - 1]], a.points[idx[x]]);
+                let l = d(p, q);
+                if l < 1e-3 {
+                    continue;
+                }
+                let s = (q[2] - p[2]) / l;
+                if x < 2 {
+                    continue;
+                }
+                let o = a.points[idx[x - 2]];
+                let lo = d(o, p);
+                if lo < 1e-3 {
+                    continue;
+                }
+                let prec = (p[2] - o[2]) / lo;
+                // Une impasse raide mais régulière garde sa pente : seul un bout plus raide
+                // que la voie ne le permet et en rupture avec ce qui précède est repris
+                if s.abs() <= pmax || (s - prec).abs() <= IMPASSE_RUPTURE {
+                    continue;
+                }
+                a.points[idx[x]][2] = p[2] + prec * l;
+                change = true;
+            }
+            if change {
+                let h = a.points[idx[m - 1]][2];
+                r.noeuds[bout].p[2] = h;
+                n += 1;
+            }
+        }
     }
     n
 }

@@ -361,6 +361,12 @@ impl Donnees {
                 t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes, {} rues d'anneaux", b.plaques, b.groupes, b.branches, b.greffes, b.anneaux));
                 b
             };
+            // Après les plaques, qui reprofilent les voies de leurs carrefours
+            {
+                let mut t = crate::suivi::tache("bouts d'impasse");
+                let n = rs::redresser_impasses(&mut r, &c, &fixes);
+                t.detail(format!("{n} bouts d'impasse repris en pente"));
+            }
             t.detail(format!("{} nœuds, {} arêtes, souterrains : {} remis au sol, {} enfoncés, {} en tranchée, {} plaques", r.noeuds.len(), r.aretes.len(), so.courts, so.enfonces, so.tranchees, pl.plaques));
             {
                 let _t = crate::suivi::tache("réseau nivelé (mise en cache)");
