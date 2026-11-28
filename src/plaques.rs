@@ -18,6 +18,12 @@ use std::collections::HashMap;
 /// Un tronçon de moins de tant (m) entre deux nœuds de carrefour les met dans la même
 /// plaque.
 const LIEN: f32 = 12.0;
+/// Les anneaux (les petits giratoires) : une boucle de rues entre nœuds de carrefour,
+/// chacune d'au plus `ANNEAU_RUE` mètres (à travers les nœuds de deux bouts), de
+/// périmètre au plus `ANNEAU_PERIMETRE`, met tous ses carrefours dans la même plaque, et
+/// ses rues entières sur le plan.
+const ANNEAU_RUE: f32 = 30.0;
+const ANNEAU_PERIMETRE: f32 = 60.0;
 /// La bouche d'une branche : à `BOUCHE_MIN` mètres du nœud au moins, `BOUCHE_MAX` au
 /// plus, `BOUCHE_MARGE` au-delà de la bordure ; la direction d'une branche est prise à
 /// `DIRECTION` mètres.
@@ -77,6 +83,8 @@ pub struct Bilan {
     pub groupes: usize,
     pub branches: usize,
     pub greffes: usize,
+    /// Les rues des anneaux (petits giratoires) posées entières sur leur plaque.
+    pub anneaux: usize,
 }
 
 fn carrossable(r: &Reseau, k: usize) -> bool {
@@ -165,6 +173,82 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
             let (x, y) = (racine(&mut parent, a.a), racine(&mut parent, a.b));
             if x != y {
                 parent[x] = y;
+            }
+        }
+    }
+    // Les anneaux : les rues courtes entre carrefours, puis pour chacune le plus court
+    // retour par les autres ; une boucle assez courte réunit ses carrefours
+    let mut anneau: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    {
+        let degre0: Vec<usize> = (0..nn).map(bouts).collect();
+        let na = r.aretes.len();
+        let mut vue_r = vec![false; na];
+        // (début, fin, longueur, voies)
+        let mut rues: Vec<(usize, usize, f32, Vec<usize>)> = Vec::new();
+        for n0 in (0..nn).filter(|&n| carrefour[n]) {
+            for &k0 in &r.noeuds[n0].aretes {
+                if !compte(r, n0, k0) || vue_r[k0] {
+                    continue;
+                }
+                let (mut cur, mut k, mut total, mut voies) = (n0, k0, 0.0f32, Vec::new());
+                loop {
+                    vue_r[k] = true;
+                    voies.push(k);
+                    let a = &r.aretes[k];
+                    total += longueur(&a.points);
+                    cur = if a.a == cur { a.b } else { a.a };
+                    if a.a == a.b || carrefour[cur] || degre0[cur] != 2 || total > ANNEAU_RUE {
+                        break;
+                    }
+                    let Some(&k2) = r.noeuds[cur].aretes.iter().find(|&&j| j != k && compte(r, cur, j)) else { break };
+                    if vue_r[k2] {
+                        break;
+                    }
+                    k = k2;
+                }
+                if carrefour[cur] && cur != n0 && total <= ANNEAU_RUE {
+                    rues.push((n0, cur, total, voies));
+                }
+            }
+        }
+        let mut voisins: HashMap<usize, Vec<(usize, f32, usize)>> = HashMap::new();
+        for (i, x) in rues.iter().enumerate() {
+            voisins.entry(x.0).or_default().push((x.1, x.2, i));
+            voisins.entry(x.1).or_default().push((x.0, x.2, i));
+        }
+        for (i, (u, v, l, voies)) in rues.iter().enumerate() {
+            // Le plus court chemin de v à u sans cette rue (Dijkstra borné)
+            let borne = ANNEAU_PERIMETRE - l;
+            let mut dist: HashMap<usize, f32> = HashMap::new();
+            let mut tas = std::collections::BinaryHeap::new();
+            dist.insert(*v, 0.0);
+            tas.push(std::cmp::Reverse(((0.0f32 * 1000.0) as i64, *v)));
+            let mut trouve = false;
+            while let Some(std::cmp::Reverse((d, n))) = tas.pop() {
+                let d = d as f32 / 1000.0;
+                if n == *u {
+                    trouve = true;
+                    break;
+                }
+                if d > dist.get(&n).copied().unwrap_or(f32::MAX) + 1e-3 {
+                    continue;
+                }
+                for &(m, lm, j) in voisins.get(&n).map_or(&[][..], |x| &x[..]) {
+                    let dm = d + lm;
+                    if j == i || dm > borne || dm >= dist.get(&m).copied().unwrap_or(f32::MAX) {
+                        continue;
+                    }
+                    dist.insert(m, dm);
+                    tas.push(std::cmp::Reverse(((dm * 1000.0) as i64, m)));
+                }
+            }
+            if trouve {
+                let (x, y) = (racine(&mut parent, *u), racine(&mut parent, *v));
+                if x != y {
+                    parent[x] = y;
+                }
+                anneau.extend(voies.iter().copied());
+                bilan.anneaux += 1;
             }
         }
     }
@@ -468,7 +552,7 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
         let pa = groupe_de[n0].and_then(|g| plans.get(&g).map(|p| (g, *p)));
         let pb = groupe_de[cur].and_then(|g| plans.get(&g).map(|p| (g, *p)));
         // Le tronçon intérieur court d'une plaque : sur le plan
-        let interieur = matches!((pa, pb), (Some((ga, _)), Some((gb, _))) if ga == gb && total < LIEN);
+        let interieur = matches!((pa, pb), (Some((ga, _)), Some((gb, _))) if ga == gb && (total < LIEN || anneau.contains(&k0)));
         let pts: Vec<[f32; 4]> = if interieur {
             let p = pa.unwrap().1;
             densifier(&q, &abs, &[(0.0, total)]).into_iter().map(|x| [x[0], x[1], p.h(x[0], x[1]), x[3]]).collect()

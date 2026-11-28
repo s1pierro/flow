@@ -2849,6 +2849,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     let c = contraintes(&r, l);
     let mut fixes = rapides.fixes;
     niveler_fixe(&mut r, &c, 50, &fixes);
+    redresser_courtes(&mut r, &c, &fixes);
     retirer_rails(&mut r, &mut fixes);
     r
 }
@@ -3086,4 +3087,46 @@ fn combler_creux_passe(r: &mut Reseau, ok: &[bool], bouts: &[Vec<usize>], dir: &
         }
     }
     creux
+}
+
+/// Les voies au sol carrossables plus courtes que `COURTE` mètres (les morceaux d'un
+/// giratoire, d'un carrefour) passent, une fois nivelées, en ligne droite entre leurs
+/// nœuds : leurs points intérieurs, tenus près du relief, ne zigzaguent plus entre des
+/// nœuds que le nivellement a déplacés. Sauf les voies fixes et celles que tient une
+/// contrainte (un croisement, l'eau). Rend leur nombre.
+pub const COURTE: f32 = 12.0;
+
+pub fn redresser_courtes(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize {
+    let mut tenues = std::collections::HashSet::new();
+    for c in v {
+        tenues.insert(c.haut.0);
+        if let Some(b) = c.bas {
+            tenues.insert(b.0);
+        }
+    }
+    let mut n = 0;
+    for k in 0..r.aretes.len() {
+        let a = &r.aretes[k];
+        if a.passage != Passage::Sol || !sage_reel::carrossable(a.genre) || a.genre == RAIL || a.points.len() < 3 || fixes.get(k).copied().unwrap_or(false) || tenues.contains(&k) {
+            continue;
+        }
+        let abs: Vec<f32> = std::iter::once(0.0)
+            .chain(a.points.windows(2).scan(0.0f32, |s, w| {
+                *s += (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+                Some(*s)
+            }))
+            .collect();
+        let l = *abs.last().unwrap();
+        if l >= COURTE || l < 1e-3 {
+            continue;
+        }
+        let m = a.points.len();
+        let (h0, h1) = (a.points[0][2], a.points[m - 1][2]);
+        let a = &mut r.aretes[k];
+        for i in 1..m - 1 {
+            a.points[i][2] = h0 + (h1 - h0) * abs[i] / l;
+        }
+        n += 1;
+    }
+    n
 }

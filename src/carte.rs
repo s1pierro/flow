@@ -346,6 +346,11 @@ impl Donnees {
                 rs::niveler_fixe(&mut r, &c, 50, &fixes);
             }
             {
+                let mut t = crate::suivi::tache("voies courtes");
+                let n = rs::redresser_courtes(&mut r, &c, &fixes);
+                t.detail(format!("{n} voies de moins de 12 m en ligne droite"));
+            }
+            {
                 let mut t = crate::suivi::tache("voies ferrées retirées");
                 let n = rs::retirer_rails(&mut r, &mut fixes);
                 t.detail(format!("{n} arêtes de voies ferrées"));
@@ -353,7 +358,7 @@ impl Donnees {
             let pl = {
                 let mut t = crate::suivi::tache("plaques de carrefour");
                 let b = crate::plaques::poser_avec(&mut r, &fixes);
-                t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes", b.plaques, b.groupes, b.branches, b.greffes));
+                t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes, {} rues d'anneaux", b.plaques, b.groupes, b.branches, b.greffes, b.anneaux));
                 b
             };
             t.detail(format!("{} nœuds, {} arêtes, souterrains : {} remis au sol, {} enfoncés, {} en tranchée, {} plaques", r.noeuds.len(), r.aretes.len(), so.courts, so.enfonces, so.tranchees, pl.plaques));
