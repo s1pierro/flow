@@ -42,7 +42,8 @@ const Y_ECART: f32 = 0.3;
 /// tant.
 const Y_PENTE: f32 = 0.08;
 /// La plus forte pente d'une plaque sur un terrain plat ; sur un terrain en pente,
-/// jusqu'à la pente moyenne de ses branches (sur leurs `PORTEE` premiers mètres), au plus
+/// jusqu'à la pente de son axe principal (`axe_principal`, sur ses `PORTEE` premiers
+/// mètres), au plus
 /// `PENTE_INCLINEE` : un carrefour dans une côte penche avec elle, sans rejeter toute la
 /// montée dans le tronçon entre deux plaques.
 const PENTE_MAX: f32 = 0.08;
@@ -109,6 +110,37 @@ fn principale(r: &Reseau, k: usize) -> bool {
 /// route, elle s'y greffe (`greffer`).
 fn niveau(r: &Reseau, k: usize) -> u8 {
     u8::from(principale(r, k))
+}
+
+/// Deux branches sont dans le prolongement l'une de l'autre à moins de tant (degrés).
+const AXE_ANGLE: f32 = 30.0;
+
+/// L'axe principal d'une plaque : parmi ses branches du meilleur rang, la paire la mieux
+/// alignée (à moins de `AXE_ANGLE`), la plus large à alignement presque égal. Rend la
+/// pente moyenne de ces deux branches ; rien s'il n'y a pas d'axe (un Y, des branches
+/// égales en étoile).
+fn axe_principal(b: &[(u8, f32, [f32; 2], f32)]) -> Option<f32> {
+    let meilleur = b.iter().map(|x| x.0).min()?;
+    let c: Vec<&(u8, f32, [f32; 2], f32)> = b.iter().filter(|x| x.0 == meilleur).collect();
+    let seuil = AXE_ANGLE.to_radians().cos();
+    let mut choix: Option<(f32, f32, f32)> = None; // (alignement, largeur, pente)
+    for i in 0..c.len() {
+        for j in i + 1..c.len() {
+            let al = -(c[i].2[0] * c[j].2[0] + c[i].2[1] * c[j].2[1]);
+            if al < seuil {
+                continue;
+            }
+            let (larg, pente) = (c[i].1 + c[j].1, 0.5 * (c[i].3 + c[j].3));
+            let mieux = match choix {
+                None => true,
+                Some((a0, l0, _)) => al > a0 + 0.02 || ((al - a0).abs() <= 0.02 && larg > l0),
+            };
+            if mieux {
+                choix = Some((al, larg, pente));
+            }
+        }
+    }
+    choix.map(|x| x.2)
 }
 
 fn longueur(q: &[[f32; 3]]) -> f32 {
@@ -359,8 +391,9 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
         let mut echantillons: Vec<(f32, f32, f32, f32)> = Vec::new();
         // Les bouts de route (direction, hauteur au loin, distance) pour la continuité
         let mut bouts_route: Vec<([f32; 2], f32, f32)> = Vec::new();
-        // La pente moyenne des branches (pondérée), pour la pente permise du plan
-        let (mut pente_w, mut pente_s) = (0.0f32, 0.0f32);
+        // Les branches (rang, largeur, direction depuis leur nœud, pente), pour l'axe
+        // principal et la pente permise du plan
+        let mut branches: Vec<(u8, f32, [f32; 2], f32)> = Vec::new();
         for &n in noeuds {
             let p = r.noeuds[n].p;
             echantillons.push((p[0], p[1], p[2], 4.0 * poids(sage_reel::ROUTE, 6.0)));
@@ -386,8 +419,13 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
                         bouts_route.push(([d[0] / l, d[1] / l], hauteur(&q, &abs, jusqu), jusqu));
                     }
                     if jusqu > 0.5 {
-                        pente_s += w * ((hauteur(&q, &abs, jusqu) - hauteur(&q, &abs, 0.0)) / jusqu).abs();
-                        pente_w += w;
+                        let i = abs.partition_point(|&y| y < jusqu).clamp(1, q.len() - 1);
+                        let t = ((jusqu - abs[i - 1]) / (abs[i] - abs[i - 1]).max(1e-6)).clamp(0.0, 1.0);
+                        let pt = entre(q[i - 1], q[i], t);
+                        let d = [pt[0] - q[0][0], pt[1] - q[0][1]];
+                        let l = d[0].hypot(d[1]).max(1e-6);
+                        let pente = ((hauteur(&q, &abs, jusqu) - hauteur(&q, &abs, 0.0)) / jusqu).abs();
+                        branches.push((crate::materialisation::rang(a.genre), a.largeur, [d[0] / l, d[1] / l], pente));
                     }
                     let mut s = PAS;
                     while s <= jusqu {
@@ -442,7 +480,7 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
             pn
         } else {
             let m = gr[0].hypot(gr[1]);
-            let permise = if pente_w > 0.0 { (pente_s / pente_w).clamp(PENTE_MAX, PENTE_INCLINEE) } else { PENTE_MAX };
+            let permise = axe_principal(&branches).map_or(PENTE_MAX, |p| p.clamp(PENTE_MAX, PENTE_INCLINEE));
             if m > permise {
                 gr = [gr[0] * permise / m, gr[1] * permise / m];
             }
