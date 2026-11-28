@@ -1737,6 +1737,8 @@ impl Relief3d {
                 }
                 (l >= 0.5).then(|| (q[j as usize][2] - q[i][2]) / l)
             };
+            // Le seuil : sur une rampe souterraine, la rupture qu'une voiture franchit
+            let seuil = |k: usize| if crate::reseau::est_rampe(&r, k) { crate::reseau::RAMPE_SEUIL } else { DENIV_SEUIL };
             let mut v: Vec<Cassure> = Vec::new();
             let pres = |n: usize, p: [f32; 3]| plat(r.noeuds[n].p, p);
             let mut voies = 0usize;
@@ -1751,7 +1753,7 @@ impl Relief3d {
                     // av est mesurée vers l'arrière : la pente dans le sens de parcours
                     // est son opposée
                     let av = -av;
-                    if (ap - av).abs() >= DENIV_SEUIL {
+                    if (ap - av).abs() >= seuil(k) {
                         ici.push((i, av, ap));
                     }
                 }
@@ -1798,14 +1800,14 @@ impl Relief3d {
                         let (Some(gi), Some(gj)) = (pente(&bouts[i].1, 0, 1), pente(&bouts[j].1, 0, 1)) else { continue };
                         // En arrivant par i : la pente est -gi ; en repartant par j : gj
                         let (av, ap) = (-gi, gj);
-                        if (ap - av).abs() >= DENIV_SEUIL {
+                        if (ap - av).abs() >= seuil(bouts[i].0).max(seuil(bouts[j].0)) {
                             v.push(Cassure { p: nd.p, aretes: (bouts[i].0, Some(bouts[j].0)), noeud: n, d_noeud: 0.0, avant: av, apres: ap });
                         }
                     }
                 }
             }
             v.sort_by(|a, b| b.ecart().total_cmp(&a.ecart()));
-            let t = format!("{voies} voies · {} cassures de pente de plus de {:.0} points", v.len(), DENIV_SEUIL * 100.0);
+            let t = format!("{voies} voies · {} cassures de pente de plus de {:.0} points ({:.0} sur les rampes souterraines)", v.len(), DENIV_SEUIL * 100.0, crate::reseau::RAMPE_SEUIL * 100.0);
             (t, v)
         })();
         self.cassures = cassures;

@@ -3201,6 +3201,15 @@ impl Contexte for Lieux {
             }
             // Les tracés du réseau en surimpression : « traces » (bilan), « traces
             // distance <m> », « traces tuiles <n> », « traces refaire »
+            // La recherche du Diagnostic (« Aller ») : un nœud, une voie (a…), du GPS
+            "aller" => {
+                let t = m[1..].join(" ");
+                self.recherche_diag.texte = t.clone();
+                self.recherche_diag.curseur = t.len();
+                let Some(carte) = self.carte.as_ref() else { return Some(Err("aucun lieu chargé".into())) };
+                self.trouve = chercher_reseau(t.trim(), &carte.donnees, self.trois_d.as_mut());
+                Ok(self.trouve.join("\n"))
+            }
             "traces" => {
                 let Some(r) = self.trois_d.as_mut() else { return Some(Err("pas de 3D".into())) };
                 let n = m.get(2).and_then(|s| s.parse::<f32>().ok());

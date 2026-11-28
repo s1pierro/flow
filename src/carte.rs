@@ -368,6 +368,11 @@ impl Donnees {
             };
             // Après les plaques, qui reprofilent les voies de leurs carrefours
             {
+                let mut t = crate::suivi::tache("rampes souterraines");
+                let n = rs::normaliser_rampes(&mut r, &c, &fixes);
+                t.detail(format!("{n} rampes normalisées (doucines)"));
+            }
+            {
                 let mut t = crate::suivi::tache("bouts d'impasse");
                 let n = rs::redresser_impasses(&mut r, &c, &fixes);
                 t.detail(format!("{n} bouts d'impasse repris en pente"));

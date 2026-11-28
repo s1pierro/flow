@@ -2943,6 +2943,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     redresser_courtes(&mut r, &c, &fixes);
     relever_culees(&mut r, &c, &fixes);
     retirer_rails(&mut r, &mut fixes);
+    normaliser_rampes(&mut r, &c, &fixes);
     redresser_impasses(&mut r, &c, &fixes);
     r
 }
@@ -3311,6 +3312,94 @@ pub fn relever_culees(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize
         n_ += 1;
     }
     n_
+}
+
+/// Une rampe souterraine : au plus cette longueur (m).
+pub const RAMPE_LONGUEUR: f32 = 40.0;
+/// La doucine d'une rampe (m) : à chaque bout, un palier à demi-pente.
+pub const RAMPE_DOUCINE: f32 = 3.5;
+/// La rupture de pente qu'une voiture franchit sans toucher (fraction) : au-delà, une
+/// rampe est normalisée ; c'est aussi le seuil du diagnostic sur les rampes.
+pub const RAMPE_SEUIL: f32 = 0.12;
+/// L'écart (m) au profil actuel qu'une rampe normalisée ne dépasse pas (elle garde à
+/// peu près sa place sous le relief).
+pub const RAMPE_ECART: f32 = 1.0;
+
+fn longueur_xz(q: &[[f32; 3]]) -> f32 {
+    q.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum()
+}
+
+/// Une rampe souterraine : une voie en tunnel (pas une voie ferrée) d'au plus
+/// `RAMPE_LONGUEUR`, dont un bout touche une voie au sol (l'accès d'un parking, d'un
+/// passage souterrain).
+pub fn est_rampe(r: &Reseau, k: usize) -> bool {
+    let a = &r.aretes[k];
+    if a.passage != Passage::Tunnel || a.genre == RAIL || a.points.len() < 2 || longueur_xz(&a.points) > RAMPE_LONGUEUR {
+        return false;
+    }
+    [a.a, a.b].iter().any(|&n| r.noeuds[n].aretes.iter().any(|&j| j != k && r.aretes[j].passage == Passage::Sol))
+}
+
+/// Les rampes souterraines (`est_rampe`) dont une rupture de pente dépasse `RAMPE_SEUIL`
+/// prennent le profil d'une rampe de parking entre leurs nœuds (inchangés) : une
+/// doucine de `RAMPE_DOUCINE` à demi-pente à chaque bout, la pente principale entre les
+/// deux ; si ce profil reste à moins de `RAMPE_ECART` de l'actuel. Sauf les voies fixes et
+/// celles que tient une contrainte. Rend le nombre de rampes normalisées.
+pub fn normaliser_rampes(r: &mut Reseau, v: &[Contrainte], fixes: &[bool]) -> usize {
+    let mut tenues = std::collections::HashSet::new();
+    for c in v {
+        tenues.insert(c.haut.0);
+        if let Some(b) = c.bas {
+            tenues.insert(b.0);
+        }
+    }
+    let mut n = 0;
+    for k in 0..r.aretes.len() {
+        if !est_rampe(r, k) || fixes.get(k).copied().unwrap_or(false) || tenues.contains(&k) {
+            continue;
+        }
+        let q = &r.aretes[k].points;
+        let m = q.len();
+        let abs: Vec<f32> = std::iter::once(0.0)
+            .chain(q.windows(2).scan(0.0f32, |s, w| {
+                *s += (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+                Some(*s)
+            }))
+            .collect();
+        let l = abs[m - 1];
+        if l < 1.0 {
+            continue;
+        }
+        // La plus forte rupture actuelle, d'un segment au suivant
+        let pentes: Vec<Option<f32>> = (0..m - 1).map(|i| { let d = abs[i + 1] - abs[i]; (d > 0.2).then(|| (q[i + 1][2] - q[i][2]) / d) }).collect();
+        let pentes: Vec<f32> = pentes.into_iter().flatten().collect();
+        let rupture = pentes.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+        if rupture <= RAMPE_SEUIL {
+            continue;
+        }
+        let (h0, h1) = (q[0][2], q[m - 1][2]);
+        let t = RAMPE_DOUCINE.min(l / 4.0);
+        let pente = (h1 - h0) / (l - t);
+        let profil = |d: f32| {
+            if d <= t {
+                h0 + pente * 0.5 * d
+            } else if d >= l - t {
+                h1 - pente * 0.5 * (l - d)
+            } else {
+                h0 + pente * (0.5 * t + d - t)
+            }
+        };
+        let nouveau: Vec<f32> = abs.iter().map(|&d| profil(d)).collect();
+        if (1..m - 1).any(|i| (nouveau[i] - q[i][2]).abs() > RAMPE_ECART) {
+            continue;
+        }
+        let a = &mut r.aretes[k];
+        for i in 1..m - 1 {
+            a.points[i][2] = nouveau[i];
+        }
+        n += 1;
+    }
+    n
 }
 
 /// Aux bouts d'impasse, la longueur (en partant du cul-de-sac) où une pente excessive est
