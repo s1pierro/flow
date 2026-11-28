@@ -2,7 +2,7 @@
 //! carrefour (un nœud d'au moins trois bouts carrossables, ou un groupe de tels nœuds
 //! reliés par des tronçons de moins de `LIEN` mètres) devient une plaque plane, ajustée
 //! sur le profil de toutes ses branches (la principale compte le plus), de pente au
-//! plus `PENTE_MAX`. Chaque branche est posée sur ce plan jusqu'à sa bouche (le rayon
+//! plus `PENTE_MAX` (davantage dans une côte, `PENTE_INCLINEE`). Chaque branche est posée sur ce plan jusqu'à sa bouche (le rayon
 //! de la plaque), puis rejoint son profil par un raccord lissé qui garde la pente du
 //! plan à la bouche et retrouve celle de la voie au bout : ni marche entre les
 //! branches, ni cassure à l'entrée du carrefour. Les tronçons intérieurs d'un groupe
@@ -41,8 +41,12 @@ const Y_ECART: f32 = 0.3;
 /// … et si chacune peut ensuite retrouver son profil sans dépasser sa pente de plus de
 /// tant.
 const Y_PENTE: f32 = 0.08;
-/// La plus forte pente d'une plaque.
+/// La plus forte pente d'une plaque sur un terrain plat ; sur un terrain en pente,
+/// jusqu'à la pente moyenne de ses branches (sur leurs `PORTEE` premiers mètres), au plus
+/// `PENTE_INCLINEE` : un carrefour dans une côte penche avec elle, sans rejeter toute la
+/// montée dans le tronçon entre deux plaques.
 const PENTE_MAX: f32 = 0.08;
+const PENTE_INCLINEE: f32 = 0.20;
 /// Une plaque d'un seul nœud dont les routes ne sont que deux bouts (bout à bout, quel
 /// que soit l'angle) : la rue continue, une voie secondaire s'y greffe ; le plan
 /// reprend la pente de chacun des deux bouts, sans plafond, pour que le profil de la
@@ -85,6 +89,8 @@ pub struct Bilan {
     pub greffes: usize,
     /// Les rues des anneaux (petits giratoires) posées entières sur leur plaque.
     pub anneaux: usize,
+    /// Les plaques plus pentues que `PENTE_MAX`, sur un terrain en pente.
+    pub inclinees: usize,
 }
 
 fn carrossable(r: &Reseau, k: usize) -> bool {
@@ -353,6 +359,8 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
         let mut echantillons: Vec<(f32, f32, f32, f32)> = Vec::new();
         // Les bouts de route (direction, hauteur au loin, distance) pour la continuité
         let mut bouts_route: Vec<([f32; 2], f32, f32)> = Vec::new();
+        // La pente moyenne des branches (pondérée), pour la pente permise du plan
+        let (mut pente_w, mut pente_s) = (0.0f32, 0.0f32);
         for &n in noeuds {
             let p = r.noeuds[n].p;
             echantillons.push((p[0], p[1], p[2], 4.0 * poids(sage_reel::ROUTE, 6.0)));
@@ -376,6 +384,10 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
                         let d = [pt[0] - p[0], pt[1] - p[1]];
                         let l = d[0].hypot(d[1]).max(1e-6);
                         bouts_route.push(([d[0] / l, d[1] / l], hauteur(&q, &abs, jusqu), jusqu));
+                    }
+                    if jusqu > 0.5 {
+                        pente_s += w * ((hauteur(&q, &abs, jusqu) - hauteur(&q, &abs, 0.0)) / jusqu).abs();
+                        pente_w += w;
                     }
                     let mut s = PAS;
                     while s <= jusqu {
@@ -430,8 +442,12 @@ pub fn poser_avec(r: &mut Reseau, rapides: &[bool]) -> Bilan {
             pn
         } else {
             let m = gr[0].hypot(gr[1]);
-            if m > PENTE_MAX {
-                gr = [gr[0] * PENTE_MAX / m, gr[1] * PENTE_MAX / m];
+            let permise = if pente_w > 0.0 { (pente_s / pente_w).clamp(PENTE_MAX, PENTE_INCLINEE) } else { PENTE_MAX };
+            if m > permise {
+                gr = [gr[0] * permise / m, gr[1] * permise / m];
+            }
+            if m > PENTE_MAX && permise > PENTE_MAX {
+                bilan.inclinees += 1;
             }
             [cx, cz, ch]
         };

@@ -365,7 +365,7 @@ impl Donnees {
             let pl = {
                 let mut t = crate::suivi::tache("plaques de carrefour");
                 let b = crate::plaques::poser_avec(&mut r, &fixes);
-                t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes, {} rues d'anneaux", b.plaques, b.groupes, b.branches, b.greffes, b.anneaux));
+                t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes, {} rues d'anneaux, {} plaques inclinées", b.plaques, b.groupes, b.branches, b.greffes, b.anneaux, b.inclinees));
                 b
             };
             // Après les plaques, qui reprofilent les voies de leurs carrefours
