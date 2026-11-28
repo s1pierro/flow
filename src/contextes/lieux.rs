@@ -2137,6 +2137,22 @@ impl Lieux {
                     for l in &self.trouve {
                         cx.paragraph(&mut b, l);
                     }
+                    // Le nœud choisi : ses coordonnées GPS, à copier (l'encart se ferme
+                    // quand on le touche, et le texte n'est pas sélectionnable)
+                    let choisi = self.trois_d.as_ref().and_then(|r| r.noeud_choisi).and_then(|n| {
+                        let d = carte.donnees.read().ok()?;
+                        let res = d.reseau_pret()?;
+                        let p = res.noeuds.get(n)?.p;
+                        let (lat, lon) = sage_reel::lambert93_inverse(d.lieu.x0 + p[0] as f64, d.lieu.y0 - p[1] as f64);
+                        Some((n, format!("{lat:.5}, {lon:.5}")))
+                    });
+                    if let Some((n, g)) = choisi {
+                        cx.paragraph(&mut b, &format!("Nœud {n} · GPS {g}"));
+                        if cx.button(&mut b, sub_id(base, 695), "Copier le GPS") {
+                            let ok = crate::acces::copier(&g);
+                            self.trouve = vec![if ok { format!("Copié : {g}") } else { "Le presse-papier n'a pas répondu.".into() }];
+                        }
+                    }
                     cx.section(&mut b, "Bords des chaussées");
                     cx.paragraph(&mut b, "Les bouts de bords qui ne se raccordent à rien, classés selon la distance au bout le plus proche ; toucher un bout y amène la vue.");
                     if cx.button(&mut b, sub_id(base, 687), "Diagnostiquer les bords") {
@@ -3459,6 +3475,16 @@ impl Contexte for Lieux {
 
     fn frappe(&mut self, f: FenetreId, cible: Id, frappe: Frappe, c: &mut Commun) -> bool {
         let k = f as usize;
+        // La recherche de l'onglet Diagnostic : Entrée y va comme « Aller »
+        if cible == sub_id(sub_id(LIEUX, k), 693) {
+            if self.recherche_diag.appliquer(frappe) {
+                c.clavier.fermer();
+                if let Some(carte) = self.carte.as_ref() {
+                    self.trouve = chercher_reseau(self.recherche_diag.texte.trim(), &carte.donnees, self.trois_d.as_mut());
+                }
+            }
+            return true;
+        }
         let ed = if cible == sub_id(NOM, k) {
             &mut self.nom
         } else if cible == sub_id(POSITION, k) {
