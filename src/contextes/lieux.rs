@@ -273,6 +273,10 @@ pub struct Lieux {
     rubrique: Option<&'static str>,
     /// La tranche ouverte du diagnostic des bords (distance au voisin).
     diag_tranche: Option<usize>,
+    /// L'outil Diagnostic : la recherche (un nœud, une voie « a… », des coordonnées
+    /// GPS) et ce qu'elle a trouvé.
+    recherche_diag: Edition,
+    trouve: Vec<String>,
     /// Pourquoi le renfort n'a pas pu démarrer (port pris…).
     erreur_renfort: Option<String>,
     /// Les tuiles sélectionnées de la maquette, et leur résumé (refait quand elles ou
@@ -365,6 +369,8 @@ impl Default for Lieux {
             zone_centre: None,
             rubrique: None,
             diag_tranche: None,
+            recherche_diag: Edition::default(),
+            trouve: Vec::new(),
             erreur_renfort: None,
             maquette3d: false,
             selection: Default::default(),
@@ -1585,6 +1591,8 @@ impl Lieux {
                 let mut l = crate::fils::decrire(&res, n);
                 if n < res.noeuds.len() {
                     l.insert(1.min(l.len()), crate::origine_noeuds::texte(&res, n));
+                    let p = res.noeuds[n].p;
+                    l.insert(1.min(l.len()), gps(&d.lieu, p[0], p[1]));
                 }
                 Some(l)
             });
@@ -2119,6 +2127,16 @@ impl Lieux {
                 if self.trois_d.is_none() {
                     cx.paragraph(&mut b, "Les diagnostics portent sur le réseau en 3D : passez en 3D (le cube de la barre).");
                 } else {
+                    cx.section(&mut b, "Chercher");
+                    cx.paragraph(&mut b, "Un nœud (63593), une voie (a28776) ou des coordonnées GPS (49.44222, 1.07596) : la vue y va.");
+                    clavier::champ(cx, &mut b, sub_id(base, 693), "Nœud, voie ou latitude, longitude", &mut self.recherche_diag, &mut c.clavier);
+                    if cx.button(&mut b, sub_id(base, 694), "Aller") {
+                        c.clavier.fermer();
+                        self.trouve = chercher_reseau(self.recherche_diag.texte.trim(), &carte.donnees, self.trois_d.as_mut());
+                    }
+                    for l in &self.trouve {
+                        cx.paragraph(&mut b, l);
+                    }
                     cx.section(&mut b, "Bords des chaussées");
                     cx.paragraph(&mut b, "Les bouts de bords qui ne se raccordent à rien, classés selon la distance au bout le plus proche ; toucher un bout y amène la vue.");
                     if cx.button(&mut b, sub_id(base, 687), "Diagnostiquer les bords") {
@@ -3844,4 +3862,63 @@ fn rubrique(cx: &mut Cx, b: &mut crate::widgets::Body, ouverte: &mut Option<&'st
         *ouverte = if est { None } else { Some(titre) };
     }
     *ouverte == Some(titre)
+}
+
+/// Les coordonnées GPS d'un point du lieu (x, z), en texte.
+fn gps(l: &sage_reel::Lieu, x: f32, z: f32) -> String {
+    let (lat, lon) = sage_reel::lambert93_inverse(l.x0 + x as f64, l.y0 - z as f64);
+    format!("GPS {lat:.5}, {lon:.5}")
+}
+
+/// La recherche de l'outil Diagnostic : un nœud (un nombre), une voie (« a » et un
+/// nombre) ou des coordonnées GPS (« latitude, longitude ») ; la vue y va, et ce qu'on
+/// en sait est rendu en lignes.
+fn chercher_reseau(t: &str, donnees: &std::sync::Arc<std::sync::RwLock<crate::carte::Donnees>>, vue: Option<&mut crate::relief3d::Relief3d>) -> Vec<String> {
+    let Some(vue) = vue else { return vec!["Passez en 3D pour chercher.".into()] };
+    let Ok(d) = donnees.read() else { return vec!["Les données sont occupées : réessayez.".into()] };
+    if t.is_empty() {
+        return Vec::new();
+    }
+    // Des coordonnées GPS
+    if let Some((a, b)) = t.split_once(|c: char| c == ',' || c == ';' || c == ' ').filter(|_| t.contains(',') || t.contains(';')) {
+        let lire = |s: &str| s.trim().parse::<f64>().ok();
+        let (Some(lat), Some(lon)) = (lire(a), lire(b)) else { return vec![format!("« {t} » : latitude, longitude en degrés, par exemple 49.44222, 1.07596")] };
+        let (x, y) = sage_reel::lambert93(lat, lon);
+        let (px, pz) = ((x - d.lieu.x0) as f32, (d.lieu.y0 - y) as f32);
+        let h = d.lieu.relief(px as f64, pz as f64) as f32;
+        vue.camera.cible = [px, h, pz];
+        vue.camera.distance = vue.camera.distance.min(120.0);
+        return vec![format!("x {px:.0} z {pz:.0} · relief {h:.1} m").replace('.', ",")];
+    }
+    let Some(res) = d.reseau_pret() else { return vec!["Le réseau n'est pas encore nivelé.".into()] };
+    // Une voie
+    if let Some(k) = t.strip_prefix(['a', 'A']).and_then(|k| k.trim().parse::<usize>().ok()) {
+        let Some(a) = res.aretes.get(k) else { return vec![format!("Pas de voie a{k} (il y en a {})", res.aretes.len())] };
+        let p = a.points[a.points.len() / 2];
+        vue.camera.cible = [p[0], p[2], p[1]];
+        vue.camera.distance = vue.camera.distance.min(60.0);
+        vue.noeud_choisi = None;
+        let tout = crate::reseau::decrire_voie(&res, &d.lieu, k);
+        let lignes: Vec<&str> = tout.lines().filter(|l| !l.trim().is_empty() && l.trim() != "ok").collect();
+        let mut v: Vec<String> = Vec::new();
+        // L'en-tête, le premier et le dernier point du profil, les croisements
+        let profil: Vec<&&str> = lignes.iter().filter(|l| l.starts_with(' ')).collect();
+        if let Some(t) = lignes.first() {
+            v.push(t.to_string());
+        }
+        v.push(gps(&d.lieu, p[0], p[1]));
+        if let (Some(a), Some(b)) = (profil.first(), profil.last()) {
+            v.push(format!("début {}", a.trim()));
+            v.push(format!("fin {}", b.trim()));
+        }
+        v.extend(lignes.iter().filter(|l| l.starts_with("sous elle") || l.starts_with("au-dessus")).map(|l| l.to_string()));
+        return v;
+    }
+    // Un nœud
+    if let Ok(n) = t.trim_start_matches(['n', 'N']).trim().parse::<usize>() {
+        let Some(nd) = res.noeuds.get(n) else { return vec![format!("Pas de nœud {n} (il y en a {})", res.noeuds.len())] };
+        vue.aller_bout(n, nd.p);
+        return vec![format!("Nœud {n} : son encart est sur la vue")];
+    }
+    vec![format!("« {t} » : un nœud (63593), une voie (a28776) ou latitude, longitude")]
 }
