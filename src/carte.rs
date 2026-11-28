@@ -325,6 +325,11 @@ impl Donnees {
                 t.detail(format!("{n} tabliers au-dessus de souterrains proches"));
             }
             {
+                let mut t = crate::suivi::tache("lacets");
+                let n = rs::adoucir_lacets(&mut r, &rapides.fixes);
+                t.detail(format!("{n} virages en épingle en pente régulière"));
+            }
+            {
                 let mut t = crate::suivi::tache("creux étroits");
                 let n = rs::combler_creux(&mut r, &rapides.fixes);
                 t.detail(format!("{n} dépressions étroites franchies en ligne droite"));

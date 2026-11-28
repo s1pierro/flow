@@ -2844,6 +2844,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     let rapides = lisser_rapides(&mut r, l);
     r.fixes = (0..r.aretes.len() as u32).filter(|&k| rapides.fixes[k as usize]).collect();
     poser_tabliers(&mut r);
+    adoucir_lacets(&mut r, &rapides.fixes);
     combler_creux(&mut r, &rapides.fixes);
     let c = contraintes(&r, l);
     let mut fixes = rapides.fixes;
@@ -2879,6 +2880,23 @@ pub const CREUX_PROFONDEUR: f32 = 3.0;
 const CREUX_TOLERANCE: f32 = 0.2;
 
 pub fn combler_creux(r: &mut Reseau, fixes: &[bool]) -> usize {
+    profils_sol(r, fixes, false)
+}
+
+/// Les lacets : là où une route au sol tourne de plus de `LACET_ANGLE` degrés entre
+/// `LACET_BRAS` mètres avant et après un point (un virage en épingle), son profil ne
+/// suit plus le relief (le tracé y coupe le flanc) : il passe en pente régulière de
+/// l'entrée à la sortie du virage. Rend le nombre de lacets.
+pub const LACET_BRAS: f32 = 15.0;
+pub const LACET_ANGLE: f32 = 120.0;
+
+pub fn adoucir_lacets(r: &mut Reseau, fixes: &[bool]) -> usize {
+    profils_sol(r, fixes, true)
+}
+
+/// Les chaînes de voies au sol carrossables (hors voies fixes) et leur profil : les
+/// creux franchis (deux passes), ou les lacets adoucis.
+fn profils_sol(r: &mut Reseau, fixes: &[bool], lacets: bool) -> usize {
     let na = r.aretes.len();
     let ok: Vec<bool> = (0..na)
         .map(|k| {
@@ -2904,15 +2922,15 @@ pub fn combler_creux(r: &mut Reseau, fixes: &[bool]) -> usize {
     // Deux passes : la seconde voit les carrefours relevés par la première (une voie qui
     // part d'un carrefour au bord d'un creux y trouve son bord)
     let mut creux = 0;
-    for _passe in 0..2 {
-        creux += combler_creux_passe(r, &ok, &bouts, &dir);
+    for _passe in 0..if lacets { 1 } else { 2 } {
+        creux += combler_creux_passe(r, &ok, &bouts, &dir, lacets);
     }
     creux
 }
 
 /// Une passe de `combler_creux` : les chaînes traversent un nœud de deux voies, ou un
 /// carrefour par la voie qui prolonge le mieux (à moins de 30°).
-fn combler_creux_passe(r: &mut Reseau, ok: &[bool], bouts: &[Vec<usize>], dir: &dyn Fn(&Reseau, usize, usize) -> [f32; 2]) -> usize {
+fn combler_creux_passe(r: &mut Reseau, ok: &[bool], bouts: &[Vec<usize>], dir: &dyn Fn(&Reseau, usize, usize) -> [f32; 2], lacets: bool) -> usize {
     let na = r.aretes.len();
     let mut vue = vec![false; na];
     let mut creux = 0;
@@ -2982,6 +3000,42 @@ fn combler_creux_passe(r: &mut Reseau, ok: &[bool], bouts: &[Vec<usize>], dir: &
         let mut h: Vec<f32> = pts.iter().map(|p| p.1).collect();
         let mut change = false;
         let mut j = 0;
+        if lacets {
+            let xz: Vec<[f32; 2]> = pts.iter().map(|p| { let q = r.aretes[p.2[0].0].points[p.2[0].1]; [q[0], q[1]] }).collect();
+            let limite = LACET_ANGLE.to_radians().cos();
+            // Pour chaque point, ses bras (le dernier point à LACET_BRAS avant, le premier
+            // à LACET_BRAS après) s'il tourne de plus de LACET_ANGLE entre eux
+            let serre = |i: usize| -> Option<(usize, usize)> {
+                let a = (0..i).rev().find(|&x| pts[i].0 - pts[x].0 >= LACET_BRAS)?;
+                let b = (i + 1..n).find(|&x| pts[x].0 - pts[i].0 >= LACET_BRAS)?;
+                let (u, v) = ([xz[i][0] - xz[a][0], xz[i][1] - xz[a][1]], [xz[b][0] - xz[i][0], xz[b][1] - xz[i][1]]);
+                let c = (u[0] * v[0] + u[1] * v[1]) / (u[0].hypot(u[1]) * v[0].hypot(v[1])).max(1e-6);
+                (c < limite).then_some((a, b))
+            };
+            let mut i = 0;
+            while i < n {
+                let Some((a, mut b)) = serre(i) else {
+                    i += 1;
+                    continue;
+                };
+                // Le virage entier : tant que les points suivants tournent aussi
+                let mut x = i + 1;
+                while x < n && x <= b {
+                    if let Some((_, b2)) = serre(x) {
+                        b = b.max(b2);
+                    }
+                    x += 1;
+                }
+                let (sa, sb, ha, hb) = (pts[a].0, pts[b].0, h[a], h[b]);
+                for y in a + 1..b {
+                    h[y] = ha + (hb - ha) * (pts[y].0 - sa) / (sb - sa).max(1e-3);
+                }
+                creux += 1;
+                change = true;
+                i = b + 1;
+            }
+            j = n;
+        }
         while j + 2 < n {
             // Le bord le plus loin au-delà duquel tout le creux reste sous la ligne
             let mut meilleur: Option<usize> = None;
