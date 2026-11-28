@@ -2873,7 +2873,7 @@ pub fn retirer_rails(r: &mut Reseau, fixes: &mut Vec<bool>) -> usize {
 /// en ligne droite : un pont qu'OSM ne connaît pas (une voie ferrée abandonnée, un
 /// chemin creux, un ruisseau busé). Le long des chaînes de voies au sol carrossables
 /// (à travers les nœuds de deux voies), hors voies fixes ; rend le nombre de creux.
-pub const CREUX_LARGEUR: f32 = 30.0;
+pub const CREUX_LARGEUR: f32 = 40.0;
 pub const CREUX_PROFONDEUR: f32 = 3.0;
 /// Ce dont un point du creux peut dépasser la ligne des bords.
 const CREUX_TOLERANCE: f32 = 0.2;
@@ -2892,24 +2892,49 @@ pub fn combler_creux(r: &mut Reseau, fixes: &[bool]) -> usize {
         bouts[r.aretes[k].a].push(k);
         bouts[r.aretes[k].b].push(k);
     }
-    // Un nœud traversé : deux voies retenues et rien d'autre
-    let passe_v: Vec<bool> = (0..nn).map(|n| bouts[n].len() == 2 && r.noeuds[n].aretes.len() == 2).collect();
-    let passe = |n: usize| passe_v[n];
+    // La direction de la voie k en partant du nœud n (vers son point à 5 m)
+    let dir = |r: &Reseau, k: usize, n: usize| -> [f32; 2] {
+        let a = &r.aretes[k];
+        let q: Vec<[f32; 3]> = if a.a == n { a.points.clone() } else { a.points.iter().rev().copied().collect() };
+        let s = q.iter().find(|p| (p[0] - q[0][0]).hypot(p[1] - q[0][1]) >= 5.0).unwrap_or(&q[q.len() - 1]);
+        let (dx, dz) = (s[0] - q[0][0], s[1] - q[0][1]);
+        let l = dx.hypot(dz).max(1e-6);
+        [dx / l, dz / l]
+    };
+    // Deux passes : la seconde voit les carrefours relevés par la première (une voie qui
+    // part d'un carrefour au bord d'un creux y trouve son bord)
+    let mut creux = 0;
+    for _passe in 0..2 {
+        creux += combler_creux_passe(r, &ok, &bouts, &dir);
+    }
+    creux
+}
+
+/// Une passe de `combler_creux` : les chaînes traversent un nœud de deux voies, ou un
+/// carrefour par la voie qui prolonge le mieux (à moins de 30°).
+fn combler_creux_passe(r: &mut Reseau, ok: &[bool], bouts: &[Vec<usize>], dir: &dyn Fn(&Reseau, usize, usize) -> [f32; 2]) -> usize {
+    let na = r.aretes.len();
     let mut vue = vec![false; na];
     let mut creux = 0;
+    let droit = 30f32.to_radians().cos();
     for k0 in 0..na {
         if !ok[k0] || vue[k0] {
             continue;
         }
         vue[k0] = true;
-        let suivre = |depart: usize, k: usize, vue: &mut Vec<bool>| -> Vec<(usize, bool)> {
+        let suivre = |r: &Reseau, depart: usize, k: usize, vue: &mut Vec<bool>| -> Vec<(usize, bool)> {
             let mut v = Vec::new();
             let (mut n, mut k) = (depart, k);
             for _ in 0..10_000 {
-                if !passe(n) {
-                    break;
-                }
-                let k2 = if bouts[n][0] == k { bouts[n][1] } else { bouts[n][0] };
+                // La voie qui prolonge k au-delà de n : la seule autre d'un nœud de deux
+                // voies, sinon la plus droite à moins de 30°
+                let d = dir(r, k, n);
+                let k2 = if bouts[n].len() == 2 && r.noeuds[n].aretes.len() == 2 {
+                    Some(if bouts[n][0] == k { bouts[n][1] } else { bouts[n][0] })
+                } else {
+                    bouts[n].iter().copied().filter(|&c| c != k).map(|c| (c, { let e = dir(r, c, n); d[0] * e[0] + d[1] * e[1] })).filter(|x| x.1 <= -droit).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0)
+                };
+                let Some(k2) = k2 else { break };
                 if vue[k2] || k2 == k {
                     break;
                 }
@@ -2922,8 +2947,8 @@ pub fn combler_creux(r: &mut Reseau, fixes: &[bool]) -> usize {
             }
             v
         };
-        let arriere = suivre(r.aretes[k0].a, k0, &mut vue);
-        let avant = suivre(r.aretes[k0].b, k0, &mut vue);
+        let arriere = suivre(r, r.aretes[k0].a, k0, &mut vue);
+        let avant = suivre(r, r.aretes[k0].b, k0, &mut vue);
         let mut chaine: Vec<(usize, bool)> = arriere.into_iter().rev().map(|(k, e)| (k, !e)).collect();
         chaine.push((k0, true));
         chaine.extend(avant);
@@ -2989,8 +3014,19 @@ pub fn combler_creux(r: &mut Reseau, fixes: &[bool]) -> usize {
                 for &(k, i) in &p.2 {
                     r.aretes[k].points[i][2] = h[x];
                 }
+                // Un nœud relevé : toutes ses voies y partent de sa nouvelle hauteur
                 if let Some(nd) = p.3 {
                     r.noeuds[nd].p[2] = h[x];
+                    for k in r.noeuds[nd].aretes.clone() {
+                        let a = &mut r.aretes[k];
+                        if a.a == nd {
+                            a.points[0][2] = h[x];
+                        }
+                        if a.b == nd {
+                            let m = a.points.len() - 1;
+                            a.points[m][2] = h[x];
+                        }
+                    }
                 }
             }
         }
