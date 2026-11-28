@@ -30,6 +30,13 @@ pub struct Trace<'a> {
     pub route: &'a Route,
 }
 
+/// Le genre des voies ferrées dans le réseau (au-delà des genres de voies) : des
+/// trains au sol ou sur un pont, lissées et fixées avec les voies rapides, pour que les
+/// routes passent dessus ou dessous ; retirées du réseau une fois nivelé.
+pub const RAIL: u8 = 200;
+/// Le gabarit sous une voie ferrée (le fil de contact), sans l'épaisseur du tablier.
+pub const GABARIT_RAIL: f32 = 5.0;
+
 pub fn traces(l: &Lieu) -> Vec<Trace<'_>> {
     let mut v: Vec<Trace> = l.routes.iter().map(|r| Trace { passage: Passage::Sol, route: r }).collect();
     v.extend(l.ponts.iter().map(|r| Trace { passage: Passage::Pont, route: r }));
@@ -395,6 +402,15 @@ impl Index {
 /// Le réseau des voies d'un lieu : tous les tracés (sol, ponts, tunnels) en un graphe.
 pub fn reseau(l: &Lieu) -> Reseau {
     let mut t: Vec<Brut> = traces(l).into_iter().filter(|x| x.route.points.len() >= 2).map(|x| Brut { passage: x.passage, niveau: x.route.niveau, files: x.route.files, genre: x.route.genre, revetement: x.route.revetement, largeur: x.route.largeur, points: x.route.points.clone() }).collect();
+    // Les voies ferrées des trains, au sol et en pont, après les voies : leurs arêtes et
+    // leurs nœuds viennent en dernier (`retirer_rails`)
+    {
+        use sage_reel::transports as tr;
+        for x in l.transports.rails.iter().filter(|x| x.mode == tr::TRAIN && x.ou != tr::TUNNEL && x.points.len() >= 2) {
+            let passage = if x.ou == tr::PONT { Passage::Pont } else { Passage::Sol };
+            t.push(Brut { passage, niveau: x.niveau, files: Default::default(), genre: RAIL, revetement: 0, largeur: tr::largeur(x.mode), points: x.points.clone() });
+        }
+    }
     // Les voies au sol relues sur le relief adouci (au lieu du profil du lieu, lissé
     // voie par voie le long de son axe) : toutes lisent la même surface, et se
     // rejoignent sans écart
@@ -405,11 +421,12 @@ pub fn reseau(l: &Lieu) -> Reseau {
     }
     let mut r = Reseau::default();
     // Les sommets de tous les tracés, au centimètre
+    // (au centimètre, voie ferrée) : un rail et une route ne partagent pas de nœud
     let compter = |t: &[Brut]| {
-        let mut s: HashMap<(i64, i64), usize> = HashMap::new();
+        let mut s: HashMap<((i64, i64), bool), usize> = HashMap::new();
         for x in t {
             for p in &x.points {
-                *s.entry(cle(*p)).or_default() += 1;
+                *s.entry((cle(*p), x.genre == RAIL)).or_default() += 1;
             }
         }
         s
@@ -426,12 +443,12 @@ pub fn reseau(l: &Lieu) -> Reseau {
         for (k, x) in t.iter().enumerate() {
             let n = x.points.len();
             for (debut, p) in [(true, x.points[0]), (false, x.points[n - 1])] {
-                if sommets[&cle(p)] > 1 {
+                if sommets[&(cle(p), x.genre == RAIL)] > 1 {
                     continue;
                 }
                 let mut best: Option<(usize, usize, f32, f32)> = None;
                 for &(kk, s) in index.autour(p) {
-                    if kk == k {
+                    if kk == k || (t[kk].genre == RAIL) != (x.genre == RAIL) {
                         continue;
                     }
                     let (u, d) = projeter(p, t[kk].points[s], t[kk].points[s + 1]);
@@ -492,7 +509,7 @@ pub fn reseau(l: &Lieu) -> Reseau {
         for v in index.cases.values() {
             for (x, &(k1, s1)) in v.iter().enumerate() {
                 for &(k2, s2) in &v[x + 1..] {
-                    if k1 == k2 || t[k1].passage != Passage::Sol || t[k2].passage != Passage::Sol {
+                    if k1 == k2 || t[k1].passage != Passage::Sol || t[k2].passage != Passage::Sol || t[k1].genre == RAIL || t[k2].genre == RAIL {
                         continue;
                     }
                     let (a, b, c, d) = (t[k1].points[s1], t[k1].points[s1 + 1], t[k2].points[s2], t[k2].points[s2 + 1]);
@@ -517,11 +534,11 @@ pub fn reseau(l: &Lieu) -> Reseau {
     // 3. Les nœuds : les bouts, et les sommets que partagent plusieurs tracés (ou un
     //    tracé qui repasse par lui-même) ; les tracés coupés en arêtes à leurs nœuds
     let sommets = compter(&t);
-    let mut numero: HashMap<(i64, i64), usize> = HashMap::new();
+    let mut numero: HashMap<((i64, i64), bool), usize> = HashMap::new();
     let [x0, z0, x1, z1] = l.etendue();
     let au_bord = |p: [f32; 3]| (p[0] as f64 - x0).min(x1 - p[0] as f64).min(p[1] as f64 - z0).min(z1 - p[1] as f64) < 1.0;
-    let mut noeud = |p: [f32; 3], r: &mut Reseau| -> usize {
-        *numero.entry(cle(p)).or_insert_with(|| {
+    let mut noeud = |p: [f32; 3], rail: bool, r: &mut Reseau| -> usize {
+        *numero.entry((cle(p), rail)).or_insert_with(|| {
             let origine = marques.get(&cle(p)).copied().unwrap_or(if au_bord(p) { Origine::Bord } else { Origine::Donnees });
             r.noeuds.push(Noeud { p, aretes: Vec::new(), origine });
             r.noeuds.len() - 1
@@ -531,8 +548,9 @@ pub fn reseau(l: &Lieu) -> Reseau {
         let n = x.points.len();
         let mut debut = 0;
         for i in 1..n {
-            if i == n - 1 || sommets[&cle(x.points[i])] > 1 {
-                let (a, b) = (noeud(x.points[debut], &mut r), noeud(x.points[i], &mut r));
+            let rail = x.genre == RAIL;
+            if i == n - 1 || sommets[&(cle(x.points[i]), rail)] > 1 {
+                let (a, b) = (noeud(x.points[debut], rail, &mut r), noeud(x.points[i], rail, &mut r));
                 let k = r.aretes.len();
                 r.aretes.push(Arete { a, b, points: x.points[debut..=i].to_vec(), passage: x.passage, genre: x.genre, largeur: x.largeur, revetement: x.revetement, files: x.files, niveau: x.niveau });
                 r.noeuds[a].aretes.push(k);
@@ -833,7 +851,7 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
     {
         let classes = Classes::new(l);
         for (k, a) in r.aretes.iter().enumerate() {
-            rapide[k] = sage_reel::carrossable(a.genre) && a.points.len() >= 2 && classes.classe(a) == sage_reel::circulation::CLASSE_RAPIDE;
+            rapide[k] = a.points.len() >= 2 && (a.genre == RAIL || (sage_reel::carrossable(a.genre) && classes.classe(a) == sage_reel::circulation::CLASSE_RAPIDE));
         }
     }
     let mut bilan = Rapides { fixes: rapide.clone(), ..Default::default() };
@@ -987,7 +1005,8 @@ pub fn lisser_rapides(r: &mut Reseau, l: &Lieu) -> Rapides {
             for dx in -1..=1 {
                 for dz in -1..=1 {
                     for &(c2, j) in grille.get(&(cx + dx, cz + dz)).map_or(&[][..], |v| &v[..]) {
-                        if c2 == c {
+                        // Une voie ferrée ne se jumelle qu'avec une voie ferrée
+                        if c2 == c || (r.aretes[e.pts[i].0].genre == RAIL) != (r.aretes[etats[c2].pts[j].0].genre == RAIL) {
                             continue;
                         }
                         let q = etats[c2].pts[j].2;
@@ -1387,7 +1406,7 @@ pub fn preparer_souterrains(r: &mut Reseau, l: &Lieu) -> Souterrains {
     let n = r.aretes.len();
     // Une voie au sol d'un niveau négatif (`layer` d'OSM sans `tunnel`) est un souterrain
     let mut negatifs = 0;
-    for a in r.aretes.iter_mut().filter(|a| a.passage == Passage::Sol && a.niveau < 0) {
+    for a in r.aretes.iter_mut().filter(|a| a.passage == Passage::Sol && a.niveau < 0 && a.genre != RAIL) {
         a.passage = Passage::Tunnel;
         negatifs += 1;
     }
@@ -1997,8 +2016,11 @@ fn contrainte_croisement(r: &Reseau, gabarits: &Gabarits, o1: Ou, o2: Ou) -> Con
     let genre = if pb == Tunnel && ph != Pont { Genre::TunnelSousVoie } else { Genre::PontSurVoie };
     let ab = &r.aretes[bas.0];
     let gabarit = gabarits.hauteur(ab.points[bas.1], ab.points[bas.1 + 1], bas.2);
+    // Une voie ferrée au-dessus passe sur un tablier, même posée au sol (un pont-rail)
+    let rail_dessus = r.aretes[haut.0].genre == RAIL;
     let ecart = match gabarit {
-        Some(g) => g + if ph == Tunnel { DALLE_ENTRE_SOUTERRAINS } else if ph == Pont { EPAISSEUR } else { DALLE_SOUS_SOL },
+        Some(g) => g + if ph == Tunnel { DALLE_ENTRE_SOUTERRAINS } else if ph == Pont || rail_dessus { EPAISSEUR } else { DALLE_SOUS_SOL },
+        None if ab.genre == RAIL => GABARIT_RAIL + EPAISSEUR,
         None if ab.genre == sage_reel::PIETONNE => GABARIT_PIETON + EPAISSEUR_PIETON,
         None => GABARIT + EPAISSEUR,
     };
@@ -2183,6 +2205,10 @@ pub fn contraintes(r: &Reseau, l: &Lieu) -> Vec<Contrainte> {
                     continue;
                 }
                 let (a1, a2) = (&r.aretes[k1], &r.aretes[k2]);
+                // Une voie ferrée et une voie au sol au même niveau : un passage à niveau
+                if (a1.genre == RAIL || a2.genre == RAIL) && a1.passage == Passage::Sol && a2.passage == Passage::Sol && a1.niveau == a2.niveau {
+                    continue;
+                }
                 // Deux arêtes qui partagent un nœud et s'y touchent ne se croisent pas
                 let Some((u1, u2)) = croise(a1.points[s1], a1.points[s1 + 1], a2.points[s2], a2.points[s2 + 1]) else { continue };
                 if !vus.insert(((k1, s1).min((k2, s2)), (k1, s1).max((k2, s2)))) {
@@ -2819,6 +2845,23 @@ pub fn nivele(l: &Lieu) -> Reseau {
     r.fixes = (0..r.aretes.len() as u32).filter(|&k| rapides.fixes[k as usize]).collect();
     poser_tabliers(&mut r);
     let c = contraintes(&r, l);
-    niveler_fixe(&mut r, &c, 50, &rapides.fixes);
+    let mut fixes = rapides.fixes;
+    niveler_fixe(&mut r, &c, 50, &fixes);
+    retirer_rails(&mut r, &mut fixes);
     r
+}
+
+/// Retire les voies ferrées du réseau nivelé (elles n'ont servi qu'à le contraindre) :
+/// leurs arêtes et leurs nœuds sont les derniers (`reseau`) ; rend leur nombre.
+pub fn retirer_rails(r: &mut Reseau, fixes: &mut Vec<bool>) -> usize {
+    let Some(na) = r.aretes.iter().position(|a| a.genre == RAIL) else { return 0 };
+    let n = r.aretes.len() - na;
+    debug_assert!(r.aretes[na..].iter().all(|a| a.genre == RAIL));
+    let nn = r.aretes[na..].iter().map(|a| a.a.min(a.b)).min().unwrap_or(r.noeuds.len());
+    r.aretes.truncate(na);
+    r.noeuds.truncate(nn);
+    fixes.truncate(na);
+    r.fixes.retain(|&k| (k as usize) < na);
+    r.tabliers.retain(|&k| (k as usize) < na);
+    n
 }

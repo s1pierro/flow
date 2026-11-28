@@ -330,13 +330,19 @@ impl Donnees {
                 t.detail(format!("{} contraintes", c.len()));
                 c
             };
+            let mut fixes = rapides.fixes;
             {
                 let _t = crate::suivi::tache("nivellement");
-                rs::niveler_fixe(&mut r, &c, 50, &rapides.fixes);
+                rs::niveler_fixe(&mut r, &c, 50, &fixes);
+            }
+            {
+                let mut t = crate::suivi::tache("voies ferrées retirées");
+                let n = rs::retirer_rails(&mut r, &mut fixes);
+                t.detail(format!("{n} arêtes de voies ferrées"));
             }
             let pl = {
                 let mut t = crate::suivi::tache("plaques de carrefour");
-                let b = crate::plaques::poser_avec(&mut r, &rapides.fixes);
+                let b = crate::plaques::poser_avec(&mut r, &fixes);
                 t.detail(format!("{} plaques ({} groupes), {} branches posées, {} greffes", b.plaques, b.groupes, b.branches, b.greffes));
                 b
             };
