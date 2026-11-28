@@ -758,10 +758,12 @@ impl Reseau {
 /// tunnel : l'écart de hauteur minimal entre deux voies qui se croisent dénivelées.
 pub const GABARIT: f32 = 4.5;
 /// Quand la hauteur limitée de la voie du dessous est connue (`maxheight` d'OSM, les
-/// gabarits du lieu) : l'écart est cette hauteur plus la dalle et sa marge, plus
-/// épaisse sous une voie au sol ou un pont (chaussée, remblai) qu'entre deux
-/// souterrains (une dalle armée mince).
-pub const DALLE_SOUS_SOL: f32 = 2.0;
+/// gabarits du lieu) : l'écart est cette hauteur plus la dalle. La hauteur limitée
+/// est celle du panneau, mesurée : sous une voie au sol, la dalle est mince (le
+/// passage sous la bretelle du giratoire du boulevard Gambetta : 3,5 m signalés,
+/// environ 3,8 m entre la bretelle et le giratoire) ; sous un pont, le tablier
+/// (`EPAISSEUR`) ; entre deux souterrains, une dalle armée.
+pub const DALLE_SOUS_SOL: f32 = 0.5;
 pub const DALLE_ENTRE_SOUTERRAINS: f32 = 1.0;
 /// Un gabarit s'applique à une voie s'il la longe à moins de tant (m), à moins de
 /// `GABARIT_ANGLE` degrés de sa direction.
