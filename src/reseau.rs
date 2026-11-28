@@ -2844,6 +2844,7 @@ pub fn nivele(l: &Lieu) -> Reseau {
     let rapides = lisser_rapides(&mut r, l);
     r.fixes = (0..r.aretes.len() as u32).filter(|&k| rapides.fixes[k as usize]).collect();
     poser_tabliers(&mut r);
+    combler_creux(&mut r, &rapides.fixes);
     let c = contraintes(&r, l);
     let mut fixes = rapides.fixes;
     niveler_fixe(&mut r, &c, 50, &fixes);
@@ -2864,4 +2865,135 @@ pub fn retirer_rails(r: &mut Reseau, fixes: &mut Vec<bool>) -> usize {
     r.fixes.retain(|&k| (k as usize) < na);
     r.tabliers.retain(|&k| (k as usize) < na);
     n
+}
+
+/// Les dépressions étroites sous les routes : une route au sol dont le relief plonge
+/// sur moins de `CREUX_LARGEUR` mètres, d'au moins `CREUX_PROFONDEUR`, et remonte de
+/// l'autre côté (les deux bords à moins de `PENTE_ROUTE` l'un de l'autre) les franchit
+/// en ligne droite : un pont qu'OSM ne connaît pas (une voie ferrée abandonnée, un
+/// chemin creux, un ruisseau busé). Le long des chaînes de voies au sol carrossables
+/// (à travers les nœuds de deux voies), hors voies fixes ; rend le nombre de creux.
+pub const CREUX_LARGEUR: f32 = 30.0;
+pub const CREUX_PROFONDEUR: f32 = 3.0;
+/// Ce dont un point du creux peut dépasser la ligne des bords.
+const CREUX_TOLERANCE: f32 = 0.2;
+
+pub fn combler_creux(r: &mut Reseau, fixes: &[bool]) -> usize {
+    let na = r.aretes.len();
+    let ok: Vec<bool> = (0..na)
+        .map(|k| {
+            let a = &r.aretes[k];
+            a.passage == Passage::Sol && sage_reel::carrossable(a.genre) && a.genre != RAIL && a.a != a.b && a.points.len() >= 2 && !fixes.get(k).copied().unwrap_or(false)
+        })
+        .collect();
+    let nn = r.noeuds.len();
+    let mut bouts: Vec<Vec<usize>> = vec![Vec::new(); nn];
+    for k in (0..na).filter(|&k| ok[k]) {
+        bouts[r.aretes[k].a].push(k);
+        bouts[r.aretes[k].b].push(k);
+    }
+    // Un nœud traversé : deux voies retenues et rien d'autre
+    let passe_v: Vec<bool> = (0..nn).map(|n| bouts[n].len() == 2 && r.noeuds[n].aretes.len() == 2).collect();
+    let passe = |n: usize| passe_v[n];
+    let mut vue = vec![false; na];
+    let mut creux = 0;
+    for k0 in 0..na {
+        if !ok[k0] || vue[k0] {
+            continue;
+        }
+        vue[k0] = true;
+        let suivre = |depart: usize, k: usize, vue: &mut Vec<bool>| -> Vec<(usize, bool)> {
+            let mut v = Vec::new();
+            let (mut n, mut k) = (depart, k);
+            for _ in 0..10_000 {
+                if !passe(n) {
+                    break;
+                }
+                let k2 = if bouts[n][0] == k { bouts[n][1] } else { bouts[n][0] };
+                if vue[k2] || k2 == k {
+                    break;
+                }
+                vue[k2] = true;
+                let a = &r.aretes[k2];
+                let endroit = a.a == n;
+                v.push((k2, endroit));
+                n = if endroit { a.b } else { a.a };
+                k = k2;
+            }
+            v
+        };
+        let arriere = suivre(r.aretes[k0].a, k0, &mut vue);
+        let avant = suivre(r.aretes[k0].b, k0, &mut vue);
+        let mut chaine: Vec<(usize, bool)> = arriere.into_iter().rev().map(|(k, e)| (k, !e)).collect();
+        chaine.push((k0, true));
+        chaine.extend(avant);
+        // Les points de la chaîne : (abscisse, hauteur, où l'écrire : arêtes et points,
+        // et le nœud d'un joint)
+        let mut s_ = 0.0f32;
+        let mut pts: Vec<(f32, f32, Vec<(usize, usize)>, Option<usize>)> = Vec::new();
+        for &(k, endroit) in &chaine {
+            let a = &r.aretes[k];
+            let m = a.points.len();
+            for x in 0..m {
+                let i = if endroit { x } else { m - 1 - x };
+                let p = a.points[i];
+                if x == 0 {
+                    let noeud = if endroit { a.a } else { a.b };
+                    if let Some(der) = pts.last_mut() {
+                        der.2.push((k, i));
+                        der.3 = Some(noeud);
+                        continue;
+                    }
+                    pts.push((0.0, p[2], vec![(k, i)], None));
+                    continue;
+                }
+                let q = pts.last().map(|d| (d.0, d.2[0])).unwrap();
+                let pq = r.aretes[q.1 .0].points[q.1 .1];
+                s_ += (p[0] - pq[0]).hypot(p[1] - pq[1]);
+                pts.push((s_, p[2], vec![(k, i)], None));
+            }
+        }
+        let n = pts.len();
+        let mut h: Vec<f32> = pts.iter().map(|p| p.1).collect();
+        let mut change = false;
+        let mut j = 0;
+        while j + 2 < n {
+            // Le bord le plus loin au-delà duquel tout le creux reste sous la ligne
+            let mut meilleur: Option<usize> = None;
+            let mut k = j + 2;
+            while k < n && pts[k].0 - pts[j].0 <= CREUX_LARGEUR {
+                let (sj, sk) = (pts[j].0, pts[k].0);
+                let ligne = |x: usize| h[j] + (h[k] - h[j]) * (pts[x].0 - sj) / (sk - sj).max(1e-3);
+                let pente = ((h[k] - h[j]) / (sk - sj).max(1e-3)).abs();
+                let dessous = (j + 1..k).all(|x| h[x] <= ligne(x) + CREUX_TOLERANCE);
+                let fond = (j + 1..k).map(|x| ligne(x) - h[x]).fold(f32::MIN, f32::max);
+                if pente <= PENTE_ROUTE && dessous && fond >= CREUX_PROFONDEUR {
+                    meilleur = Some(k);
+                }
+                k += 1;
+            }
+            if let Some(k) = meilleur {
+                let (sj, sk, hj, hk) = (pts[j].0, pts[k].0, h[j], h[k]);
+                for x in j + 1..k {
+                    h[x] = h[x].max(hj + (hk - hj) * (pts[x].0 - sj) / (sk - sj).max(1e-3));
+                }
+                creux += 1;
+                change = true;
+                j = k;
+            } else {
+                j += 1;
+            }
+        }
+        if change {
+            for (x, p) in pts.iter().enumerate() {
+                for &(k, i) in &p.2 {
+                    r.aretes[k].points[i][2] = h[x];
+                }
+                if let Some(nd) = p.3 {
+                    r.noeuds[nd].p[2] = h[x];
+                }
+            }
+        }
+    }
+    creux
 }

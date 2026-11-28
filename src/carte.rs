@@ -324,6 +324,11 @@ impl Donnees {
                 let n = rs::poser_tabliers(&mut r);
                 t.detail(format!("{n} tabliers au-dessus de souterrains proches"));
             }
+            {
+                let mut t = crate::suivi::tache("creux étroits");
+                let n = rs::combler_creux(&mut r, &rapides.fixes);
+                t.detail(format!("{n} dépressions étroites franchies en ligne droite"));
+            }
             let c = {
                 let mut t = crate::suivi::tache("contraintes");
                 let c = rs::contraintes(&r, &self.lieu);
